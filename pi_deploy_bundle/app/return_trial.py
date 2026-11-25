@@ -232,7 +232,7 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
         observed, reason = EntranceTrial_ObserveCheckpoint(
             robot, nav, leg, report_wait, miss_policy='continue_estimated' if advisory_tag else None,
             advisory_windows=None if advisory_tag else windows, quick_id=try_transfer_probe,
-            reuse_settled_cache=True)
+            reuse_settled_cache=attempt == 0)
         if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
             if try_transfer_probe and attempt == 0:
                 return observed, reason

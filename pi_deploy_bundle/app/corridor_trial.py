@@ -590,7 +590,7 @@ def _tag4_partial_advice(geometry, settings):
     target, band = settings['target_distance_m'],settings['deadband_m']
     if .02 <= near <= far <= target + band:
         return 'near'
-    _, travel = settings['two_step_distance_m']
+    travel = max(.10, settings['two_step_distance_m'][1])
     reserve = 0.04 if geometry['samples'] == 1 else 0.02
     if (target + band + travel + reserve <= near <= far <= settings['distance_window_m'][1]
             and geometry['latest_fresh']):
@@ -623,14 +623,21 @@ def _tag4_partial_forward_clearance(robot, nav, observation, settings):
 def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, boundary_first=False):
     _, observation = _refresh_checkpoint_pose(robot, nav, profile, 4, reuse_settled_cache=True, quick_id=True,
                                               boundary_first=boundary_first)
+    return _tag4_longitudinal_observation(robot, nav, observation, settings, approach_steps=approach_steps)
+
+
+def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approach_steps=None):
     plan = RoutePose_PlanTag4Longitudinal(observation, nav.cfg, settings, approach_steps=approach_steps)
     if observation.get('reused_boundary_frames'):
         plan['reused_boundary_frames'] = True
     ready = getattr(nav.io, 'visual_motion_ready', None)
     if plan['distance_verified'] and (ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(distance_verified=False, reason='Tag 4 depth expired before dispatch')
+    depth = plan.get('distance_bounds_m')
+    if plan.get('depth_confirmed') and depth is not None:
+        plan['confirmed_near'] = depth[1] < settings['target_distance_m'] - settings['deadband_m']
     if not plan['distance_verified']:
-        partial = _corridor_partial_geometry(robot, nav, observation, 4)
+        partial = _corridor_partial_geometry(robot, nav, observation, 4, fresh_only=True)
         if partial is not None:
             plan.update(partial_pose=partial, partial_advice=_tag4_partial_advice(partial,settings))
             if approach_steps is not None and 'distance_bounds_m' not in plan:
@@ -786,6 +793,37 @@ def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previo
     return split['remaining_steps']
 
 
+def _tag4_left_start_ready(plan):
+    return (plan.get('depth_confirmed') and plan['distance_verified'] and not plan['steps']
+            and not plan.get('confirmed_near') and not plan.get('confirmed_far'))
+
+
+def _tag4_retreat_before_left(robot, nav, profile, pose, leg, settings, plan, *,
+                              reserved_actions, monitor_only):
+    if robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']:
+        plan['retreat_reason_zh'] = 'Tag 4 距离偏近，但动作余量不足以先后退再左跨。'
+        return pose, False
+    action = 'cmd0_carry_backward2'
+    robot.action(action, **({'monitor_only_as': action} if monitor_only else {}))
+    leg['completed_actions'].append(action)
+    plan['completed_action'] = action
+    rechecks = plan['retreat_rechecks'] = []
+    for attempt in range(2):
+        robot.check()
+        measured, observation = _refresh_checkpoint_pose(robot, nav, profile, 4,
+            reuse_settled_cache=attempt == 0, quick_id=True)
+        after = _tag4_longitudinal_observation(robot, nav, observation, settings)
+        rechecks.append(after)
+        plan['after_distance_m'] = after.get('distance_m')
+        if _tag4_left_start_ready(after):
+            plan['approach_confirmed'] = True
+            return measured, True
+        if after.get('camera_contract_fault') or after['distance_verified']:
+            break
+    plan['retreat_reason_zh'] = 'Tag 4 后退两步，仍未确认左跨起点的前后距离。'
+    return {}, False
+
+
 def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoint,
                           reserved_actions, monitor_only=False):
     plan = _tag4_position_plan(robot, nav, profile, settings)
@@ -810,7 +848,7 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
                 plan['partial_reframe_action'] = 'cmd0_carry_backward2'
                 recheck = _tag4_position_plan(robot, nav, profile, settings)
                 plan['partial_reframe_recheck'] = recheck
-                if recheck.get('depth_confirmed') and recheck['distance_verified'] and not recheck['steps']:
+                if _tag4_left_start_ready(recheck):
                     plan['approach_confirmed'] = True
                     return {}, True
             return pose, False
@@ -828,20 +866,10 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
             or checkpoint.get('tag4_guarded_forward')
             or advisory in ('conflicting_frames','outside_heading_or_lateral_range')):
         return pose, False
-    if (not plan['distance_verified'] or not plan['steps']
-            or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']):
-        return pose, True
-    action = {-2: 'cmd0_carry_backward2', 2: 'carry_forward2', 4: 'carry_forward4'}[plan['steps']]
-    if monitor_only:
-        robot.action(action, monitor_only_as=action)
-    else:
-        robot.action(action)
-    leg['completed_actions'].append(action)
-    plan['completed_action'] = action
-    measured, observation = _refresh_checkpoint_pose(robot, nav, profile, 4)
-    after = RoutePose_PlanTag4Longitudinal(observation, nav.cfg, settings)
-    plan['after_distance_m'] = after.get('distance_m')
-    return measured, True
+    if plan['distance_verified'] and plan['steps'] == -2:
+        return _tag4_retreat_before_left(robot, nav, profile, pose, leg, settings, plan,
+                                         reserved_actions=reserved_actions, monitor_only=monitor_only)
+    return pose, not plan.get('confirmed_near')
 
 
 def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial, *, reserved_actions, monitor_only):
@@ -858,9 +886,10 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
     while True:
         robot.check()
         stamp = plan.get('latest_stamp_ns') or (plan.get('partial_pose') or {}).get('latest_stamp_ns',0)
-        ready = plan.get('depth_confirmed') and plan['distance_verified'] and not plan.get('confirmed_far')
+        ready = _tag4_left_start_ready(plan)
         measured_advance = plan['distance_verified'] and plan['steps']==2
-        partial_advance = not batches and plan.get('partial_advice') == 'far'
+        partial_advance = (plan.get('partial_advice') == 'far'
+                           and (not batches or (plan.get('partial_pose') or {}).get('samples', 0) >= 2))
         can_advance = ((measured_advance or partial_advance) and len(batches)<_TAG4_APPROACH_GROUPS
                        and robot.count+reserved_actions+1<=robot.cfg['max_body_macros_per_journey'])
         if need_reference and (ready or can_advance):
@@ -875,6 +904,12 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
         if ready and fresh(stamp):
             initial.update(approach_confirmed=True, after_distance_m=plan['distance_m'])
             return pose, True
+        if plan['distance_verified'] and plan['steps'] == -2 and fresh(stamp):
+            return _tag4_retreat_before_left(robot, nav, profile, pose, leg, settings, initial,
+                                             reserved_actions=reserved_actions, monitor_only=monitor_only)
+        if plan.get('camera_contract_fault'):
+            initial.update(approach_confirmed=False, last_approach_reason=plan['reason'])
+            return pose, False
 
         operation = None
         turn = None
@@ -904,8 +939,9 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
         else:
             stationary_checks += 1
         before = plan.get('distance_m')
-        pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 4)
-        plan = RoutePose_PlanTag4Longitudinal(observation, nav.cfg, settings)
+        pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 4,
+            reuse_settled_cache=operation is not None or turn is not None, quick_id=True)
+        plan = _tag4_longitudinal_observation(robot, nav, observation, settings)
         if operation:
             batches.append({'before_distance_m':before,'after_distance_m':plan.get('distance_m'),
                             'partial_pose_probe':partial_advance})
@@ -931,14 +967,20 @@ def _trim_tag2_dispatch(robot, nav, leg, pose, plan, *, continuous, reserved_act
     return True
 
 
-def _observe_tag2_approach(robot, nav, profile, leg, settings, candidate_counts):
+def _observe_tag2_approach(robot, nav, profile, leg, settings, candidate_counts, *, after_turn=False):
     _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg)
     # Refresh only before forward planning, including after a heading correction.
-    for _ in range(2):
-        pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True, reuse_settled_cache=True)
+    for attempt in range(2):
+        pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True,
+                                                     reuse_settled_cache=attempt == 0)
         checked = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings, candidate_counts=candidate_counts)
         if 'distance_bounds_m' in checked:
             break
+        if after_turn:
+            partial = _tag2_after_turn_partial_reframe(robot, nav, observation, settings)
+            if partial is not None:
+                checked['partial_forward_reframe'] = partial
+                break
     leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
     return pose, observation, checked
 
@@ -957,24 +999,36 @@ def _tag2_departure_distance_ok(plan, settings):
             and hi - lo <= .006)
 
 
-def _tag2_reframe_for_view(robot, nav, profile, leg, *, operation, distance_m, reserved_actions):
+def _tag2_reframe_for_view(robot, nav, profile, leg, *, operation, distance_m, reserved_actions,
+                           fresh_turn_pose=None):
     if (leg.get('tag2_close_reframe') or leg.get('tag2_far_reframe') or not Cmd0Motion_ContinuousReady(robot.backend)
             or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']):
         return None
     backward = operation == 'cmd0_carry_backward2'
     reason = ('Tag 2 太近，先后退两步把码移回画面，再复核右跨起点。' if backward
               else 'Tag 2 的少量新帧表明仍偏远，先前探两步，再复核右跨起点。')
+    robot.check()
+    if fresh_turn_pose is not None:
+        live = getattr(nav.io,'visual_motion_ready',None)
+        if (live is None or fresh_turn_pose['stance_completed_ns'] != robot.last_action_completed_ros_ns
+                or not live(fresh_turn_pose['latest_stamp_ns'])):
+            return None
     recovery = {'before_distance_m': distance_m, 'operation': operation, 'completed_steps': 0,
                 'status': 'rechecking', 'reason_zh': reason}
+    if fresh_turn_pose is not None:
+        recovery['after_turn_partial_pose'] = fresh_turn_pose
     leg['tag2_close_reframe' if backward else 'tag2_far_reframe'] = recovery
     _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg, reason_zh=recovery['reason_zh'])
-    robot.check()
-    robot.action(operation)
+    if fresh_turn_pose is not None:
+        robot.action(operation,monitor_only_as=operation)
+    else:
+        robot.action(operation)
     leg['completed_actions'].append(operation)
     recovery['completed_steps'] = 2
     recovery['windows'] = []
-    for _ in range(_TAG2_DEPARTURE_WINDOWS):
-        _, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True, reuse_settled_cache=True)
+    for attempt in range(_TAG2_DEPARTURE_WINDOWS):
+        _, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True,
+                                                  reuse_settled_cache=attempt == 0)
         recovery['windows'].extend(observation.get('quick_scan_windows', ()))
         if observation['detected']:
             recovery['status'] = 'recovered'
@@ -1010,6 +1064,32 @@ def _tag2_partial_reframe_plan(rows, nav, settings):
     if near+.01 <= low <= high <= far:
         plan['status'] = 'within_window_needs_fresh_pose'
     return plan
+
+
+def _tag2_after_turn_partial_reframe(robot, nav, observation, settings):
+    """Authorize one short probe with consistent post-turn frames from the same stance."""
+    scan = observation.get('scan') or {}
+    camera = observation.get('camera_info') or {}
+    pinned = nav.cfg.get('visual_micro',{}).get('camera_info',{})
+    stance = robot.last_action_completed_ros_ns
+    now = scan.get('now_ns')
+    restart = scan.get('camera_restart_ns', 0)
+    live = getattr(nav.io,'visual_motion_ready',None)
+    if (type(stance) is not int or observation.get('partial_pose_same_stance_ns') != stance
+            or type(now) is not int or type(restart) is not int or live is None
+            or scan.get('camera_healthy') is not True or scan.get('contract_match') is not True
+            or camera.get('ready') is not True or pinned.get('source_confirmed') is not True
+            or not camera.get('fingerprint') or camera['fingerprint'] != pinned.get('expected_fingerprint')):
+        return None
+    cutoff = max(stance, restart)
+    age_limit = nav.cfg['max_age_s']*1e9
+    rows = [row for row in observation.get('partial_pose_rows',())
+            if type(row.get('stamp_ns')) is int and cutoff < row['stamp_ns'] <= now
+            and now-row['stamp_ns'] <= age_limit]
+    plan = _tag2_partial_reframe_plan(rows,nav,settings)
+    if plan.get('samples',0) < 2 or plan.get('operation') != 'carry_forward2' or not live(plan['latest_stamp_ns']):
+        return None
+    return dict(plan,stance_completed_ns=stance)
 
 
 def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading_changed,
@@ -1068,8 +1148,9 @@ def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading
     _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg,
                      reason_zh='复核 Tag 2 的前后距离，再决定是否右跨。')
     healthy = False
-    for _ in range(_TAG2_DEPARTURE_WINDOWS):
-        _, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True, reuse_settled_cache=True)
+    for attempt in range(_TAG2_DEPARTURE_WINDOWS):
+        _, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True,
+                                                  reuse_settled_cache=attempt == 0)
         observed = observation.get('scan') or {}
         recheck['windows'].extend(observation.get('quick_scan_windows', ()))
         if observation['detected']:
@@ -1210,9 +1291,22 @@ def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
             if turn is not None:
                 initial.setdefault('heading_recovery', []).append(turn)
                 last_turn = turn
-                pose, observation, latest = _observe_tag2_approach(robot, nav, profile, leg, settings, candidate_counts)
+                pose, observation, latest = _observe_tag2_approach(robot, nav, profile, leg, settings,
+                                                                candidate_counts,after_turn=True)
                 turn['after_error_deg'] = latest.get('heading_deg')
                 initial['after_scan'] = observation.get('scan')
+                partial = latest.get('partial_forward_reframe')
+                if partial is not None:
+                    turn['partial_after_error_deg'] = partial['heading_deg']
+                    recovered = _tag2_reframe_for_view(robot,nav,profile,leg,operation='carry_forward2',
+                        distance_m=partial['distance_m'],reserved_actions=reserved_actions,fresh_turn_pose=partial)
+                    if recovered is not None:
+                        pose = _measure(robot,nav,profile,recovered)
+                        latest = RoutePose_PlanTag2ForwardTrial(recovered,nav.cfg,settings,
+                                                                candidate_counts=candidate_counts)
+                        leg['tag2_side_hint'] = RoutePose_TrialLateralHint(recovered,nav.cfg,2)
+                    elif leg.get('tag2_far_reframe',{}).get('completed_steps') == 2:
+                        latest['reason'] = 'Tag 2 转后已前探两步，右跨起点仍待确认。'
                 continue
         if not refreshed and (latest.get('heading_reobserve_required') or not fresh):
             refreshed = True
@@ -1502,7 +1596,7 @@ def _tag5_partial_forward_probe(robot, nav, settings, leg, approach):
         _forward_actions(step['steps'], continuous=True, legacy=False) for step in approach[1:])
     if not all(trimmed_groups) or robot.count + sum(map(len,trimmed_groups)) + 2 > robot.cfg['max_body_macros_per_journey']:
         return None
-    geometry = _corridor_partial_geometry(robot, nav, leg, 5)
+    geometry = _corridor_partial_geometry(robot, nav, leg, 5, fresh_only=True)
     if geometry is None:
         return None
     leg['tag5_partial_pose'] = geometry
@@ -1639,7 +1733,7 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 reason = 'Tag 5 有部分帧，门口位姿待复扫。'
             _report_progress(robot, 'cmd0_tag5_entry_wait', 5, 5, reason_zh=reason)
         _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5,
-                                                   reuse_settled_cache=True, quick_id=True)
+                                                   reuse_settled_cache=idle_windows == 0, quick_id=True)
 
 
 def _try_tag5_visual_turn(robot, plan, turns, *, reserved_actions):
@@ -1800,9 +1894,10 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
             pose, strafe_ready = _trim_tag4_before_left(robot, nav, profile, pose, leg, tag4_trial,
                 checkpoint=result['legs'][-2],
                 reserved_actions=required_macros[name] + after_leg, monitor_only=use_tag5_passage and expected_id == 5)
-            if not strafe_ready:
-                return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, 'Tag 4 补进后仍未确认左跨起点。')
             tag4_trim = leg['tag4_forward_trim']
+            if not strafe_ready:
+                return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, tag4_trim.get(
+                    'retreat_reason_zh', 'Tag 4 进近复查后仍未确认左跨起点。'))
             if tag4_trim.get('depth_confirmed') or tag4_trim.get('approach_confirmed'):
                 leg.update(departure_tag_confirmed=True,last_confirmed_tag=4)
                 result['checkpoint'] = 4

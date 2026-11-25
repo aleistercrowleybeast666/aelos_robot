@@ -10,7 +10,7 @@ from cmd0_motion import (COMMAND0_TRANSFER_FORWARD_STEPS, TRANSFER_FORWARD9_ACTI
                          PLACE_ACTION as CMD0_PLACE_ACTION, PICKUP_BACKWARD4_ACTION, PICKUP_BACKWARD6_ACTION,
                          PICKUP_BACKWARD8_ACTION, PICKUP_EXIT_ACTIONS)
 from heading_guard import (CARRY_HEADING_ACTIONS, CORRIDOR_HEADING_ACTIONS,
-                           MagneticDataUnavailable, MagneticLoss_IsRecoverable)
+                           MagneticDataUnavailable, MagneticLoss_IsRecoverable, MicroTrialStopped)
 from micro_step_test import TURN_TEST_STEPS
 from nav_observation import MAGNETIC_INSUFFICIENT_SAMPLES
 
@@ -596,7 +596,8 @@ class Robot:
         retry_magnetic=getattr(nav.io,'retry_magnetic_preflight',None) if magnetic else None
         magnetic_health=getattr(nav.io,'magnetic_capture_health',lambda:{}) if magnetic else None
         visual=nav.cfg.get('visual_micro',{})
-        retry_camera=self._allows_missing_magnetic() and visual.get('execute')
+        optional_magnetic=self._allows_missing_magnetic()
+        retry_camera=optional_magnetic and visual.get('execute')
         wall_limit=max(camera_s*(2 if retry_camera else 1),magnetic_window*(2 if retry_magnetic is not None else 1))+1.
         def reader_check():
             # No owner/backend access from readers; only the task thread checks owner state.
@@ -622,6 +623,7 @@ class Robot:
         def magnet():
             for attempt in range(2):
                 guard=HeadingGuard(nav.cfg,nav.io,MagneticReference(nav.cfg['magnetic']),reader_check,self.clock)
+                guard.allow_missing_magnetic=optional_magnetic
                 try:
                     result,sample=guard.sample('empty')
                     if sample is None or not sample.get('capture_verified') or not nav.io.motion_capture_verified:
@@ -631,13 +633,13 @@ class Robot:
                     magnetic_attempts.append(dict(health,verified=False))
                     reader_check()
                     reason=getattr(exc,'guard_reason',str(exc))
+                    needs_samples=(isinstance(exc,MagneticDataUnavailable) or MAGNETIC_INSUFFICIENT_SAMPLES in reason)
                     if attempt == 0 and retry_magnetic is not None:
-                        waiting_for_samples=(health.get('configured') and not health.get('fault')
-                                             and MAGNETIC_INSUFFICIENT_SAMPLES in reason)
+                        waiting_for_samples=(health.get('configured') and not health.get('fault') and needs_samples)
                         if waiting_for_samples or retry_magnetic():
                             continue
-                    if (self._allows_missing_magnetic() and MagneticLoss_IsRecoverable(health)
-                            and (MAGNETIC_INSUFFICIENT_SAMPLES in reason or health.get('recoverable_interruption'))):
+                    if (optional_magnetic and MagneticLoss_IsRecoverable(health)
+                            and (needs_samples or health.get('recoverable_interruption'))):
                         return None  # Only the task thread can enter the camera-guided route state.
                     raise MagneticPreflightError(reason,health) from exc
                 magnetic_attempts.append(dict(magnetic_health(),verified=True))
@@ -666,7 +668,7 @@ class Robot:
                 if not health.get('camera_healthy',False):raise RuntimeError('camera or AR stream stale after parallel preflight; no motion permitted')
                 if nav.cfg.get('visual_micro',{}).get('execute') and not health.get('camera_info',{}).get('ready'):
                     raise RuntimeError('CameraInfo stale after parallel preflight; no motion permitted')
-            if magnetic and not nav.io.motion_capture_verified:
+            if magnetic and (results.get('magnetic') is None or not nav.io.motion_capture_verified):
                 health=magnetic_health()
                 if not self._enter_magnetic_route_fallback(health,'sensor_preflight',list(magnetic_attempts)):
                     raise MagneticPreflightError('magnetic capture unhealthy after parallel preflight',health)
@@ -1747,7 +1749,16 @@ def execute(plan,backend,robot_factory=Robot):
                 if monitor.clock()>monitor.deadline:raise RuntimeError('stand observation timed out')
             monitor.check=manual_check
         try:
-            monitor.monitor_heading(name,allow_correction=False)
+            try:
+                monitor.monitor_heading(name,allow_correction=False)
+            except MicroTrialStopped as exc:
+                if name!='stand':raise
+                # The MCU already replied COMPLETE. Only the auxiliary magnetic read failed.
+                monitor.check()
+                monitor.events.append({'stand_observation':{
+                    'status':'magnetic_diagnostic_unavailable','protocol_completed':True,
+                    'reason_zh':'已收到站姿复位完成回执，磁航向诊断暂不可用。',
+                    'diagnostic':getattr(exc,'error_details',None) or getattr(exc,'guard_reason',str(exc))}})
             return list(monitor.events)
         finally:monitor.close_navigation()
     if mode in CALIBRATION_STEPS:

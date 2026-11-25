@@ -16,6 +16,7 @@ _CORRIDOR_MEDIUM_LEFT_TRIGGER_DEG = 15.
 _CARRY_STATIONARY_RECHECK_WINDOWS = 2
 _FEEDBACK_SCOPE_FIELDS = ('capture_session', 'load_epoch', 'owner_observation_scope', 'calibration_id')
 _STREAM_INTERRUPTION_REASONS = frozenset(('capture_stream_unhealthy', 'sample_stale'))
+_UNSTABLE_MAGNETIC_WINDOWS = frozenset(('magnetic heading unstable', 'magnetic field magnitude unstable within window'))
 _CARRY_NO_TURN_REASONS = frozenset(('unreliable_or_oversized_prediction',
     'insufficient_worst_case_improvement', 'insufficient_predicted_improvement'))
 
@@ -175,6 +176,14 @@ class HeadingGuard:
                     exc.error_details['reason_zh']=report['reason_zh']
                 raise exc
 
+    def _defer_expired_target(self, failures, report=None):
+        if ('target_reference_expired' in failures
+                and set(failures)-{'target_reference_expired'} <= _STREAM_INTERRUPTION_REASONS):
+            reason = 'magnetic heading reference expired before feedback could be verified'
+            advisory = dict(report or {}, reason=reason, status='magnetic_reference_expired',
+                            reason_zh='磁航向参考过期，按预定路线进入下一处扫码点。')
+            self._defer_magnetic_data(reason,stage='magnetic_reference_age',report=advisory)
+
     def sample(self, load, action_completed_monotonic=None, *, stationary_retry=False):
         rebind = getattr(self.io, 'retry_magnetic_after_action', None)
         if ((action_completed_monotonic is None and not stationary_retry) or rebind is None or
@@ -186,7 +195,8 @@ class HeadingGuard:
         for attempt in range(2):
             result, sample = self._sample_once(load, action_completed_monotonic,
                                                defer_missing=True, reobserve_after=reobserve_after)
-            if result.get('reason') != MAGNETIC_INSUFFICIENT_SAMPLES:
+            unstable = result.get('window_issue') in _UNSTABLE_MAGNETIC_WINDOWS
+            if result.get('reason') != MAGNETIC_INSUFFICIENT_SAMPLES and not unstable:
                 if attempts:
                     attempts.append(self.io.magnetic_capture_health())
                     result['magnetic_sampling_attempts'] = attempts
@@ -208,12 +218,14 @@ class HeadingGuard:
                 detail = '磁力计采样中断，未能重新建立采样窗口。'
             elif fault:
                 detail = '磁力计数据来源或采样校验未通过。'
+            elif unstable:
+                detail = '两次静止采样的磁读数仍不稳定。'
             else:
                 detail = '磁力计重采后仍未取得足够的新样本。'
             reason = 'fresh magnetic sample unavailable: '+str(result)
             if self.allow_missing_magnetic and MagneticLoss_IsRecoverable(health):
                 raise MagneticDataUnavailable(reason,health,
-                    stage='stationary_heading' if stationary_retry else 'post_action_heading',attempts=attempts)
+                    stage='stationary_heading' if stationary_retry or unstable else 'post_action_heading',attempts=attempts)
             try:
                 self.fault(reason)
             except MicroTrialStopped as exc:
@@ -278,10 +290,11 @@ class HeadingGuard:
         probe = MagneticReference(self.cfg['magnetic'])
         result = probe.refresh(rows, 0., now, after, load, None)
         if result['status'] != 'updated':
-            if (result.get('reason')=='magnetic heading unstable' and rows
+            if (self.allow_missing_magnetic and result.get('reason') in _UNSTABLE_MAGNETIC_WINDOWS and rows
                     and all(r.get('capture_source')=='verified_sensor_capture' for r in rows)):
-                self._defer_magnetic_data('magnetic heading remains unstable after a stationary sample',
-                                          stage='stationary_heading')
+                if defer_missing:
+                    return dict(result,window_issue=result['reason']),None
+                self._defer_magnetic_data(result['reason'],stage='stationary_heading')
             if not (defer_missing and result.get('reason') == MAGNETIC_INSUFFICIENT_SAMPLES):
                 self.fault('fresh magnetic sample unavailable: '+str(result))
             return result, None
@@ -430,6 +443,8 @@ class HeadingGuard:
         failures=faults(initial)
         if failures or not all(initial.get(key)==before.get(key) for key in _FEEDBACK_SCOPE_FIELDS):
             reason='unexpected turn observation rejected: '+','.join(failures or ['feedback_scope_changed'])
+            if all(initial.get(key)==before.get(key) for key in _FEEDBACK_SCOPE_FIELDS):
+                self._defer_expired_target(failures,report)
             self._defer_stream_interruption(reason,failures)
             self.fault(reason,report)
         previous=initial
@@ -442,9 +457,13 @@ class HeadingGuard:
                 raise
             if self.allow_missing_magnetic and not revalidating_target:
                 result,settled=self._recheck_magnetic_field(load,result,settled,report)
-            if (settled is None or faults(settled)
-                    or not all(settled.get(key)==initial.get(key) for key in _FEEDBACK_SCOPE_FIELDS)
-                    or min(settled['decision_capture_times'])<=max(previous['decision_capture_times'])):
+            independent = (settled is not None
+                and all(settled.get(key)==initial.get(key) for key in _FEEDBACK_SCOPE_FIELDS)
+                and min(settled.get('decision_capture_times') or [float('-inf')])>max(previous['decision_capture_times']))
+            failures = faults(settled)
+            if independent:
+                self._defer_expired_target(failures,report)
+            if not independent or failures:
                 self.fault('independent stationary verification unavailable; no further motion',report)
             evidence['settled_capture_times']=settled['decision_capture_times']
             evidence['settled_change_deg']=wrap(sign*(settled['raw_heading_deg']-before['raw_heading_deg']))
@@ -458,7 +477,8 @@ class HeadingGuard:
 
     def _recheck_magnetic_field(self,load,result,sample,report):
         """Re-read a field-strength excursion before dropping magnetic correction."""
-        if self._target_observation_faults(sample,load)!=['magnetic_magnitude_changed']:
+        ignored = {'target_reference_expired'} if self.allow_missing_magnetic else set()
+        if set(self._target_observation_faults(sample,load))-ignored != {'magnetic_magnitude_changed'}:
             return result,sample
         fresh_result,fresh=self.sample(load,action_completed_monotonic=self.clock())
         if (not fresh or not all(fresh.get(key)==sample.get(key) for key in _FEEDBACK_SCOPE_FIELDS)
@@ -471,7 +491,7 @@ class HeadingGuard:
             'first_heading_deg':sample['raw_heading_deg'],'rechecked_heading_deg':fresh['raw_heading_deg'],
             'rechecked_norm':fresh['norm'],'rechecked_capture_times':fresh['decision_capture_times'],
             'rechecked_faults':faults})
-        if faults==['magnetic_magnitude_changed']:
+        if set(faults)-ignored == {'magnetic_magnitude_changed'}:
             report.update(status='magnetic_field_recheck_unusable',
                           reason='magnetic field variation persisted after stationary recheck',
                           reason_zh='原地复测后磁场仍偏离参考，暂用原路线和下一处扫码点。')
@@ -546,6 +566,7 @@ class HeadingGuard:
             _,sample=self.sample(load,action_completed_monotonic=action_completed_monotonic)
             reasons=self._target_observation_faults(sample,load)
         if reasons:
+            self._defer_expired_target(reasons)
             self._defer_stream_interruption('magnetic stream interrupted before configured turn',reasons)
             report=dict(status='correction_locked',action=action,reason='coarse turn observation rejected',
                         failures=reasons,use_original_macro=False,sample=sample,reference=anchor)
@@ -1034,6 +1055,7 @@ class HeadingGuard:
         if route_feedback:
             result,sample=self._recheck_magnetic_field(load,result,sample,report)
             report['sample']=result
+        self._defer_expired_target(self._target_observation_faults(sample,load),report)
         if recovery:
             failures=self._target_observation_faults(sample,load)
             if failures:
@@ -1274,6 +1296,7 @@ class HeadingGuard:
             raise
         if route_feedback:
             verified,post=self._recheck_magnetic_field(load,verified,post,report)
+        self._defer_expired_target(self._target_observation_faults(post,load),report)
         sign = self.cfg['magnetic']['heading_sign']
         confirmed_feedback = False
         if recovery and post is not None and not self._target_observation_faults(post,load):
