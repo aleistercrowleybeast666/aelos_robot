@@ -576,14 +576,28 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
                 estimated_landing_m=landing, reason='Tag 2 forward count fitted to the estimated remaining distance')
 
 
-def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_steps=None):
+def RoutePose_Tag4DepthOnly(bounds, settings):
+    return bool(bounds and bounds[0] > settings.get('heading_use_within_m', .35))
+
+
+def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_steps=None, tag3_heading=None):
     """Use fresh Tag 4 depth to shorten an approach or trim before the left traverse."""
     plan = {'steps': approach_steps if approach_steps is not None else 0, 'distance_verified': False}
     evidence, problem = _trial_ground_depth(checkpoint, nav_cfg, 4)
     if problem:
         return dict(plan, reason=problem)
-    plan.update(evidence)
     near, far = evidence['distance_bounds_m']
+    depth_only = RoutePose_Tag4DepthOnly((near, far), settings)
+    if depth_only:
+        plan['heading_authority'] = 'prior_route_reference'
+    elif tag3_heading is not None and approach_steps is not None:
+        # Both outbound markers use the same route heading. Keep Tag 4 for
+        # position and preserve its measured yaw separately for the report.
+        plan.update(heading_authority='current_tag3', tag4_observed_heading_deg=evidence['heading_deg'],
+                    heading_observed_at_ns=tag3_heading['latest_stamp_ns'])
+        evidence = dict(evidence, **{key: tag3_heading[key] for key in
+            ('heading_deg', 'max_abs_yaw_deg', 'max_heading_deviation_deg', 'projection_bounds')})
+    plan.update(evidence)
     projection = evidence['projection_bounds']
     window = settings['distance_window_m']
     if far - near > .025 or projection[0] <= 0:
@@ -592,6 +606,21 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
     if approach_steps is not None and very_near:
         return dict(plan, distance_verified=True, steps=0, reason='Tag 4 too near for a forward group')
     target, band = settings['target_distance_m'], settings['deadband_m']
+    if depth_only:
+        # Distant marker orientation is noisy even across a stable window. Retain
+        # the signed measurement in the report, but select the gait by range alone.
+        if far > window[1]:
+            return dict(plan, reason='Tag 4 beyond usable depth; keep the nominal route')
+        # A displaced or oblique distant image warrants checking again at the
+        # four-step boundary. Its yaw never sets the turn direction.
+        long_clear = evidence['max_abs_lateral_m'] <= .10 and evidence['max_abs_yaw_deg'] <= 8.
+        groups = ((8, 4, 2) if approach_steps == 8 and long_clear else
+                  (4, 2) if approach_steps in (4, 8) else (2,))
+        two_step_max = max(.10, settings['two_step_distance_m'][1])
+        steps = next((group for group in groups if near-group/2*two_step_max >= target-band), 0)
+        return dict(plan, distance_verified=True, steps=steps, confirmed_far=True,
+                    depth_confirmed=approach_steps is None,
+                    reason='distant Tag 4 supplies depth only; retain the current route heading')
     if approach_steps is None:
         plan['confirmed_far'] = near > target+band
     if not very_near and not _within((near, far), window):

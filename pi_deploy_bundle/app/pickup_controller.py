@@ -1,10 +1,14 @@
 """Pick up an isolated single or the identified horizontal floor pair."""
 import math
 
-from block_camera import BlockEvidenceExpired
+from block_camera import BlockEvidenceExpired, BlockFrameUnavailable
 
 class PickupFault(RuntimeError):
     pass
+
+
+class PickupObservationUnavailable(PickupFault):
+    """No valid image classification was available before any grab."""
 
 
 def validate(cfg):
@@ -34,20 +38,20 @@ class PickupController:
         r=self.robot; r.check()
         if r.load_kind!='empty':raise PickupFault('observation for pickup requires empty load')
         row=r.observe_blocks(count_only=True) if count_only else r.observe_blocks()
-        if row.get('camera_healthy') is not True:raise PickupFault('camera fault, not confirmed empty')
+        if row.get('camera_healthy') is not True:raise PickupObservationUnavailable('camera fault, not confirmed empty')
         stamp=row.get('stamp_ns')
         if type(stamp) is not int or stamp<=0 or self.last_stamp is not None and stamp<=self.last_stamp:
-            raise PickupFault('duplicate/reordered pickup observation')
+            raise PickupObservationUnavailable('duplicate/reordered pickup observation')
         self.last_stamp=stamp
-        if row.get('status') not in ('target','empty','unknown'):raise PickupFault('invalid vision status')
-        if row['status']=='empty' and row.get('count')!=0:raise PickupFault('empty count contract')
+        if row.get('status') not in ('target','empty','unknown'):raise PickupObservationUnavailable('invalid vision status')
+        if row['status']=='empty' and row.get('count')!=0:raise PickupObservationUnavailable('empty count contract')
         if row['status']=='target':
             count = row.get('count')
             if type(count) is not int or count not in (1,2,3):
-                raise PickupFault('target count contract')
+                raise PickupObservationUnavailable('target count contract')
             grip = min(count, 2) if count_only else row.get('grip_count', 1 if count == 1 else 0)
             if not (type(grip) is int and 0 <= grip <= min(count, 2)):
-                raise PickupFault('grip count does not match visible layout')
+                raise PickupObservationUnavailable('grip count does not match visible layout')
             if grip == 0:
                 row = dict(row, status='unknown', reason='ambiguous ground-row pickup layout')
             elif grip == 2 and not (self.cfg['double_pickup_enabled'] and r.supports_pair()):
@@ -61,7 +65,7 @@ class PickupController:
             else:
                 t = row.get('pickup_target') or (row.get('target') if count == 1 else None) or {}
                 if any(type(t.get(k)) not in (int,float) or not math.isfinite(t[k]) or not 0<=t[k]<=1 for k in ('x','y')):
-                    raise PickupFault('target coordinates invalid')
+                    raise PickupObservationUnavailable('target coordinates invalid')
                 row = dict(row, target=t, grip_count=grip)
         r.events.append({'block_observation':row})
         return row
@@ -71,12 +75,15 @@ class PickupController:
         grip=row['grip_count']
         stacked_triple=(stacked_confirmed and grip==2 and row.get('count')==3 and row.get('stacked_triple') is True)
         op,load=('grab_double','double') if grip==2 else ('grab_single','single')
+        last_completed=r.last_action_completed_monotonic
         try:
             r.verify_block_observation(row)
             r.check()
             self.attempted=True
             r.finite(op,observation=row)
         except BlockEvidenceExpired:
+            if r.last_action_completed_monotonic!=last_completed:
+                raise PickupFault('取物动作已收到完成回执，后续图像过期，不能重复抓取。')
             self.attempted=False
             return {'status':'no_pickup','reason':'evidence_expired','blind_grab':False}
         result = {'status':load+'_pickup_protocol_completed','observed_count':row.get('count'),
@@ -87,8 +94,25 @@ class PickupController:
             result.update(staged_default_pair=True, reason_zh='人工摆放区未确认方块数量，已执行默认双抱。')
         return result
 
+    def Pickup_AcquireDefaultPair(self, station, reason):
+        """Use the known handoff position when no count can be established."""
+        r=self.robot
+        r.check()
+        if self.attempted or r.load_kind!='empty':
+            raise PickupFault('duplicate/wrong-load pickup rejected')
+        if not self.cfg['double_pickup_enabled'] or not r.supports_pair():
+            return {'status':'no_pickup','reason':'horizontal pair capability unavailable',
+                    'reason_code':'double_load_capability_unavailable','required_grip_count':2,
+                    'reason_zh':'当前会话缺少 MCU 双抱和持物路线能力回执。'}
+        self.attempted=True
+        r.finite('grab_double',pickup_station=station)
+        return {'status':'double_pickup_protocol_completed','observed_count':None,'grip_count':2,
+                'planned_count':2,'stacked_triple':False,'expected_load':'double','physical_grip_confirmed':False,
+                'adjustments':self.adjustments,'default_pair_station':station,'vision_reason':reason,
+                'staged_default_pair':station=='operator_staged','reason_zh':'取物点未确认件数，已执行一次默认双抱。'}
+
     def Pickup_AcquireStaged(self, *, allow_stacked=False, default_pair=False):
-        """The first target is placed at gripping distance by the operator."""
+        """Choose the grip from fresh count windows at the current pickup position."""
         r=self.robot
         if self.attempted or r.load_kind!='empty':
             raise PickupFault('duplicate/wrong-load pickup rejected')
@@ -115,6 +139,24 @@ class PickupController:
             stacked_confirmed=stacked_confirmed and row['count']==3 and row.get('stacked_triple') is True
         return self._grab(row,stacked_confirmed=stacked_confirmed)
 
+    def Pickup_AcquireAtHandoff(self, observation):
+        """Resolve a failed alignment at the configured return pickup station."""
+        alignment_reason=observation['reason']
+        if alignment_reason in ('target_changed','too_close','outside_handoff_adjustment_range','adjustment_budget'):
+            try:
+                counted=self.Pickup_AcquireStaged(allow_stacked=True)
+            except (BlockFrameUnavailable,BlockEvidenceExpired,PickupObservationUnavailable) as exc:
+                if self.attempted:
+                    raise
+                counted={'status':'no_pickup','reason':str(exc)}
+            if counted['status']!='no_pickup' or counted.get('reason_code')=='double_load_capability_unavailable':
+                return dict(counted, handoff_alignment_reason=alignment_reason, pickup_basis='fresh_count_at_handoff')
+            count_reason=counted['reason']
+        else:
+            count_reason=alignment_reason
+        acquired=self.Pickup_AcquireDefaultPair('tag1_handoff',count_reason)
+        return dict(acquired, handoff_alignment_reason=alignment_reason)
+
     def acquire(self, *, adjust=None, allow_stacked=False):
         r=self.robot; c=self.cfg
         if self.attempted or r.load_kind!='empty':raise PickupFault('duplicate/wrong-load pickup rejected')
@@ -132,7 +174,9 @@ class PickupController:
                 if previous is not None and lost<c['max_lost_windows']:
                     lost+=1; stable=0; aligned=0; stacked_windows=0; row=self.observe(); continue
                 return {'status':'no_pickup','reason':row.get('reason',row['status']),'blind_grab':False,
-                        'scene_empty':row['status']=='empty','reason_code':row.get('reason_code'),
+                        'scene_empty':row['status']=='empty',
+                        'vision_unresolved':row['status']=='unknown' and not row.get('reason_code'),
+                        'reason_code':row.get('reason_code'),
                         'reason_zh':row.get('reason_zh'),'observed_count':row.get('count')}
             t=row['target']
             grip=row['grip_count']

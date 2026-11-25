@@ -258,6 +258,12 @@ class MissionRobot(Robot):
             if attempt + 1 < _SENSOR_RECHECKS:
                 self.sleep(self.empty_retry_s)
         else:
+            if (magnetic_optional and getattr(self,'route_command',None) in ('1','2')
+                    and self.cfg.get('route_steps',{}).get('continue_estimated_route') is True):
+                check()
+                self.events.append({'sensor_preflight':'chest/navigation preflight incomplete at operator staging',
+                                    'reason_zh':reason,'body_commands':0})
+                return
             raise NotReady(reason)
         self.events.append({
             'sensor_preflight': ('fresh chest stream; following visual route after magnetic loss'
@@ -327,14 +333,21 @@ class MissionRobot(Robot):
         self.camera.verify(row,scope=self.scope(),load=self.load_kind)
 
     def finite(self,op,observation=None,*,allow_heading_correction=False,checkpoint_follows=False,
-               before_dispatch=None,configured=False,visual_pickup=False):
+               before_dispatch=None,configured=False,visual_pickup=False,pickup_station=None):
         self.check()
         required_load, next_load=OPS[op]
         if configured and (required_load,next_load)!=('empty','empty'):
             raise ValueError('configured return may only dispatch empty travel macros')
         if visual_pickup and (not self._allows_missing_magnetic() or op not in VISUAL_PICKUP_OPS or observation is None):
             raise ValueError('visual pickup requires a supported macro and a fresh target on the configured outbound route')
-        magnetic_optional=configured or visual_pickup
+        station_grab=pickup_station is not None
+        if station_grab and not (
+                op=='grab_double' and observation is None and not visual_pickup
+                and self.cfg.get('route_steps',{}).get('continue_estimated_route') is True
+                and getattr(self,'route_command',None) in ('1','2') and getattr(self,'pickup_active',False)
+                and pickup_station==('tag1_handoff' if self.deliveries else 'operator_staged')):
+            raise ValueError('default pair grab requires the configured pickup station on its active journey')
+        magnetic_optional=configured or visual_pickup or station_grab
         motion_context={'configured': True} if magnetic_optional else {}
         native_op=op
         if self.load_kind=='double' and op in PAIR_MOTION_OPS:
@@ -360,7 +373,7 @@ class MissionRobot(Robot):
             guard.observation_scope=self.scope()
             if capture_turn:
                 guard.begin_turn_observation(op,self.load_kind,self.clock(),*self.scope())
-        if op in _GRAB_OPS:
+        if op in _GRAB_OPS and not station_grab:
             if observation is None:raise RuntimeError('grab requires bound fresh visual evidence')
             if observation.get('grip_count',observation.get('count')) != (2 if op=='grab_double' else 1):
                 raise RuntimeError('grab macro does not match observed ground-row target')
@@ -380,7 +393,11 @@ class MissionRobot(Robot):
                             and observation.get('stamp_ns',-1)<=self.last_action_completed_ros_ns)):
                     raise BlockEvidenceExpired('block observation predates the last completed action')
             try:
-                self.completed_call(native_op,self.cfg['request_timeout_s'])
+                if station_grab:
+                    # No camera observation is claimed for the operator's fixed-location grab.
+                    Robot.completed_call(self,native_op,self.cfg['request_timeout_s'])
+                else:
+                    self.completed_call(native_op,self.cfg['request_timeout_s'])
                 break
             except _ChestUnavailable as exc:
                 # This exception is raised before submitting the native request.
@@ -391,6 +408,10 @@ class MissionRobot(Robot):
                 self._await_camera(native_op)
                 self.backend.check_mission_v5()
                 self.check_magnetic_before_motion(**motion_context)
+            except BlockEvidenceExpired as exc:
+                # Evidence validation above is retryable. Once the native call was
+                # entered its completion is uncertain and the grip must not be replayed.
+                raise RuntimeError('抓取或取物动作已提交，完成状态未知。') from exc
             except Exception:
                 self.record_fall_diagnostic(native_op)
                 raise

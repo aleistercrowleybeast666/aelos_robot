@@ -34,7 +34,13 @@ _MESSAGES_ZH = {
     "empty reset requires idle; no active task cancelled": "当前仍有任务，等待空闲再恢复站姿。",
     "horizontal pair: complete double-load native capability unavailable": "已识别多块，双抱动作包尚未就绪",
     "staged block count changed": "连续观测的方块数量不一致，正在重新识别",
-    "two-object release protocol completed after Tag 5 and base approach": "已扫到 Tag 5，进入大本营并完成双块放物动作",
+    "two-object release protocol completed after Tag 5 and base approach": "已收到进场后的双抱放物动作回执",
+    "single-object release protocol completed after Tag 5 and base approach": "已收到进场后的单块放物动作回执",
+    "block camera has no fresh post-settle stream": "动作结束后未收到新的方块相机帧",
+    "block camera stopped delivering fresh images during observation": "识别过程中方块相机缺少新帧",
+    "camera fault, not confirmed empty": "方块图像不可用",
+    "duplicate/reordered pickup observation": "方块图像时间戳重复或乱序",
+    "evidence_expired": "取物前图像已经过期",
     "Tag 2 frames disagree about approach heading": "Tag 2 多帧航向偏差不一致",
     "Tag 2 requires heading correction before longitudinal approach": "Tag 2 需要先纠正航向再前进",
     "Tag 2 heading, distance or measurement spread outside trial window": "Tag 2 位姿超出当前进近范围或测量不稳定",
@@ -438,8 +444,14 @@ def _route_notes(result):
         pickup_exit = pickup_exit or _as_dict(event.get("pickup_exit"))
         if corridor and entrance and returned and pickup_exit:
             break
-    missing = corridor.get("missing_checkpoints") or [_as_dict(entrance.get("checkpoint_not_seen"))]
+    missing = list(corridor.get("missing_checkpoints") or ())
+    entrance_miss = _as_dict(entrance.get("checkpoint_not_seen"))
+    if entrance_miss and not any(_as_dict(row).get("tag_id") == entrance_miss.get("tag_id") for row in missing):
+        missing.insert(0, entrance_miss)
     lines = _entry_search_notes(events)
+    entry_fallback = entrance.get("entry_fallback")
+    if entry_fallback:
+        lines.append(str(entry_fallback))
     retreat = _as_dict(pickup_exit.get("retreat"))
     steps = retreat.get("planned_steps")
     if type(steps) is int and retreat.get("completed_actions") and retreat.get("heading_status") != "pending":
@@ -458,7 +470,7 @@ def _route_notes(result):
     if entry_check.get("confirmed_for_forward") is True:
         heading = _angle_label("视觉航向余差",entry_check.get("heading_error_deg"))
         lines.append(" · ".join(part for part in ("Tag 1 已通过进场确认", heading) if part))
-    elif entry_check:
+    elif entry_check and not entry_fallback:
         lines.append("左跨后正在确认 Tag 1" if entry_check.get("status") == "scanning"
                      else "左跨完成后未确认 Tag 1，继续持物")
     deliveries = result.get("deliveries")
@@ -471,6 +483,8 @@ def _route_notes(result):
             lines.append(f"返程漏扫 Tag {tag} · 已按估算路线继续")
     if returned.get("checkpoint") == 1:
         lines.append("返程已确认 Tag 1")
+    elif returned.get("estimated_pickup_anchor_tag") == 1:
+        lines.append("返程 Tag 1 未确认 · 已按预设路线前往接驳点")
     nominal, planned = entrance.get("nominal_target_steps"), entrance.get("planned_steps")
     initial = entrance.get("initial_estimated_steps",planned)
     if type(nominal) is int and type(initial) is int and nominal != initial:
@@ -512,8 +526,13 @@ def _route_notes(result):
     if not pickup:
         pickup = next((_as_dict(event.get("pickup")) for event in reversed(events)
                        if _as_dict(event.get("pickup")).get("grip_count") in (1, 2)), {})
-    if pickup.get("staged_default_pair") is True:
-        lines.append("人工摆放区未确认方块数量 · 已按默认双抱")
+    if pickup.get("staged_default_pair") is True or pickup.get("default_pair_station") == "tag1_handoff":
+        station = "返程接驳区" if pickup.get("default_pair_station") == "tag1_handoff" else "人工摆放区"
+        reason = pickup.get("vision_reason")
+        if reason in ("empty","unknown"):
+            reason = "识别窗内没有看到方块" if reason == "empty" else "图像不足以确认方块数量"
+        detail = f" · {TaskReport_Message(reason)}" if reason else ""
+        lines.append(f"{station}未确认方块数量{detail} · 已执行默认双抱，实物件数待确认")
     elif pickup.get("grip_count") in (1, 2) and type(pickup.get("observed_count")) is int:
         grip = "单抓" if pickup["grip_count"] == 1 else "双抱底排两块"
         if pickup.get("stacked_triple") is True and pickup.get("planned_count") == 3:
@@ -547,15 +566,23 @@ def _route_notes(result):
         tag = entry.get("tag_id")
         policy = entry.get("policy")
         if type(tag) is int and policy in ("continue_estimated", "hold_load_for_placement"):
-            followup = "已记录，按预定路线继续" if policy == "continue_estimated" else "保持持物，放物区未确认"
+            nominal = policy == "continue_estimated" or tag == 5 and corridor.get("release_protocol_completed") is True
+            followup = "已记录，按预定路线继续" if nominal else "保持持物，放物区未确认"
             cause = entry.get("cause")
-            if cause == "temporary_camera_gap":
+            if cause in ("temporary_camera_gap","camera_stream_unhealthy"):
                 summary = f"Tag {tag} 扫码流暂未恢复"
             elif cause == "insufficient_frames":
                 summary = f"Tag {tag} 已解码，有效帧不足"
             else:
                 summary = f"未扫到 Tag {tag}"
             lines.append(f"{summary} · {followup}")
+    for fallback in corridor.get("route_fallbacks") or ():
+        tag = _as_dict(fallback).get("tag_id")
+        if type(tag) is int:
+            detail = TaskReport_Message(_as_dict(fallback).get("detail") or "未取得稳定的视觉位姿")
+            line = f"Tag {tag} · {detail} · 已转入该段剩余的预设动作"
+            if line not in lines:
+                lines.append(line)
     for leg in corridor.get("legs") or ():
         leg = _as_dict(leg)
         start, end = leg.get("from_tag"), leg.get("expected_id")

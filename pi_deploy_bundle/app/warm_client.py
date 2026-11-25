@@ -105,10 +105,22 @@ def main(argv=None,connector=None):
                     segment=row['next_segment']
                     if segment['detected']:
                         print('已扫到 Tag 2，入口试跑段完成。',flush=True)
-                    elif not segment.get('continue_estimated'):
+                    elif segment.get('continue_estimated'):
+                        print('Tag 2 未确认，已按计划步数继续。',flush=True)
+                    else:
                         print('Tag 2 试跑待确认。',flush=True)
                 if 'corridor_trial' in row:
                     corridor=row['corridor_trial']
+                    for leg in corridor.get('legs', []):
+                        source = leg.get('straight_heading_source')
+                        if source == 'current_tag3':
+                            heading = leg['tag3_straight_heading']
+                            reference = '磁参考已更新' if heading.get('magnetic_reference') == 'applied' else '磁参考未更新'
+                            print(f"右跨转直行 · 当前 Tag 3 航向 {heading['residual_deg']:+.2f}° · {reference}", flush=True)
+                        elif source == 'prior_route_reference':
+                            print('右跨转直行 · 当前未取得可信 Tag 3 航向，沿用路段参考。', flush=True)
+                        elif source == 'near_tag4':
+                            print('右跨转直行 · 进入近处 Tag 4 观测范围。', flush=True)
                     if corridor.get('release_protocol_completed'):
                         delivery=corridor.get('delivery',{})
                         steps=delivery.get('approach_steps')
@@ -116,13 +128,23 @@ def main(argv=None,connector=None):
                         operation=delivery.get('release_operation')
                         pair=(operation=='place_double' if operation else row.get('pickup',{}).get('grip_count')==2)
                         release='双抱放物并回站姿' if pair else '单块放物'
-                        print(f'已扫到 Tag 5，{advance}和{release}动作已完成。',flush=True)
+                        if corridor.get('detected') is True:
+                            prefix='已扫到 Tag 5，'
+                        elif corridor.get('detected') is False:
+                            prefix='Tag 5 未确认，已按计划进场，'
+                        else:
+                            prefix=''
+                        print(f'{prefix}{advance}和{release}动作已完成。',flush=True)
                     elif corridor['detected']:
                         print('已扫到 Tag 5，当前保持持物。',flush=True)
                     else:
-                        print('通道试跑待确认。最近确认的码为 Tag {}。'.format(corridor['checkpoint']),flush=True)
+                        checkpoint=corridor.get('checkpoint')
+                        confirmed=(checkpoint in (2,3,4) or checkpoint==1
+                                   and (row.get('entry_alignment') or {}).get('fresh_target_detected') is True)
+                        latest=f'最近确认的码为 Tag {checkpoint}。' if confirmed else '尚无已确认的通道码。'
+                        print('通道试跑待确认。'+latest,flush=True)
                 if row.get('status')=='return_trial_unconfirmed':
-                    checkpoint=row.get('checkpoint')
+                    checkpoint=(row.get('return_trial') or {}).get('checkpoint')
                     message='返程待确认。'
                     if checkpoint is not None:message+='最近确认 Tag {}。'.format(checkpoint)
                     print(message,flush=True)

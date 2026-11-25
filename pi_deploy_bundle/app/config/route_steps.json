@@ -1,4 +1,5 @@
 {
+  "continue_estimated_route": true,
   "transfer_forward_steps": 9,
   "tag1_to_tag2_forward_steps": 10,
   "micro_turn_filter": {"initial_deg": 10, "alpha": 0.15},
@@ -82,6 +83,7 @@
   },
   "tag4_forward_trial": {
     "enabled": true,
+    "heading_use_within_m": 0.35,
     "target_distance_m": 0.175,
     "deadband_m": 0.035,
     "two_step_distance_m": [0.04, 0.075],

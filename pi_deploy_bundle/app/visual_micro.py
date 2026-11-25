@@ -15,6 +15,22 @@ class VisualMicroStopped(RuntimeError):
             self.error_details={'error_code':'passive_tag_observation_failed','reason_zh':report['reason_zh']}
 
 
+class VisualCameraUnavailable(VisualMicroStopped):
+    """A camera/AR read failed. This says nothing about the MCU request."""
+
+
+def VisualCamera_Read(read, check):
+    def check_owner():
+        try:
+            check()
+        except OSError as exc:
+            raise RuntimeError('读取图像时控制连接校验失败。') from exc
+    try:
+        return read(check_owner)
+    except OSError as exc:
+        raise VisualCameraUnavailable('图像或扫码话题读取失败：'+str(exc)) from exc
+
+
 class _VisualObservationExpired(RuntimeError):
     """Optional correction was declined before any native request."""
 
@@ -115,14 +131,14 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
     capture_contract=cfg['pose_contract']
     expected=camera_contract.get('expected_fingerprint')
     if camera_contract.get('source_confirmed') is not True or not expected:
-        raise VisualMicroStopped('actual CameraInfo calibration/source unavailable')
+        raise VisualCameraUnavailable('actual CameraInfo calibration/source unavailable')
     current=getattr(io,'visual_camera_status',None)
     unavailable_windows=0
     last_issue=None
 
     def stop(issue):
         reason, reason_zh, _=issue
-        raise VisualMicroStopped(reason,report=dict(result, status='blocked',reason=reason,reason_zh=reason_zh))
+        raise VisualCameraUnavailable(reason,report=dict(result, status='blocked',reason=reason,reason_zh=reason_zh))
 
     check()
     if clock()+cfg['settle_s']>=deadline:return result
@@ -131,9 +147,9 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
         check()
         remaining=deadline-clock()
         if remaining<=0:break
-        window=io.observe(tag_id,after_ns,min(cfg['observe_s'],remaining),check)
+        window=VisualCamera_Read(lambda guard:io.observe(tag_id,after_ns,min(cfg['observe_s'],remaining),guard),check)
         check()
-        camera=current() if current is not None else window.get('camera_info',{})
+        camera=VisualCamera_Read(lambda _:current(),check) if current is not None else window.get('camera_info',{})
         result.update(camera_info=camera,scan_attempted=True,
                       observation_windows=result['observation_windows']+1)
         window_now=window.get('now_ns')
@@ -212,6 +228,11 @@ class VisualMicro:
             report.update(status='blocked',reason=reason,budget=self.budget.status())
         raise VisualMicroStopped('visual micro stopped at completed macro boundary: '+reason+'; no next route macro, no reverse retry or release; no native immediate stop',report=report)
 
+    def camera_fault(self,reason,*,report=None):
+        if getattr(self,'allow_unobserved_tag',False):
+            raise VisualCameraUnavailable(reason,report=report)
+        self.stop(reason,report=report)
+
     def magnetic_loss(self,reason,stage):
         if self.allow_missing_magnetic and self.cfg['magnetic'].get('capture_freshness_verified') is True:
             from heading_guard import MagneticDataUnavailable, MagneticLoss_IsRecoverable
@@ -257,16 +278,16 @@ class VisualMicro:
         camera_rechecks=[]
         expected_camera=self.v['camera_info'].get('expected_fingerprint')
         while True:
-            window=self.io.observe(tag,after_ns,min(self.cfg['observe_s'],deadline-after),self.check)
-            camera=current() if current is not None else window.get('camera_info',{})
+            window=VisualCamera_Read(lambda guard:self.io.observe(tag,after_ns,min(self.cfg['observe_s'],deadline-after),guard),self.check)
+            camera=VisualCamera_Read(lambda _:current(),self.check) if current is not None else window.get('camera_info',{})
             if not retry_frames:
-                if not window.get('camera_healthy'):self.stop('camera/AR stream fault, not ordinary Tag loss')
+                if not window.get('camera_healthy'):self.camera_fault('camera/AR stream fault, not ordinary Tag loss')
                 if self.v['execute'] and not camera.get('ready'):
-                    self.stop('actual CameraInfo calibration/source/frame/time unavailable or changed')
+                    self.camera_fault('actual CameraInfo calibration/source/frame/time unavailable or changed')
                 break
             issue=VisualCamera_DiagnoseWindow(window,camera,expected_camera)
             if issue is None:break
-            if not issue[2]:self.stop(issue[0])
+            if not issue[2]:self.camera_fault(issue[0])
             camera_rechecks.append({'reason':issue[0],'reason_zh':issue[1]})
             if (len(camera_rechecks)>self.v['max_reobserve_windows']
                     or self.clock()+self.cfg['observe_s']+self.cfg['magnetic']['collect_s']>=deadline):
@@ -300,7 +321,7 @@ class VisualMicro:
                               and all(r.get('capture_source')=='verified_sensor_capture' for r in rows))
                 if insufficient or (magnetic and magnetic.get('capture_verified') and not stream_healthy):
                     if self.allow_missing_magnetic and not window.get('contract_match') and not camera_rechecks:
-                        self.stop('camera/AR stream fault, not ordinary Tag loss')
+                        self.camera_fault('camera/AR stream fault, not ordinary Tag loss')
                     self.magnetic_loss(reason,'visual_post_action_heading' if post else 'visual_magnetic_pair')
                 self.stop(reason)
             magnetic=None
@@ -321,16 +342,16 @@ class VisualMicro:
             self.stop('visual deadline expired before dispatch')
         obs=pair['scan'];rows=pair.get('rows',[])
         live_visual=getattr(self.io,'visual_motion_ready',None)
-        camera=self.io.visual_camera_status()
+        camera=VisualCamera_Read(lambda _:self.io.visual_camera_status(),self.check)
         tag_age=self.io.ros_now_ns()-obs['latest_stamp_ns']
-        if (live_visual is None or not live_visual(obs['latest_stamp_ns']) or
+        if (live_visual is None or not VisualCamera_Read(lambda _:live_visual(obs['latest_stamp_ns']),self.check) or
                 not 0<=tag_age<=self.cfg['max_age_s']*1e9 or
                 camera.get('fingerprint')!=pair['camera_info'].get('fingerprint')):
             same_camera=(camera.get('fingerprint')==pair['camera_info'].get('fingerprint')
                          or camera.get('fingerprint') is None and camera.get('can_reobserve'))
             if defer_expired and tag_age>=0 and same_camera and (camera.get('ready') or camera.get('can_reobserve')):
                 raise _VisualObservationExpired
-            self.stop('target window expired or live visual source/calibration changed before dispatch')
+            self.camera_fault('target window expired or live visual source/calibration changed before dispatch')
         now=self.clock();age=self.cfg['magnetic']['max_age_s']
         if not self.io.motion_capture_verified:
             self.magnetic_loss('paired magnetic decision window expired or current capture stream invalid before dispatch',
@@ -360,19 +381,19 @@ class VisualMicro:
         after_ns=self.io.ros_now_ns()
         if type(after_ns) is not int or after_ns<pair['scan']['latest_stamp_ns']:
             self.stop('ROS clock moved backwards during Tag recheck',report=report)
-        window=self.io.observe(tag_id,after_ns,min(self.cfg['observe_s'],remaining),self.check)
+        window=VisualCamera_Read(lambda guard:self.io.observe(tag_id,after_ns,min(self.cfg['observe_s'],remaining),guard),self.check)
         self.check()
-        camera=self.io.visual_camera_status()
+        camera=VisualCamera_Read(lambda _:self.io.visual_camera_status(),self.check)
         issue=VisualCamera_DiagnoseWindow(window,camera,pair['camera_info']['fingerprint'])
         if issue is not None:
-            if not issue[2]:self.stop(issue[0],report=report)
+            if not issue[2]:self.camera_fault(issue[0],report=report)
             return None
         scan=summarize(window,tag_id,self.cfg,after_ns)
         if (not scan.get('pose_usable') or not (scan.get('heading_only') or scan.get('position_usable'))
                 or scan.get('heading_mad_deg',float('inf'))>self.v['max_heading_mad_deg']
                 or any(row.get('source_publisher') != self.cfg['pose_contract']['publisher']
                        for row in scan['observations'])
-                or not self.io.visual_motion_ready(scan['latest_stamp_ns'])):
+                or not VisualCamera_Read(lambda _:self.io.visual_motion_ready(scan['latest_stamp_ns']),self.check)):
             return None
         scan.update(after_ns=max(after_ns,window.get('after_ns',0)),now_ns=window['now_ns'],
                     camera_healthy=True,contract_match=True)
@@ -660,7 +681,7 @@ class VisualMicro:
                             else 'paired same-target fusion rejected: '+str(fused['reason']))
                     self.stop(reason,report=result)
                 if pair['camera_info'].get('fingerprint')!=before['camera_info'].get('fingerprint'):
-                    self.stop('actual CameraInfo calibration/source/frame changed',report=result)
+                    self.camera_fault('actual CameraInfo calibration/source/frame changed',report=result)
                 self.unreliable_turns.add(name)
                 self.reference.anchor=None
                 review_complete=True

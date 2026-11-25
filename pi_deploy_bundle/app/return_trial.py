@@ -152,13 +152,22 @@ def ReturnTrial_TurnAtBase(robot, step):
     _turn(robot, step)
 
 
+def _return_camera_snapshot(robot, snapshot, tag, after):
+    try:
+        return snapshot(after, robot.check)
+    except OSError as exc:
+        robot.check()
+        robot.events.append({'return_camera_read_error': {'tag_id': tag, 'reason': str(exc)}})
+        return {}
+
+
 def _return_boundary_geometry(robot, nav, tag):
     """Keep an early glimpse only as an advisory in a recovery decision."""
     snapshot = getattr(nav.io, 'boundary_visual_snapshot', None)
     after = robot.last_action_completed_ros_ns
     if snapshot is None or type(after) is not int or after <= 0:
         return None
-    scan = snapshot(after, robot.check)
+    scan = _return_camera_snapshot(robot, snapshot, tag, after)
     if (scan.get('boundary_valid') is False or scan.get('camera_healthy') is not True
             or scan.get('contract_match') is not True):
         return None
@@ -255,7 +264,8 @@ def ReturnTrial_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
         observed, _ = EntranceTrial_ObserveCheckpoint(robot, nav, current, lambda: None,
             quick_id=True, single_window=True, reuse_settled_cache=True)
         # Do not pass pre-turn positions on to route fusion after the stance changed.
-        leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {})
+        leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {},
+                   detected=observed is EntranceTrialResult.CHECKPOINT_DETECTED)
         if observed is not EntranceTrialResult.CHECKPOINT_DETECTED:
             heading['status'] = 'marker_lost_after_turn'
             return
@@ -276,7 +286,7 @@ def _return_travel(robot, nav, leg, actions):
                 or any(op != action for op in pending)):
             continue
         settled = robot.last_action_completed_ros_ns + int(nav.cfg['settle_s'] * 1e9)
-        cached = snapshot(settled, robot.check)
+        cached = _return_camera_snapshot(robot, snapshot, tag, settled)
         if (cached.get('boundary_valid') is not True or cached.get('camera_healthy') is not True
                 or cached.get('contract_match') is not True):
             continue
@@ -417,7 +427,9 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
 
 def ReturnTrial_ReachPickupStation(robot, chain, result):
     """Finish the 12-step transfer, face outbound, observe Tag 1 again, then enter the pickup bay."""
-    if not result.get('station_reached') or result.get('pickup_anchor_tag') != 1 or robot.load_kind != 'empty':
+    estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
+    planned_anchor = estimate and result.get('estimated_pickup_anchor_tag') == 1
+    if not result.get('station_reached') or not (result.get('pickup_anchor_tag') == 1 or planned_anchor) or robot.load_kind != 'empty':
         raise ValueError('接驳取物需要本次返程确认的 Tag 1 和空载站姿')
     nav = robot.ensure_navigation_io()
     chain = ReturnTrial_ValidateChain(chain)
@@ -425,8 +437,9 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     borrowed = list(result['transfer_approach_actions'])
     if list(approach[:len(borrowed)]) != borrowed:
         raise ValueError('接驳前进回执和配置路线不匹配')
-    _report_progress(robot, 'cmd2_return_leg', expected_tag=1, last_passed_tag=1, return_step='transfer_approach',
-                     reason_zh='已确认返程 Tag 1，按剩余步数前进后空载掉头。')
+    last_seen = result.get('checkpoint', result.get('pickup_anchor_tag'))
+    _report_progress(robot, 'cmd2_return_leg', expected_tag=1, last_passed_tag=last_seen, return_step='transfer_approach',
+                     reason_zh='按接驳段剩余步数前进后空载掉头。')
     _move(robot, nav, approach[len(borrowed):], result['transfer_approach_actions'],
           station_actions=result['station_actions'])
     _turn(robot, chain['transfer_turn'])
@@ -435,7 +448,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     leg = {'expected_id': 1, 'direction': 'outbound', 'detected': False, 'observation_windows': 0, 'ready': False}
     result['station_facing_tag1'] = leg
     def waiting():
-        _report_progress(robot, 'cmd2_return_scan', expected_tag=1, last_passed_tag=1, return_step='transfer_turn',
+        _report_progress(robot, 'cmd2_return_scan', expected_tag=1, last_passed_tag=last_seen, return_step='transfer_turn',
                          reason_zh='空载已掉头，正在按去程方向重新识别 Tag 1。')
     waiting()
     observed, detail = EntranceTrial_ObserveCheckpoint(robot, nav, leg, waiting, advisory_windows=3,
@@ -459,7 +472,8 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     if (heading.get('status') in ('retain_measured_residual', 'orientation_inconsistent')
             and readings and abs(readings[-1]['error_deg']) >= 45):
         leg['reason_zh'] = f"空载掉头后的 Tag 1 实测仍偏 {readings[-1]['error_deg']:+.1f}°，接驳侧跨方向待确认。"
-        return leg
+        if not estimate:
+            return leg
     if not (observed is EntranceTrialResult.CHECKPOINT_DETECTED and readings
             and heading.get('status') in ('within_empty_turn_resolution', 'retain_measured_residual')):
         from corridor_trial import CorridorTrial_HeadingSnapshot
@@ -480,11 +494,16 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
                 or not 0 <= robot.clock()-current[1] <= nav.cfg['magnetic']['max_age_s']
                 or abs(current[0]) > nav.cfg['post_action_heading']['deadband_deg']):
             leg['reason_zh'] = '空载掉头后未重新确认 Tag 1，也未取得已对正的新磁航向。'
-            return leg
-        leg.update(heading_source='verified_empty_turn', residual_deg=current[0])
+            if not estimate:
+                return leg
+            leg.update(heading_source='estimated_after_turn', reason_zh='掉头后复扫仍无可用航向，按接驳动作链接近方块。')
+        else:
+            leg.update(heading_source='verified_empty_turn', residual_deg=current[0])
     else:
         leg.update(heading_source='outbound_tag1_pose', residual_deg=readings[-1]['error_deg'])
-    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=1, return_step='station_side',
+    if observed is EntranceTrialResult.CHECKPOINT_DETECTED:
+        last_seen = 1
+    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=last_seen, return_step='station_side',
                      reason_zh='进入接驳位置，随后用胸部相机识别方块。')
     _move(robot, nav, _actions(chain['station_side']), result['station_side_actions'],
           station_actions=result['station_actions'], scan_follows=True)
@@ -528,6 +547,7 @@ def ReturnTrial_Run(robot):
     _report_progress(robot, 'cmd2_return_leg', expected_tag=5, last_passed_tag=None, return_step='base_turn')
     ReturnTrial_TurnAtBase(robot, chain['base_turn'])
     result['base_turn_completed'] = True
+    estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
     route_actions = [_actions(chain[f'tag{tag}']) for tag in _RETURN_TAGS]
     route_actions.append(_actions(chain['transfer_approach']))
 
@@ -575,6 +595,15 @@ def ReturnTrial_Run(robot):
             result['missing_checkpoints'].append(leg['checkpoint_not_seen'])
             leg['departure_resolution'] = 'continue_estimated_after_missed_tag'
             continue
+        if estimate and observed in (EntranceTrialResult.MOTION_NOT_STARTED, EntranceTrialResult.CAMERA_UNAVAILABLE):
+            if leg.get('detected') and observed is EntranceTrialResult.MOTION_NOT_STARTED:
+                ReturnTrial_AlignEmptyMarker(robot, nav, leg)
+                result['checkpoint'] = tag
+            else:
+                result['missing_checkpoints'].append(leg.get('checkpoint_not_seen') or
+                    {'tag_id': tag, 'cause': observed.value, 'detail': reason})
+            leg.update(departure_resolution='continue_estimated_after_recovery', departure_reason=reason)
+            continue
         if observed is EntranceTrialResult.MOTION_NOT_STARTED:
             return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED, reason)
         if observed is not EntranceTrialResult.CHECKPOINT_DETECTED:
@@ -582,10 +611,14 @@ def ReturnTrial_Run(robot):
         ReturnTrial_AlignEmptyMarker(robot, nav, leg)
         result['checkpoint'] = tag
 
-    if result['checkpoint'] != 1:
+    if result['checkpoint'] == 1:
+        result.update(station_reached=True, pickup_anchor_tag=1)
+        reason = '已确认返程 Tag 1，准备前进到接驳区掉头位置。'
+    elif estimate:
+        result.update(station_reached=True, estimated_pickup_anchor_tag=1)
+        reason = '返程已走完，到 Tag 1 找码后仍无可靠位姿，按预设步数前进去接驳。'
+    else:
         return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED, '返程未确认 Tag 1，接驳区尚未定位。')
-    result.update(station_reached=True, pickup_anchor_tag=1)
-    reason = '已确认返程 Tag 1，准备前进到接驳区掉头位置。'
-    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=1,
+    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=result['checkpoint'],
                      return_step='transfer_approach', reason_zh=reason)
     return set_status(ReturnTrialResult.STATION_REACHED, reason)

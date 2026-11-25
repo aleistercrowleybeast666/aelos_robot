@@ -128,6 +128,7 @@ class Gate:
     def request(self,params):
         with self.cv:
             key=self.decoded_key(params)
+            bridge_idle=(params==[WIRE_BASE] and type(params[0]) is int)
             if params==[CANCELLED_BOUNDARY]:
                 # v5的有序REQ在MCU函数返回后报告取消；不是COMPLETE/身体成功。
                 self.cancel('MCU cancelled at returned native boundary')
@@ -142,22 +143,24 @@ class Gate:
             if key in (0,0xDA):self.last_wire_key=0
             if self.current and self.current['dispatched']:
                 c=self.current
-                if c['op']==PAIR_PROBE and params==[WIRE_BASE] and not c['complete']:
-                    # This read-only alias never polls from inside its body. The
-                    # next REQ proves it returned without a completion receipt.
+                if (c['op']==PAIR_PROBE and bridge_idle and not c['complete']
+                        and (c['cancelled'] or c.get('mcu_error_before_start') and not c['started'])):
+                    # Older Lua reports an unknown alias via ERROR, then returns to idle.
+                    # A repeated REQ alone is not a verdict on the dispatched probe.
                     if not c['cancelled']:
-                        if c['started']:
-                            self.cancel('MCU pair capability probe returned without COMPLETE')
-                        else:
-                            c['probe_unavailable']=True
+                        c['probe_unavailable']=True
                     c['drained']=True
                     self.cv.notify_all()
-                elif (c['op'] in PICKUP_BACKWARD6_OPS and params==[WIRE_BASE]
+                elif (c['op'] in PICKUP_BACKWARD6_OPS and bridge_idle
                       and c.get('mcu_error_before_start') and not c['started'] and not c['cancelled']):
                     c.update(retreat_unavailable=True,drained=True)
                     self.cv.notify_all()
                 return 'default',0  # native在途时禁止嵌套分派
             while self.queue:
+                # Only the expected bridge's idle REQ can claim our pending operation.
+                # Legacy clients can still request their own queued actions.
+                if self.queue[0] in OWNED and not bridge_idle:
+                    return 'default',0
                 name=self.queue.pop(0)
                 if name in OWNED:
                     c=self.current
@@ -171,8 +174,11 @@ class Gate:
         with self.cv:
             c=self.current
             if not c:return # 保留旧手动/服务的完成语义
-            if c['cancelled']:return
-            if not c['dispatched'] or c['started']:
+            if c['cancelled'] or c['complete']:return
+            if not c['dispatched']:
+                c['ignored_predispatch_start']+=1
+                return
+            if c['started']:
                 self.cancel('unexpected or duplicate START');return
             c['started']=True
 
@@ -183,9 +189,13 @@ class Gate:
                 self.last_hello_source='complete'
             c=self.current
             if not c:return
+            if not c['dispatched']:
+                c['ignored_predispatch_complete']+=1
+                return
+            if c['complete']:return
             if c['cancelled']:
                 c['drained']=True;self.cv.notify_all();return
-            if not c['started'] or c['complete']:
+            if not c['started']:
                 self.cancel('unexpected COMPLETE');return
             c['complete']=True;c['drained']=True;self.cv.notify_all()
 
@@ -221,7 +231,8 @@ class Gate:
             elif op not in PROBE_OPS and self.mode!='auto':return reject('automatic_mode_required')
             self.operation_seq+=1
             c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':HASHES[op],'epoch':self.epoch,'op':op,'dispatched':False,
-                'started':False,'complete':False,'cancelled':False,'drained':False}
+                'started':False,'complete':False,'cancelled':False,'drained':False,
+                'ignored_predispatch_start':0,'ignored_predispatch_complete':0}
             self.current=c;self.queue.append(c['native']);deadline=self.clock()+timeout
             while not (c['complete'] or c['cancelled'] or c.get('probe_unavailable') or c.get('retreat_unavailable')):
                 left=deadline-self.clock()
@@ -230,7 +241,8 @@ class Gate:
             ok=(c['complete'] and not c['cancelled'] and not c.get('probe_unavailable')
                 and not c.get('retreat_unavailable') and c['epoch']==self.epoch)
             self.last_result={'op':op,'request_nonce':nonce,'operation_seq':c['operation_seq'],'protocol_completed':bool(ok),'reason':self.reason,
-                **{k:c[k] for k in ('dispatched','started','complete','cancelled','drained')}}
+                **{k:c[k] for k in ('dispatched','started','complete','cancelled','drained',
+                                    'ignored_predispatch_start','ignored_predispatch_complete')}}
             if c.get('probe_unavailable'):
                 self.micro.capability=None
                 self.last_result['probe_unavailable']=True

@@ -19,7 +19,7 @@ _COMMAND0_PHASES = {
     "cmd0_turn": (3, "转向障碍区入口"),
     "cmd0_scan": (4, "入口扫码与纠偏"),
     "cmd0_entry_reacquire": (4, "入口持续重扫 Tag 1"),
-    "cmd0_next_leg": (5, "已确认 Tag 1，抱物前往 Tag 2"),
+    "cmd0_next_leg": (5, "抱物前往 Tag 2"),
     "cmd0_next_scan": (6, "试跑段动作完成，扫描 Tag 2"),
     "cmd0_next_scan_wait": (6, "持续重扫 Tag 2"),
 }
@@ -30,7 +30,7 @@ _COMMAND0_CORRIDOR_PHASES = {
 }
 _COMMAND0_DELIVERY_PHASES = {
     "cmd0_tag5_entry_wait": (_COMMAND0_CORRIDOR_TOTAL, "Tag 5 入口纠偏"),
-    "cmd0_delivery_advance": (_COMMAND0_CORRIDOR_TOTAL, "已扫到 Tag 5，抱物进入大本营"),
+    "cmd0_delivery_advance": (_COMMAND0_CORRIDOR_TOTAL, "抱物进入大本营"),
     "cmd0_delivery_release": (_COMMAND0_CORRIDOR_TOTAL + 1, "执行放物动作"),
     "cmd2_base_turn": (_COMMAND0_CORRIDOR_TOTAL + 1, "已放物起立，在大本营空载掉头"),
 }
@@ -41,9 +41,10 @@ _COMMAND2_RETURN_PHASES = {
 }
 _COMMAND2_RETURN_STEPS = {
     "base_turn": (0, "放物后转向返程通道"),
-    "transfer_advance": (_COMMAND2_RETURN_CORRIDOR_TOTAL, "已扫到 Tag 1，前往中转区观察位"),
+    "transfer_advance": (_COMMAND2_RETURN_CORRIDOR_TOTAL, "前往中转区接驳位"),
+    "transfer_approach": (_COMMAND2_RETURN_CORRIDOR_TOTAL, "前往中转区接驳位"),
     "transfer_turn": (_COMMAND2_RETURN_CORRIDOR_TOTAL + 1, "转向取物区"),
-    "station_side": (_COMMAND2_RETURN_CORRIDOR_TOTAL + 2, "右跨至观察位"),
+    "station_side": (_COMMAND2_RETURN_CORRIDOR_TOTAL + 2, "侧跨至接驳位"),
     "waiting_for_blocks": (_COMMAND2_RETURN_TOTAL, "在交接带外观察物资"),
 }
 _ROUTE_PHASES = {
@@ -254,6 +255,8 @@ class MissionProgress:
                 self._show("outbound", completed, checkpoint_text or label)
         elif phase in _COMMAND0_DELIVERY_PHASES:
             completed, label = _COMMAND0_DELIVERY_PHASES[phase]
+            if phase == "cmd0_delivery_advance" and progress.get("tag5_detected") is True:
+                label = "已扫到 Tag 5，抱物进入大本营"
             if phase == "cmd0_tag5_entry_wait" and isinstance(progress.get("reason_zh"), str):
                 reason = progress["reason_zh"].strip()
                 if reason and reason != label:
@@ -370,10 +373,12 @@ class MissionProgress:
 
     def _show_return_trial(self, phase, progress):
         step = progress.get("return_step")
-        if phase in ("waiting_blocks", "cmd2_return_station"):
+        if phase == "waiting_blocks" or phase == "cmd2_return_station" and not step:
             step = "waiting_for_blocks"
         if isinstance(step, str) and step in _COMMAND2_RETURN_STEPS:
             completed, label = _COMMAND2_RETURN_STEPS[step]
+            if step in ("transfer_advance", "transfer_approach") and progress.get("last_passed_tag") == 1:
+                label = "已扫到 Tag 1，" + label
         else:
             tag = progress.get("expected_tag")
             if type(tag) is not int or tag not in _COMMAND2_RETURN_TAGS:

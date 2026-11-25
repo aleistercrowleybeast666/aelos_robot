@@ -6,7 +6,9 @@ from pathlib import Path
 def inspect_project(project, mode='0', navigation=None):
     from checkpoint_nav import load
     from task_runner import segments
+    from cmd0_motion import Cmd0Motion_LoadRouteSteps
     p=Path(project);c=load(p) if navigation is None else navigation
+    estimate = str(mode) in ('0','1','2') and Cmd0Motion_LoadRouteSteps(p).get('continue_estimated_route') is True
     blockers=[]
     for n in (9,14,8,7,10):
         try:segments(n,'single')
@@ -30,7 +32,8 @@ def inspect_project(project, mode='0', navigation=None):
         'real_correction_blockers':['minimum macro angle and load calibration not measured','sensor_topic capture freshness cannot be verified','finite native cancellation is not immediate','target ID and visual frame/axes/scale are unverified'],
         'mcu_guard_online_status_available':False,
         'physical_recovery_gate':'manual inspection bound to current owner session/epoch, expires in 300 seconds, cleared at finish/cancel',
-        'ordinary_tag_loss':('tag1_entry_gate_then_continue_through_missed_intermediate_tags_and_require_tag5_for_delivery'
+        'ordinary_tag_loss':('reacquire_expected_tag_then_continue_remaining_route' if estimate else
+                             'tag1_entry_gate_then_continue_through_missed_intermediate_tags_and_require_tag5_for_delivery'
                              if str(mode) in ('0','1','2','0-full')
                              else 'terminal_scan_without_onward_motion'),
         'magnetic':{
@@ -42,7 +45,7 @@ def inspect_project(project, mode='0', navigation=None):
             'post_action_monitor_enabled':bool(c.get('post_action_heading',{}).get('enabled')),
             'post_action_correction_enabled':bool(c.get('post_action_heading',{}).get('execute')),
             'post_action_correction_scope':'bounded turns at eligible completed movement boundaries; requires verified heading and fresh samples',
-            'camera_fault_blind_continuation':False,
+            'checkpoint_observation_fallback_enabled':estimate,
             'capture_timestamp_available':False,
             'schema':'aelos_smart_ros/sensor_topic: uint16 mag degrees, int16 mag_x/y/z raw counts',
         },

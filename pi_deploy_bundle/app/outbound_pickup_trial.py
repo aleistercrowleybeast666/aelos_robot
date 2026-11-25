@@ -21,7 +21,7 @@ from entrance_trial import (EntranceTrial_IsEntryAccepted, EntranceTrial_Observe
                             EntranceTrial_PlanForward, EntranceTrialResult, EntranceTrial_Run)
 from mission_v5 import MissionRobot, PAIR_MOTION_OPS, VISUAL_PICKUP_OPS, defaults, validate_chains
 from micro_trial import MEDIUM_OPS, OPS as MICRO_OPS
-from pickup_controller import validate as validate_pickup
+from pickup_controller import PickupObservationUnavailable, validate as validate_pickup
 from route_pose import RoutePose_TrialLateralHint
 from task_runner import NotReady, Robot
 from transfer_test import validate as validate_transfer
@@ -161,6 +161,9 @@ def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
                 check['heading_reference'] = rebase(1,hint['heading_deg'],hint['latest_stamp_ns']).value
             return
 
+    if robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True:
+        boundary.update(side_start_estimated=True, reason_zh='侧跨前已纠偏，余差留给下一组侧跨和 Tag 1。')
+        return
     boundary.update(side_start_authorized=False,
         reason_zh=f"侧跨前航向余差 {boundary['residual_deg']:+.1f}°，再次纠偏和扫码后仍未确认下一跨方向。")
 
@@ -357,6 +360,7 @@ class _OutboundPickupRobot(MissionRobot):
     def finite(self, op, observation=None, **options):
         if (self.pickup_active and not getattr(self.backend, 'is_simulation', False)
                 and not options.get('configured', False)
+                and options.get('pickup_station') is None
                 and op in VISUAL_PICKUP_OPS):
             if observation is None and op not in ('grab_single','grab_double'):
                 observation = self.last_block
@@ -375,7 +379,7 @@ class _OutboundPickupRobot(MissionRobot):
 
     def _open_block_camera(self,count_only):
         vision = self.mission.get('staged_vision')
-        trial_alignment = not count_only and not self.outbound_only and self.deliveries>0
+        trial_alignment = not self.outbound_only and self.deliveries>0
         if vision is None or not (count_only or trial_alignment):
             return super()._open_block_camera(count_only)
         snapshot = self.ensure_navigation_io().io.preflight_health_snapshot()
@@ -390,7 +394,7 @@ class _OutboundPickupRobot(MissionRobot):
             # Keep the staged vertical crop and use the same confirmed grasp band.
             config['roi'] = [min(left, .08), top, max(right, .92), bottom]
         if [info.get('width'), info.get('height')] != config['resolution']:
-            raise ValueError('方块识别图像尺寸与胸部相机不一致')
+            raise BlockFrameUnavailable('方块识别图像尺寸与胸部相机不一致')
         return BlockCamera(config, scope=self.scope(), staged_publisher=info['publisher'],
                            trial_alignment=trial_alignment)
 
@@ -443,6 +447,7 @@ def _acquire_near_tag1(robot):
 
     with robot._pause_route_timer():
         stalled = 0
+        unresolved_checks = 0
         blocked_pair = None
         for attempt in range(_TAG1_PICKUP_RECHECKS):
             robot.check()
@@ -455,8 +460,19 @@ def _acquire_near_tag1(robot):
             else:
                 try:
                     acquired = robot.pickup.acquire(adjust=adjust,allow_stacked=True)
-                except (BlockFrameUnavailable,BlockEvidenceExpired) as exc:
-                    acquired = {'status': 'no_pickup', 'reason': str(exc)}
+                except (BlockFrameUnavailable,BlockEvidenceExpired,PickupObservationUnavailable) as exc:
+                    if robot.pickup.attempted:
+                        raise
+                    acquired = {'status':'no_pickup','reason':str(exc),'vision_unresolved':True}
+                if (robot.cfg.get('route_steps',{}).get('continue_estimated_route') is True
+                        and acquired['status']=='no_pickup'
+                        and acquired.get('reason_code')!='double_load_capability_unavailable'):
+                    unresolved_checks = unresolved_checks + 1 if len(moves)==completed_moves else 0
+                    if (unresolved_checks>=3 or attempt+1==_TAG1_PICKUP_RECHECKS
+                            or (len(moves)==completed_moves and stalled+1>=_PICKUP_RECHECKS)):
+                        acquired=robot.pickup.Pickup_AcquireAtHandoff(acquired)
+                else:
+                    unresolved_checks=0
             robot.events.append({'pickup': acquired})
             event.update(status=acquired['status'],reason=acquired.get('reason'))
             if acquired['status']!='no_pickup':
@@ -528,8 +544,12 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                     robot.check()
                     try:
                         acquired = robot.pickup.Pickup_AcquireStaged(allow_stacked=True, default_pair=True)
-                    except (BlockFrameUnavailable,BlockEvidenceExpired) as exc:
+                    except (BlockFrameUnavailable,BlockEvidenceExpired,PickupObservationUnavailable) as exc:
                         acquired = {'status': 'no_pickup', 'reason': str(exc)}
+                    if (steps.get('continue_estimated_route') is True and acquired['status']=='no_pickup'
+                            and acquired.get('reason_code')!='double_load_capability_unavailable'
+                            and blocked_pair is None):
+                        acquired=robot.pickup.Pickup_AcquireDefaultPair('operator_staged',acquired['reason'])
                     robot.events.append({'pickup': acquired})
                     if acquired['status']!='no_pickup':
                         break
@@ -580,8 +600,8 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             result.update(status='stage1_partial_alignment', stage=1, scan_result=scan,
                           entry_alignment=alignment, next_stage_started=False, release_protocol_completed=False,
                           reason=alignment.get('reason') or 'Tag 1 entry alignment unconfirmed')
-            if entry_accepted:
-                segment = EntranceTrial_Run(robot, camera_info=alignment['camera_info'], entry_alignment=alignment)
+            if entry_accepted or steps.get('continue_estimated_route') is True:
+                segment = EntranceTrial_Run(robot, camera_info=alignment.get('camera_info'), entry_alignment=alignment)
                 result.update(status='stage2_trial_unconfirmed', stage=2, next_segment=segment,
                               next_stage_started=segment['next_stage_started'], reason=segment['reason'])
                 if segment['detected'] or segment.get('continue_estimated') is True:
@@ -610,7 +630,7 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                                                    else 'included_in_cmd0_place_single')}
                     result['base_turn_trial'] = end
                     robot.events.append({'base_turn_trial': end})
-                    robot._record_progress('cmd2_base_turn', expected_tag=5, last_passed_tag=5)
+                    robot._record_progress('cmd2_base_turn', expected_tag=5, last_passed_tag=result.get('checkpoint'))
                     ReturnTrial_TurnAtBase(robot, turn)
                     end['protocol_completed'] = True
                     result['reason'] = '大本营已完成放物、起立和空载掉头，本轮结束。'

@@ -377,7 +377,10 @@ class Robot:
         goal=next((point for point in cfg['legs']['outbound'] if point['id']==tag_id),{})
         if (visual.get('execute') is not True or visual.get('target_id_confirmed') is not True
                 or visual.get('direction_evidence')!='measured_r3_tag' or goal.get('allow_turn') is not True
-                or abs(error)>visual['max_error_deg']):
+                or (tag_id == 1 and abs(error)>visual['max_error_deg'])
+                or abs(error) >= 90.):
+            # At a corridor marker the caller selects the recovery using the
+            # fresh pose and clearance. The requested action is one micro turn.
             return None
         trigger = _TAG3_VISUAL_MICRO_TRIGGER_DEG if tag_id == 3 else visual['deadband_deg']
         if abs(error) <= trigger:
@@ -405,8 +408,9 @@ class Robot:
         if abs(abs(error)-selection_response)>abs(error)-improvement:
             return None
         timeout=self.cfg['request_timeout_s']
+        route_feedback = tag_id in (2, 3, 4) and self.cfg.get('route_steps', {}).get('continue_estimated_route') is True
         if (self.count+reserved_actions+1>self.cfg['max_body_macros_per_journey']
-                or self.nav_count>=cfg['max_extra_actions_per_journey']
+                or (not route_feedback and self.nav_count>=cfg['max_extra_actions_per_journey'])
                 or self.deadline-self.clock()<=timeout+cfg['settle_s']+cfg['observe_s']):
             return None
         self.check()
@@ -417,7 +421,8 @@ class Robot:
                     and observed_at_ns <= self.last_action_completed_ros_ns)):
             return None
         checker()
-        if not live(observed_at_ns) or not self.micro_budget().reserve('visual',name,gains[name],conservative_bound=bound):
+        if not live(observed_at_ns) or not self.micro_budget().reserve(
+                'visual',name,gains[name],conservative_bound=bound,route_visual_feedback=route_feedback):
             return None
         self._complete_body_action(name,timeout)
         self.nav_count+=1
@@ -1119,16 +1124,29 @@ class Robot:
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);scanner=module.scan_tags
         from tag_reporting import reporting_options,enrich_for_project
         options=dict(self.cfg['terminal_scan']);options['min_fresh_frames']=reporting_options(self.project)['min_frames']
-        result=scanner(options,self.check,options['timeout_s'])
-        if self.cfg.get('transfer_test',{}).get('preflight_sensor_streams') and not getattr(self.backend,'is_simulation',False):
-            nav=self.ensure_navigation_io()
-            window=nav.io.observe(None,0,nav.cfg['observe_s'],self.check)
-            if not window.get('camera_healthy',False):raise RuntimeError('terminal scan camera/AR stream fault; not ordinary missing Tag')
-            result['scan_health']='fresh_camera_and_AR_stream'
+        from visual_micro import VisualCamera_Read, VisualCameraUnavailable
+        try:
+            result=VisualCamera_Read(lambda check:scanner(options,check,options['timeout_s']),self.check)
+            if result.get('status')=='cancelled':raise RuntimeError('AR observation cancelled')
+            if self.cfg.get('transfer_test',{}).get('preflight_sensor_streams') and not getattr(self.backend,'is_simulation',False):
+                nav=self.ensure_navigation_io()
+                window=VisualCamera_Read(lambda check:nav.io.observe(None,0,nav.cfg['observe_s'],check),self.check)
+                if not window.get('camera_healthy',False):raise VisualCameraUnavailable('terminal scan camera/AR stream fault')
+                result['scan_health']='fresh_camera_and_AR_stream'
+        except VisualCameraUnavailable as exc:
+            if not self._allows_unobserved_tag():raise
+            self.check()
+            result={'type':'AR_TAG_ALVAR','status':'unavailable','ids':[],'observations':[],
+                    'scan_health':'unavailable','reason':'本轮扫码缺少可用图像，按预设路线继续。','detail':str(exc)}
         result=enrich_for_project(result,self.project,self.load_kind)
-        self.add_pixel_diagnostics(result)
+        from entry_camera import CameraUnavailable
+        try:
+            self.add_pixel_diagnostics(result)
+        except (CameraUnavailable,VisualCameraUnavailable) as exc:
+            if not self._allows_unobserved_tag():raise
+            self.check()
+            result['pixel_y_diagnostic']={'status':'unavailable','diagnostic_only':True,'diagnostic_reasons':[str(exc)]}
         self.events.append({'AR_scan':result})
-        if result.get('status')=='cancelled':raise RuntimeError('AR observation cancelled')
         return result
 
     def add_pixel_diagnostics(self,scan):
@@ -1151,10 +1169,12 @@ class Robot:
         injected=getattr(self.backend,'observe_entry',None)
         from entry_camera import CameraUnavailable
         try:
-            if injected is not None:window=injected(profile,None,profile['window_timeout_s'])
+            from visual_micro import VisualCamera_Read
+            if injected is not None:window=VisualCamera_Read(lambda _:injected(profile,None,profile['window_timeout_s']),self.check)
             else:
                 from entry_observer import observe_entry_window
-                window=observe_entry_window(profile,self.cfg['terminal_scan'],self.check,timeout_s=profile['window_timeout_s'])
+                window=VisualCamera_Read(lambda check:observe_entry_window(profile,self.cfg['terminal_scan'],check,
+                                         timeout_s=profile['window_timeout_s']),self.check)
         except CameraUnavailable as exc:
             # Only this exact ordinary-loss event is nonfatal in this read-only
             # diagnostic. Clock/source/camera/transport failures remain faults.
@@ -1186,6 +1206,9 @@ class Robot:
     def close_navigation(self):
         nav=getattr(self,'navigator',None)
         if nav is not None:nav.close();self.navigator=None
+    def _allows_unobserved_tag(self):
+        return (getattr(self,'command0_scan_after_turn',False) is True
+                and self.cfg.get('route_steps',{}).get('continue_estimated_route') is True)
     def calibrate_tag(self,tag_id,direction='outbound'):
         """插码校准：普通失码/不可信位姿只返回续走，不吞动作或通信异常。"""
         cfg=getattr(self,'navigation_bundle',None)
@@ -1204,12 +1227,14 @@ class Robot:
                 RoutePose_Load(self.project),tag_id,camera_info=nav.get('camera_info'))
         self.events.append({'AR_checkpoint':nav}) # retain the primary result even if optional reporting faults
         from entry_camera import CameraUnavailable
+        from visual_micro import VisualCameraUnavailable
         try:
             self.add_pixel_diagnostics(scan)
-        except CameraUnavailable as exc:
+        except (CameraUnavailable,VisualCameraUnavailable) as exc:
             from entrance_trial import EntranceTrial_IsEntryAccepted
             if (not getattr(self,'command0_scan_after_turn',False)
-                    or not EntranceTrial_IsEntryAccepted(nav)):
+                    or not (EntranceTrial_IsEntryAccepted(nav)
+                            or self.cfg.get('route_steps', {}).get('continue_estimated_route') is True)):
                 raise
             self.check()
             scan['pixel_y_diagnostic']={'status':'unavailable','diagnostic_only':True,
@@ -1217,7 +1242,7 @@ class Robot:
         return scan
 
     def visual_checkpoint(self,tag_id,direction='outbound',*,departure_pose=None):
-        from visual_micro import VisualMicro, VisualMicroStopped, VisualMicro_ObserveWithoutMagnetic
+        from visual_micro import VisualCameraUnavailable, VisualMicro, VisualMicroStopped, VisualMicro_ObserveWithoutMagnetic
         nav=self.ensure_navigation_io();cfg=nav.cfg
         if direction!='outbound':raise RuntimeError('v10 dedicated visual micro is only scoped to command-0 outbound endpoint')
         metric_departure=departure_pose is not None
@@ -1262,6 +1287,7 @@ class Robot:
                                motion_model=self.heading_guard,defer_predicted_overshoot=defer_visual_prediction,
                                allow_missing_magnetic=self._allows_missing_magnetic(), allow_double=pair_route_enabled,
                                defer_heading_at_deg=defer_heading_at_deg)
+        controller.allow_unobserved_tag=tag_id==1 and not metric_departure and self._allows_unobserved_tag()
         forward_search=(not metric_departure and defer_visual_prediction and self._tag1_prefers_forward_search(tag_id)
                         and cfg['visual_micro'].get('execute') and cfg['visual_micro'].get('confirmed_target_id')==tag_id)
         approach={'target_id':tag_id,'completed_actions':[],'observations':[]}
@@ -1340,6 +1366,17 @@ class Robot:
         def record_checkpoint_failure(exc):
             self.events.append({'visual_checkpoint_failure':{'target_id':tag_id,'reason':str(exc),'report':getattr(exc,'report',None)}})
             self.boundary_visual_observation('visual_checkpoint_failure',fault_diagnostic=True)
+
+        def unobserved_entry(exc):
+            if not controller.allow_unobserved_tag:raise exc
+            self.check()
+            self.last_boundary_visual=None
+            self.events.append({'visual_checkpoint_failure':{'target_id':tag_id,'reason':str(exc),'report':exc.report}})
+            reason='Tag 1 图像或相机校验不可用，本轮未确认位姿，按预设路线继续。'
+            return {'status':'partial','expected_id':tag_id,'reason':reason,'reason_zh':reason,
+                    'fresh_target_detected':False,'pose_accepted':False,'heading_aligned':False,
+                    'scan':{'status':'unavailable','ids':[],'observed_ids':[],'observations':[],'pose_usable':False},
+                    'camera_info':{},'ready_for_obstacle':False,'position_controlled':False}
 
         def observe_turned_stance():
             after=nav.io.ros_now_ns()
@@ -1508,9 +1545,13 @@ class Robot:
             if exc.report is not None:self.events.append({'visual_checkpoint_before_magnetic_loss':exc.report})
             try:
                 result=passive_checkpoint()
+            except VisualCameraUnavailable as passive_error:
+                result=unobserved_entry(passive_error)
             except Exception as passive_error:
                 record_checkpoint_failure(passive_error)
                 raise
+        except VisualCameraUnavailable as exc:
+            result=unobserved_entry(exc)
         except Exception as exc:
             record_checkpoint_failure(exc)
             raise
@@ -1813,7 +1854,11 @@ class Robot:
                 after_ns=settled
         target=goal['id']
         observe=getattr(nav.io,'observe_checkpoint_id',nav.io.observe) if quick_id else nav.io.observe
-        window=observe(target,after_ns,remaining,self.check)
+        from visual_micro import VisualCamera_Read, VisualCameraUnavailable
+        if self._allows_unobserved_tag():
+            window=VisualCamera_Read(lambda check:observe(target,after_ns,remaining,check),self.check)
+        else:
+            window=observe(target,after_ns,remaining,self.check)
         self.check()
         evidence={'camera_healthy':window.get('camera_healthy') is True,
                   'contract_match':window.get('contract_match') is True,
@@ -1832,12 +1877,12 @@ class Robot:
                     self.events.append({'terminal_stationary_reobserve':{'target_id':target,
                         'body_commands':0,'reason_zh':issue[1]}})
                 if not issue[2]:
-                    raise RuntimeError(issue[0])
+                    raise VisualCameraUnavailable(issue[0])
                 return dict(result,tag_observation=evidence)
         if not window.get('camera_healthy'):
-            raise RuntimeError('terminal stationary retry camera/AR stream fault')
+            raise VisualCameraUnavailable('terminal stationary retry camera/AR stream fault')
         if nav.cfg['visual_micro'].get('execute') and not window.get('camera_info',{}).get('ready'):
-            raise RuntimeError('terminal stationary retry CameraInfo unavailable')
+            raise VisualCameraUnavailable('terminal stationary retry CameraInfo unavailable')
         from nav_observation import summarize
         scan=summarize(window,target,nav.cfg,after_ns)
         if quick_entry:
@@ -2028,8 +2073,10 @@ def execute(plan,backend,robot_factory=Robot):
                 return {'status':'stage1_alignment_stopped','command':mode,'scan_result':scan,'entry_alignment':alignment,'events':list(robot.events),'next_stage_started':False,'expected_load':robot.load_kind,'physical_load_sensor_confirmation':False}
             from entrance_trial import EntranceTrial_IsEntryAccepted, EntranceTrial_Run
             if (robot.command0_scan_after_turn and not getattr(backend,'is_simulation',False)
-                    and EntranceTrial_IsEntryAccepted(alignment)):
-                segment=EntranceTrial_Run(robot,camera_info=alignment['camera_info'],entry_alignment=alignment)
+                    and (EntranceTrial_IsEntryAccepted(alignment)
+                         or (cfg.get('route_steps', {}).get('continue_estimated_route') is True
+                             and Cmd0Motion_ContinuousReady(backend)))):
+                segment=EntranceTrial_Run(robot,camera_info=alignment.get('camera_info'),entry_alignment=alignment)
                 if 'terminal_turn' in scan:
                     scan['terminal_turn']['visual_trial_started']=segment['next_stage_started']
                 result={'status':('stage2_checkpoint_reached' if segment['detected'] else 'stage2_trial_unconfirmed'),

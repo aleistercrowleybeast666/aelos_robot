@@ -35,11 +35,13 @@ _PARTIAL_POSE_HISTORY_FRAMES = 8
 
 
 def EntranceTrial_IsEntryAccepted(alignment):
-    observation = alignment.get('scan', {})
-    heading = alignment.get('decision_fusion', {})
+    if not alignment:
+        return False
+    observation = alignment.get('scan') or {}
+    heading = alignment.get('decision_fusion') or {}
     identified = (alignment.get('expected_id') == 1
             and alignment.get('fresh_target_detected') is True
-            and alignment.get('camera_info', {}).get('ready') is True
+            and (alignment.get('camera_info') or {}).get('ready') is True
             and observation.get('ids') == [1])
     if alignment.get('tag1_nominal_entry') is True:
         return identified
@@ -108,6 +110,9 @@ def EntranceTrial_ObserveCheckpoint(robot, nav, result, report_wait, *, quick_id
                                     advisory_windows=None, reuse_settled_cache=False):
     """Read the expected ID after acknowledged motion, with an optional ordinary-miss limit."""
     expected_id = result['expected_id']
+    if (miss_policy is None and not single_window and advisory_windows is None
+            and robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True):
+        miss_policy = 'continue_estimated'
     observe = getattr(nav.io, 'observe_checkpoint_id', nav.io.observe) if quick_id else nav.io.observe
     robot.settle_since_last_completed(nav.cfg['settle_s'])
     floor = robot.last_action_completed_ros_ns
@@ -199,7 +204,12 @@ def EntranceTrial_ObserveCheckpoint(robot, nav, result, report_wait, *, quick_id
             snapshot = getattr(nav.io, 'boundary_visual_snapshot', None)
             settled_at = floor + int(nav.cfg['settle_s'] * 1e9)
             if snapshot is not None and 0 < floor <= settled_at <= after:
-                cached = snapshot(settled_at, robot.check)
+                try:
+                    cached = snapshot(settled_at, robot.check)
+                except OSError as exc:
+                    robot.check()
+                    result['camera_cache_error'] = str(exc)
+                    cached = {}
                 if (cached.get('boundary_valid') is True and cached.get('camera_healthy') is True
                         and cached.get('contract_match') is True):
                     cached_scan = summarize(cached, expected_id, nav.cfg, settled_at)
@@ -211,7 +221,12 @@ def EntranceTrial_ObserveCheckpoint(robot, nav, result, report_wait, *, quick_id
                         # Keep partial samples from this settled stance eligible while collecting fresh frames.
                         after = settled_at
         if window is None:
-            window = observe(expected_id, after, nav.cfg['observe_s'], robot.check)
+            try:
+                window = observe(expected_id, after, nav.cfg['observe_s'], robot.check)
+            except OSError as exc:
+                robot.check()
+                result.update(detected=False, scan=None, camera_info={}, camera_read_error=str(exc))
+                return EntranceTrialResult.CAMERA_UNAVAILABLE, f'Tag {expected_id} 当前扫码窗口读取失败：{exc}'
         floor = window['now_ns']
         if type(floor) is not int or floor < after:
             return EntranceTrialResult.CAMERA_UNAVAILABLE, 'ROS clock moved backwards during Tag {} observation'.format(expected_id)
@@ -371,7 +386,8 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
         alignment = VisualMicro_ObserveWithoutMagnetic(nav.cfg, nav.io, 1, goal, after_ns=after,
             deadline=min(robot.deadline, robot.clock()+nav.cfg['settle_s']+2*nav.cfg['observe_s']),
             check=robot.check, clock=robot.clock, accept_trusted_residual=True)
-    except VisualMicroStopped as exc:
+    except (VisualMicroStopped, OSError) as exc:
+        robot.check()
         recovery['reobserve_reason'] = str(exc)
         return None
     scan = alignment['scan']
@@ -542,6 +558,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
 
     expected_id = end['tag']
     route_steps = robot.cfg.get('route_steps', {})
+    estimate = route_steps.get('continue_estimated_route') is True
     target_steps = route_steps.get('tag1_to_tag2_forward_steps', forward['steps'])
     continuous = Cmd0Motion_ContinuousReady(robot.backend)
     legacy = not continuous and Cmd0Motion_LegacyReady(robot.backend)
@@ -573,24 +590,37 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
     if [point['id'] for point in points[:2]] != [start['tag'], expected_id]:
         return set_status(EntranceTrialResult.MOTION_NOT_STARTED, 'configured outbound Tag order differs from entry trial')
 
+    if estimate and not EntranceTrial_IsEntryAccepted(entry_alignment):
+        result['entry_fallback'] = 'Tag 1 找码后仍未取得位姿，按预设步数走向 Tag 2。'
+        entry_alignment = camera_info = None
     if camera_info is not None:
         snapshot = getattr(nav.io, 'preflight_health_snapshot', None)
-        health = snapshot() if snapshot is not None else {}
+        try:
+            health = snapshot() if snapshot is not None else {}
+        except OSError as exc:
+            robot.check()
+            result['camera_read_error'] = str(exc)
+            health = {}
         current = health.get('camera_info', {})
         if (not health.get('camera_healthy') or not current.get('ready')
                 or not camera_info.get('fingerprint') or current.get('fingerprint') != camera_info['fingerprint']):
-            return set_status(EntranceTrialResult.CAMERA_UNAVAILABLE, 'chest camera stream or calibration changed before entry trial')
+            if not estimate:
+                return set_status(EntranceTrialResult.CAMERA_UNAVAILABLE, 'chest camera stream or calibration changed before entry trial')
+            result['entry_fallback'] = '胸部相机数据源已变化，舍弃旧位姿，按预设步数走向 Tag 2。'
+            entry_alignment = camera_info = None
 
     original_alignment = entry_alignment
     entry_alignment = _tag1_recover_departure(robot, nav, points[0], entry_alignment, result,
                                              reserved_actions=len(operations))
     if entry_alignment is None and original_alignment is not None:
-        return set_status(EntranceTrialResult.MOTION_NOT_STARTED,
-                          'Tag 1 纠偏后未重新确认入口航向，保留持物并记录本次恢复动作。')
-    if entry_alignment is not original_alignment:
+        if not estimate:
+            return set_status(EntranceTrialResult.MOTION_NOT_STARTED,
+                              'Tag 1 纠偏后未重新确认入口航向，保留持物并记录本次恢复动作。')
+        result['entry_fallback'] = 'Tag 1 纠偏后暂不可见，沿预设路线进入下一段。'
+    if entry_alignment is not None and entry_alignment is not original_alignment:
         camera_info = entry_alignment['camera_info']
     entry_stance_ns = robot.last_action_completed_ros_ns
-    nominal_entry = bool(entry_alignment and entry_alignment.get('tag1_nominal_entry') is True)
+    nominal_entry = bool(result.get('entry_fallback') or entry_alignment and entry_alignment.get('tag1_nominal_entry') is True)
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     tag_rebased = False
     if rebase is not None and not nominal_entry and entry_alignment and EntranceTrial_IsEntryAccepted(entry_alignment):
@@ -604,14 +634,14 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         robot.prepare_heading_segment(fresh=False)
         result['entry_heading_source'] = 'retained_magnetic_reference'
         result['forward_plan'] = {'status': 'nominal', 'count': target_steps,
-                                  'reason': 'Tag 1 identified, but metric pose was not used'}
+                                  'reason': result.get('entry_fallback', 'Tag 1 identified, but metric pose was not used')}
     elif not tag_rebased:
         # Establish a fresh relative zero if the Tag reading has expired or the
         # Mag stream cannot be paired with the confirmed departure stance.
         nav.mag.anchor = None
         robot.prepare_heading_segment(fresh=True)
     if (nav.cfg['post_action_heading'].get('enabled') and nav.mag.anchor is None
-            and not getattr(robot,'magnetic_route_only',False)):
+            and not getattr(robot,'magnetic_route_only',False) and not estimate):
         return set_status(EntranceTrialResult.MOTION_NOT_STARTED, 'fresh straight-segment heading reference unavailable')
     if entry_alignment is not None and not nominal_entry:
         profile = RoutePose_Load(robot.project)
@@ -636,9 +666,16 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
             if motion_ready is not None and not motion_ready(stamp):
                 # Heading preparation can outlive the original camera window.
                 # Reacquire once when a calibrated change would otherwise be usable.
-                fresh = nav.io.observe(start['tag'], nav.io.ros_now_ns(), nav.cfg['observe_s'], robot.check)
-                new_pose, new_plan = _tag1_forward_plan(nav, profile, robot.load_kind, fresh, fresh.get('camera_info'),
-                                                       target_steps, trial_options, trial_stride)
+                try:
+                    fresh = nav.io.observe(start['tag'], nav.io.ros_now_ns(), nav.cfg['observe_s'], robot.check)
+                except OSError as exc:
+                    robot.check()
+                    result['camera_read_error'] = str(exc)
+                    fresh, new_pose = {}, {}
+                    new_plan = {'status': 'nominal', 'count': target_steps, 'reason': 'Tag 1 重扫暂时不可用'}
+                else:
+                    new_pose, new_plan = _tag1_forward_plan(nav, profile, robot.load_kind, fresh, fresh.get('camera_info'),
+                                                           target_steps, trial_options, trial_stride)
                 if (camera_info and entry_alignment.get('pose_accepted') is True
                         and 'distance_m' not in new_plan and new_plan['count'] == target_steps
                         and _tag1_same_stance_reference(robot, nav, plan, entry_scan, fresh, camera_info, entry_stance_ns)):
@@ -746,6 +783,11 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         lambda: _report_progress(robot, 'cmd0_next_scan_wait', result), miss_policy='continue_estimated',
         advisory_windows=2 if partial_boundary or use_boundary_plan else None,
         quick_id=live_tag2_trial, reuse_settled_cache=live_tag2_trial)
+    if estimate and observed is EntranceTrialResult.CAMERA_UNAVAILABLE:
+        result['checkpoint_not_seen'] = {'tag_id': 2, 'policy': 'continue_estimated',
+                                       'cause': 'camera_stream_unhealthy', 'detail': reason}
+        observed = EntranceTrialResult.CHECKPOINT_NOT_SEEN
+        reason = 'Tag 2 观测不可用，先在侧跨起点找码，再沿预设路线继续。'
     if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
         result['continue_estimated'] = True
         if result.get('tag2_boundary_sighting'):

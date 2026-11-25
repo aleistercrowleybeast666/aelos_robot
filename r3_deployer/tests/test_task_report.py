@@ -9,6 +9,24 @@ from r3_deployer.control_api import RobotControlUncertainError
 
 
 class TaskReportTests(unittest.TestCase):
+    def test_nominal_release_and_default_pair_reports_do_not_claim_a_visual_detection(self):
+        result = {"ok":True, "pickup":{"default_pair_station":"tag1_handoff","observed_count":None,
+                  "grip_count":2,"vision_reason":"block camera has no fresh post-settle stream"},
+                  "return_trial":{"estimated_pickup_anchor_tag":1},
+                  "next_segment":{"checkpoint_not_seen":{"tag_id":2,"policy":"continue_estimated",
+                                                         "cause":"insufficient_frames"}},
+                  "corridor_trial":{"detected":False,"release_protocol_completed":True,
+                        "missing_checkpoints":[{"tag_id":5,"policy":"hold_load_for_placement",
+                                                "cause":"camera_stream_unhealthy"}]}}
+        text = "\n".join(task_report.TaskReport_Diagnostics(result))
+        self.assertIn("返程接驳区未确认方块数量",text)
+        self.assertIn("动作结束后未收到新的方块相机帧",text)
+        self.assertIn("返程 Tag 1 未确认",text)
+        self.assertIn("Tag 2 已解码，有效帧不足",text)
+        self.assertIn("Tag 5 扫码流暂未恢复 · 已记录，按预定路线继续",text)
+        self.assertNotIn("保持持物",text)
+        self.assertNotIn("识别到 2 块",text)
+
     def setUp(self):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

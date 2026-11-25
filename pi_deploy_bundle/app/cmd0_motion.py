@@ -82,7 +82,7 @@ def Cmd0Motion_LoadRouteSteps(project):
         raise ValueError('无法读取路线步数配置 route_steps.json') from exc
     optional = {'command0_transfer', 'pickup_exit', 'command1_pickup_exit', 'corridor', 'return_chain', 'wall_pickup_advance_steps',
                 'micro_turn_filter', 'tag5_entry_lateral', 'tag2_forward_trial', 'command2_continue_return',
-                'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps'}
+                'continue_estimated_route', 'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps'}
     if not isinstance(steps, dict) or not defaults.keys() <= steps.keys() or steps.keys()-defaults.keys()-optional:
         raise ValueError('路线步数配置需要 transfer_forward_steps 和 tag1_to_tag2_forward_steps 两项')
     if any(type(steps[key]) is not int or not 2 <= steps[key] <= 80 for key in defaults):
@@ -99,6 +99,8 @@ def Cmd0Motion_LoadRouteSteps(project):
                 or any(type(action) is not str or action not in _PICKUP_EXIT_AVAILABLE for action in actions)
                 or actions.count(PICKUP_MATCH_OUTBOUND_STRAFES) > 1):
             raise ValueError(f'{field} 包含不支持的抱物动作')
+    if 'continue_estimated_route' in steps and type(steps['continue_estimated_route']) is not bool:
+        raise ValueError('continue_estimated_route 需填写 true 或 false')
     if 'command2_continue_return' in steps and type(steps['command2_continue_return']) is not bool:
         raise ValueError('command2_continue_return 需填写 true 或 false')
     before_base_turn = steps.get('command2_before_base_turn_extra_steps', 0)
@@ -142,7 +144,7 @@ def Cmd0Motion_LoadRouteSteps(project):
             continue
         trim = steps[key]
         keys = {'enabled', 'target_distance_m', 'deadband_m', 'two_step_distance_m', 'distance_window_m'}
-        optional = {'approach_two_step_distance_m'} if tag == 2 else {'left_departure_reference'}
+        optional = {'approach_two_step_distance_m'} if tag == 2 else {'left_departure_reference', 'heading_use_within_m'}
         if (not isinstance(trim, dict) or not keys <= trim.keys() <= keys | optional
                 or type(trim['enabled']) is not bool):
             raise ValueError(f'Tag {tag} 前后试跑补偿配置无效')
@@ -155,6 +157,10 @@ def Cmd0Motion_LoadRouteSteps(project):
                 or not 0 < window[0] < target < window[1] or deadband <= 0
                 or not 0 < travel[0] < travel[1] or not 0 < approach[0] < approach[1]):
             raise ValueError(f'Tag {tag} 前后试跑补偿需填写有效的目标距离、容差和两步距离范围')
+        if 'heading_use_within_m' in trim:
+            cutoff = trim['heading_use_within_m']
+            if type(cutoff) not in (int, float) or not isfinite(cutoff) or not target+deadband < cutoff <= window[1]:
+                raise ValueError('Tag 4 航向使用距离须大于进近目标范围，并位于观测范围内')
         if 'left_departure_reference' in trim:
             reference = trim['left_departure_reference']
             fields = {'distance_m', 'distance_deadband_m', 'lateral_m', 'heading_deg'}

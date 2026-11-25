@@ -70,22 +70,26 @@ class MicroBudget:
         self.max_actions=max_actions
         self.limit_total_angle=limit_total_angle is not False
         self.actions=0;self.nominal_degrees=0.;self.accounted_degrees=0.;self.locked=False;self.reason=None;self.history=[]
-    def available(self,delta,conservative_bound=None,*,op=None):
+    def available(self,delta,conservative_bound=None,*,op=None,route_visual_feedback=False):
+        fresh_route_turn = route_visual_feedback and op in OPS and not self.limit_total_angle
         bound=abs(delta) if conservative_bound is None else conservative_bound
         if op in MEDIUM_OPS:
             return (type(bound) in (int,float) and math.isfinite(bound)
                     and abs(delta)==MEDIUM_NOMINAL_DEG and MEDIUM_NOMINAL_DEG<=bound<=MEDIUM_MAX_RESPONSE_DEG
                     and self.max_step_deg==20. and not self.limit_total_angle
                     and not self.locked and self.actions<self.max_actions)
-        return (type(bound) in (int,float) and math.isfinite(bound) and 5<=bound<=self.max_step_deg and not self.locked and self.actions<self.max_actions and abs(delta)==5 and (not self.limit_total_angle or self.accounted_degrees+bound<=5*self.max_actions))
-    def reserve(self,source,op,delta,conservative_bound=None):
+        return (type(bound) in (int,float) and math.isfinite(bound) and 5<=bound<=self.max_step_deg and not self.locked and (self.actions<self.max_actions or fresh_route_turn) and abs(delta)==5 and (not self.limit_total_angle or self.accounted_degrees+bound<=5*self.max_actions))
+    def reserve(self,source,op,delta,conservative_bound=None,*,route_visual_feedback=False):
         if not (source in ('magnetic','visual') and op in OPS or source=='magnetic' and op in MEDIUM_OPS):
             raise ValueError('dedicated turn budget scope')
-        if not self.available(delta,conservative_bound,op=op):return False
+        if not self.available(delta,conservative_bound,op=op,
+                              route_visual_feedback=source=='visual' and route_visual_feedback):return False
         self.actions+=1;self.nominal_degrees+=abs(delta)
         bound=abs(delta) if conservative_bound is None else conservative_bound
         self.accounted_degrees+=bound
         self.history.append(dict(source=source,op=op,signed_nominal_delta_deg=delta,evidence='source_nominal',conservative_accounting_deg=bound,attempt_reserved_before_dispatch=True))
+        if route_visual_feedback and self.actions > self.max_actions:
+            self.history[-1]['fresh_route_visual_feedback'] = True
         return True
     def reconcile(self,conservative_bound,*,confirmed_right_overrun=False,feedback_only_response=False):
         """Charge the observed response; opted-in route feedback uses the action count."""
