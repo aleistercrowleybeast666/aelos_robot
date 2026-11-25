@@ -710,7 +710,8 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
     max_abs_heading = max(abs(value) for value in headings)
     result.update(distance_m=median(depths), lateral_error_m=error, heading_deg=heading,
                   latest_stamp_ns=max(positions), samples=len(positions), depth_bounds_m=depth_bounds,
-                  lateral_bounds_m=lateral_bounds, max_abs_heading_deg=max_abs_heading, entering=entering)
+                  lateral_bounds_m=lateral_bounds, heading_bounds_deg=(min(headings), max(headings)),
+                  max_abs_heading_deg=max_abs_heading, entering=entering)
     if (depth_bounds[1]-depth_bounds[0] > .035 or lateral_bounds[1]-lateral_bounds[0] > .025
             or any(abs(wrap(yaw-heading)) > 5 for yaw in headings)):
         return dict(result, reason='Tag 5 ground poses disagree across the fresh frames')
@@ -735,8 +736,9 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
     # Lateral correction uses the Tag frame even when the body yaw prevents
     # forward motion. Avoid translating when the side axes point apart.
     goal = next((goal for goal in nav_cfg['legs']['outbound'] if goal['id'] == 5), {})
-    if (goal.get('allow_strafe') is True
-            and min(pose['body_right_in_tag_right'] for pose in poses) > .5):
+    result['lateral_recovery_allowed'] = (goal.get('allow_strafe') is True
+                                         and min(pose['body_right_in_tag_right'] for pose in poses) > .5)
+    if result['lateral_recovery_allowed']:
         projected_bounds = result.get('projected_lateral_bounds_m')
         if projected_bounds is not None and projected_bounds[1]-projected_bounds[0] <= 2*limit:
             error = sum(projected_bounds)/2

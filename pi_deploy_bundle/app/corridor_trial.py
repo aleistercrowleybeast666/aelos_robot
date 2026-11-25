@@ -30,6 +30,7 @@ _TAG4_APPROACH_GROUPS = 4
 _TAG4_STRAIGHT_LATERAL_M = .16
 _TAG4_CLEARANCE_YAW_DEG = 22.
 _TAG4_RECOVERY_CENTER_STRAFES = 2
+_TAG4_RECOVERY_STRAFE_UPPER_M = .10  # A field cycle shifted roughly 9 cm.
 _LARGE_STRAFE_TRAVEL_UPPER_M = .075
 _TAG3_RIGHT_OFFSET_M = .075
 _TAG3_TRIAL_MAX_RIGHT_STRIDES = 7
@@ -71,6 +72,7 @@ class CorridorTrialResult(Enum):
 class CorridorLateralHeadingResult(Enum):
     PROCEED = 'proceed'
     RECHECK_CLEARANCE = 'recheck_clearance'
+    DEFERRED_TO_SMALL_STRAFE = 'deferred_to_small_strafe'
 
 
 def CorridorTrial_DefaultChain():
@@ -380,7 +382,8 @@ def _move_lateral_clearance(robot, operation, initial, deadband, *, allow_extra)
 
 
 def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, pending_actions,
-                                     expected_tag=None, *, allow_turn=True, allow_clearance_translation=True):
+                                     expected_tag=None, *, allow_turn=True, allow_clearance_translation=True,
+                                     small_strafe_follows=False):
     """At a completed lateral boundary, check drift and recover heading where allowed."""
     load = robot.load_kind
     initial = CorridorTrial_HeadingSnapshot(report, after=False, load=load)
@@ -405,6 +408,10 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
         min(abs(drift), abs(initial[0])) >= _LATERAL_LARGE_DRIFT_DEG
         or (tag2_to_tag3 and abs(initial[0]) >= _LATERAL_LARGE_DRIFT_DEG and abs(drift) > 2 * deadband))
     check['large_drift'] = large_drift
+    if (small_strafe_follows and before is None and initial is not None
+            and deadband < abs(initial[0]) <= 2 * deadband):
+        check['compensation_status'] = 'heading_deferred_to_small_strafe'
+        return CorridorLateralHeadingResult.DEFERRED_TO_SMALL_STRAFE
     if (tag2_to_tag3 and initial is not None and abs(initial[0]) > _LATERAL_CLEARANCE_HEADING_DEG
             and (drift is None or abs(drift) >= _LATERAL_LARGE_DRIFT_DEG)):
         check['large_drift'] = True
@@ -806,28 +813,58 @@ def _tag4_recovery_strafe(plan, recovery, settings):
     inward = (1 if right < 0 and left < -_TAG4_STRAIGHT_LATERAL_M else
               -1 if left > 0 and right > _TAG4_STRAIGHT_LATERAL_M else 0)
     outside = max(abs(left), abs(right))
-    if (abs(yaw) >= _TAG4_CLEARANCE_YAW_DEG and abs(yaw) <= 35.
+    travel = _TAG4_RECOVERY_STRAFE_UPPER_M
+    if (_TAG4_CLEARANCE_YAW_DEG <= abs(yaw) <= 35.
             and 'clearance_strafe' not in recovery and not centers and outside <= .22):
-        direction = inward if near < target + band and inward else (-1 if yaw < 0 else 1)
-        purpose = 'clearance_strafe'
+        turn_side = -1 if yaw < 0 else 1
+        # Keep the whole step closer to the corridor center when the pose proves a side.
+        preferred = (1 if right <= -travel / 2 else -1 if left >= travel / 2 else turn_side)
+        directions, purpose = (preferred, -preferred), 'clearance_strafe'
     elif (inward and abs(yaw) < _TAG4_CLEARANCE_YAW_DEG
             and len(centers) < _TAG4_RECOVERY_CENTER_STRAFES and outside <= .30
             and (not centers or abs(median((left, right))) < abs(centers[-1]['before_lateral_m']) - .01)):
-        direction, purpose = inward, 'centering_strafes'
+        directions, purpose = (inward,), 'centering_strafes'
     else:
         return None
 
-    # A body-relative side step has a depth component when the robot is skewed.
-    # Check the nearest possible landing before moving at the normal stop line.
     spread = plan['max_heading_deviation_deg']
-    shifts = [_LARGE_STRAFE_TRAVEL_UPPER_M * direction * sin(radians(angle))
-              for angle in (yaw - spread, yaw + spread)]
-    if near + min(0., *shifts) < max(min_depth, target - band):
-        return None
-    return 'strafe_left_once' if direction < 0 else 'strafe_right_once', purpose
+    lateral_limit = max(outside, _TAG4_STRAIGHT_LATERAL_M)
+    for direction in directions:
+        shift = direction * travel
+        if outside >= travel / 2 and median((left, right)) * direction > 0:
+            continue
+        if left + min(0., shift) < -lateral_limit or right + max(0., shift) > lateral_limit:
+            continue
+        depth_shifts = [shift * sin(radians(angle)) for angle in (yaw - spread, yaw + spread)]
+        if near + min(0., *depth_shifts) >= max(min_depth, target - band):
+            operation = 'strafe_left_once' if direction < 0 else 'strafe_right_once'
+            return operation, purpose
+    return None
 
 
-def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *, leg, approach_steps, reserved_actions):
+def _tag4_can_reverse_approach(plan, settings, last_action):
+    if last_action not in ('carry_forward', 'carry_forward2', 'carry_forward4'):
+        return False
+    near, far = plan['distance_bounds_m']
+    minimum, maximum = settings.get('distance_window_m', (.045, .55))
+    lower_target = settings.get('target_distance_m', .175) - settings.get('deadband_m', .035)
+    if not max(minimum, .06) <= near <= far < lower_target:
+        return False
+    yaw, spread = plan['heading_deg'], plan['max_heading_deviation_deg']
+    projection_min, projection_max = plan.get('projection_bounds', (0., 0.))
+    if abs(yaw) + spread > _TAG4_CLEARANCE_YAW_DEG or projection_min < .75:
+        return False
+    travel = max(.10, settings.get('two_step_distance_m', (.04, .075))[1])
+    shifts = [0., *(-travel * sin(radians(angle)) for angle in (yaw-spread, yaw+spread))]
+    left, right = plan['lateral_bounds_m']
+    # Reverse only inside the known straight corridor, with the entire sweep accounted for.
+    return (far + travel * projection_max <= maximum
+            and left + min(shifts) >= -_TAG4_STRAIGHT_LATERAL_M
+            and right + max(shifts) <= _TAG4_STRAIGHT_LATERAL_M)
+
+
+def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *, leg, approach_steps, reserved_actions,
+                               prior_action=None):
     """Reframe, turn, and verify a fresh corridor pose before any further straight motion."""
     turn_from_tag = getattr(robot, 'Route_TurnFromTagHeading', None)
     strafe = getattr(robot, 'corridor_side_action', None)
@@ -856,6 +893,14 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
             side = (_tag4_recovery_strafe(plan, recovery, settings)
                     if strafe is not None and goal.get('allow_strafe') is True else None)
             remaining = robot.cfg['max_body_macros_per_journey'] - robot.count - reserved_actions
+            can_reverse = ('approach_retreat' not in recovery and remaining >= 2
+                           and _tag4_can_reverse_approach(plan, settings,
+                               (leg['completed_actions'] or [prior_action])[-1]))
+            has_side_clearance = 'clearance_strafe' in recovery or recovery.get('centering_strafes')
+            direct_turn_room = (side is None and abs(error) <= 30.
+                                and plan['distance_bounds_m'][0] >= settings.get('target_distance_m', .175)
+                                and max(map(abs, bounds)) <= .12
+                                and plan.get('projection_bounds', (0.,))[0] >= .75)
             if side is not None and remaining >= (2 if side[1] == 'clearance_strafe' else 1):
                 operation, purpose = side
                 label = '左跨' if operation == 'strafe_left_once' else '右跨'
@@ -873,15 +918,25 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
                     else:
                         recovery.setdefault(purpose, []).append(record)
                     moved = True
+            elif can_reverse and live(stamp):
+                operation = 'cmd0_carry_backward2'
+                reason = 'Tag 4 距码过近，沿刚走过的直行后退两步，再按新位姿纠偏。'
+                _report_progress(robot, 'cmd0_corridor_scan', 3, 4, leg=leg, reason_zh=reason)
+                robot.action(operation, monitor_only_as=operation)
+                leg['completed_actions'].append(operation)
+                recovery['approach_retreat'] = {'action': operation, 'reason_zh': reason,
+                                                'before_distance_m': plan['distance_m']}
+                moved = True
             elif (turn_from_tag is not None and abs(error) <= 35.
-                    and (abs(error) < _TAG4_CLEARANCE_YAW_DEG or 'clearance_strafe' in recovery
-                         or recovery.get('centering_strafes'))
+                    and (abs(error) < _TAG4_CLEARANCE_YAW_DEG or has_side_clearance or direct_turn_room)
                     and (max(map(abs, bounds)) <= _TAG4_STRAIGHT_LATERAL_M or 'clearance_strafe' in recovery)
                     and (not turns or abs(error) <= abs(turns[-1]['before_error_deg']) - 1.)):
                 turn = turn_from_tag(4, error, stamp, reserved_actions=reserved_actions)
                 if turn is not None:
                     turns.append(turn)
                     recovery.setdefault('visual_turn', turn)
+                    if direct_turn_room and abs(error) >= _TAG4_CLEARANCE_YAW_DEG and not has_side_clearance:
+                        turn['reason_zh'] = 'Tag 4 直接小转有余量，未确认可用的侧跨。'
                     moved = True
         if (not moved and issue is not None and plan['distance_verified'] and fresh
                 and _tag4_observed_clearance_problem(plan, nav, heading_limit=15.) is None):
@@ -899,6 +954,15 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
             and _tag4_observed_clearance_problem(plan, nav) is not None):
         plan = dict(plan, distance_verified=False)
     recovery['reacquired'] = plan['distance_verified']
+    if not recovery['reacquired']:
+        remaining_issue = _tag4_observed_clearance_problem(plan, nav)
+        if remaining_issue is None:
+            recovery['blocked_reason_zh'] = 'Tag 4 纠偏后未取得可信的新位姿，未确认下一步的余量。'
+        else:
+            offset_cm = 100 * median(remaining_issue['lateral_bounds_m'])
+            yaw = remaining_issue['heading_error_deg']
+            recovery['blocked_reason_zh'] = (
+                f'Tag 4 横偏 {offset_cm:+.1f} cm、航向 {yaw:+.1f}°，侧跨、后退或小转均未确认有余量。')
     if (recovery['reacquired'] and rebase is not None
             and plan.get('max_heading_deviation_deg', float('inf')) <= 3.
             and abs(plan['heading_deg']) <= 15.):
@@ -1012,7 +1076,8 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
     if issue is not None:
         leg['tag4_forward_disruption'] = issue
         plan = _tag4_recover_forward_pose(robot, nav, profile, settings, plan, issue,
-            leg=leg, approach_steps=None, reserved_actions=reserved_actions)
+            leg=leg, approach_steps=None, reserved_actions=reserved_actions,
+            prior_action=(checkpoint.get('completed_actions') or [None])[-1])
         leg['tag4_forward_trim'] = plan
         pose = {}
         if not plan['distance_verified']:
@@ -2134,16 +2199,28 @@ def _tag5_partial_forward_probe(robot, nav, settings, leg, approach):
 
 def _tag5_wider_side_recovery(plan, settings, operation):
     """Select one full step that still fits the projected envelope outside the passage."""
-    side = next((full for full, small in SMALL_SIDE_ACTIONS.items() if small == operation), None)
     bounds = plan.get('projected_lateral_bounds_m')
-    if side is None or bounds is None:
+    if not plan['geometry_valid'] or plan.get('entering') or bounds is None:
+        return None
+    limit = settings.get('lateral_clearance_m', .075)
+    side = next((full for full, small in SMALL_SIDE_ACTIONS.items() if small == operation), None)
+    if operation is None and plan.get('lateral_recovery_allowed') is True:
+        if bounds[1] > limit:
+            side = 'strafe_left_once'
+        elif bounds[0] < -limit:
+            side = 'strafe_right_once'
+    if side is None:
         return None
     near, far = bounds if side == 'strafe_left_once' else (-bounds[1], -bounds[0])
-    limit = settings.get('lateral_clearance_m', .075)
     travel = _LARGE_STRAFE_TRAVEL_UPPER_M
-    depth_after = plan['depth_bounds_m'][0] - travel * sin(radians(plan['max_abs_heading_deg']))
+    max_yaw = plan['max_abs_heading_deg']
+    heading_bounds = plan.get('heading_bounds_deg', (-max_yaw, max_yaw))
+    direction = -1 if side == 'strafe_left_once' else 1
+    # Depth grows when a side step points away from the marker. Also allow
+    # zero movement, since a completed cross-step may barely shift the robot.
+    depth_shift = min(0., *(direction * travel * sin(radians(yaw)) for yaw in heading_bounds))
     if (far > limit and near - travel >= -limit + .01
-            and depth_after >= _TAG5_OUTSIDE_SIDE_DEPTH_M):
+            and plan['depth_bounds_m'][0] + depth_shift >= _TAG5_OUTSIDE_SIDE_DEPTH_M):
         return side
     return None
 
@@ -2158,8 +2235,11 @@ def _tag5_retreat_clearance(plan, settings):
     if (depth is None or lateral is None or yaw is None
             or not .09 <= depth[0] <= depth[1] < _TAG5_OUTSIDE_RECOVERY_DEPTH_M or abs(yaw) > 25.):
         return False
-    swept = max(map(abs,lateral)) + _TAG5_RETREAT_TRAVEL_UPPER_M*sin(radians(abs(yaw)))
-    return swept <= settings.get('lateral_clearance_m',.075) - .005
+    heading_bounds = plan.get('heading_bounds_deg', (-yaw, yaw))
+    # A backward step changes lateral position opposite to the body heading.
+    shifts = [0., *(-_TAG5_RETREAT_TRAVEL_UPPER_M * sin(radians(angle)) for angle in heading_bounds)]
+    limit = settings.get('lateral_clearance_m', .075) - .005
+    return lateral[0] + min(shifts) >= -limit and lateral[1] + max(shifts) <= limit
 
 
 def _tag5_heading_clearance(robot, nav, plan, settings):
@@ -2185,11 +2265,13 @@ def _tag5_heading_clearance(robot, nav, plan, settings):
     moves = [(side, _LARGE_STRAFE_TRAVEL_UPPER_M, _TAG5_OUTSIDE_SIDE_DEPTH_M)]
     if small_ready:
         moves.insert(0, (SMALL_SIDE_ACTIONS[side], _TAG5_SMALL_SIDE_TRAVEL_UPPER_M, _TAG5_TIGHT_SIDE_DEPTH_M))
+    heading_bounds = plan.get('heading_bounds_deg', (-spread, spread))
+    direction = -1 if side == 'strafe_left_once' else 1
     for action, travel, depth_floor in moves:
-        # The uncertain side displacement may be small, but even its largest
-        # expected response must not move farther from the center or past the lip.
+        # Even the largest response must not move farther from the center or past the lip.
+        depth_shift = min(0., *(direction * travel * sin(radians(angle)) for angle in heading_bounds))
         if (travel + _TAG5_SIDE_PROGRESS_M <= near + far
-                and depth[0] - travel*sin(radians(spread)) >= depth_floor):
+                and depth[0] + depth_shift >= depth_floor):
             return action
     return None
 
@@ -2230,17 +2312,17 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
             continue
         operation = clearance or plan['operation']
         recovery_from = None
-        if operation is not None:
+        wider = _tag5_wider_side_recovery(plan, settings, operation) if clearance is None else None
+        if operation is not None or wider is not None:
             error = abs(plan.get('alignment_error_m', plan['lateral_error_m']))
             if last_side is not None and error >= last_side[1] - _TAG5_SIDE_PROGRESS_M:
                 ineffective.add(last_side[0])
             else:
                 ineffective.clear()
-            wider = _tag5_wider_side_recovery(plan, settings, operation) if clearance is None else None
-            if wider and wider not in ineffective and (operation in ineffective
+            if wider and wider not in ineffective and (operation is None or operation in ineffective
                     or abs(plan['lateral_error_m']) >= settings.get('large_move_error_m', .10)):
-                recovery_from, operation = operation, wider
-            if operation in ineffective:
+                recovery_from, operation = operation or 'no_small_step_available', wider
+            if operation in ineffective or (operation is None and wider in ineffective):
                 operation = None
                 plan['reason'] = 'last Tag 5 strafe did not reduce lateral error'
             if operation is not None and robot.count + reserve + 1 > robot.cfg['max_body_macros_per_journey']:
@@ -2275,7 +2357,17 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
         else:
             idle_windows += 1
             if idle_windows >= _TAG5_IDLE_WINDOWS:
-                alignment.update(status='stalled', stalled_reason=plan['reason'], ready_for_forward=False,
+                reason = plan['reason']
+                detail_zh = {
+                    'last Tag 5 strafe did not reduce lateral error': '上次侧跨未减小横偏，未找到有通行余量的替代动作',
+                    'Tag 5 side adjustment budget exhausted': '侧跨纠偏动作余量不足',
+                    'Tag 5 projected path exceeds the lateral passage tolerance': '预计直行超出入口横向余量',
+                    'Tag 5 heading outside the passage tolerance': '航向超出入口容差，未确认可执行的纠偏动作',
+                }.get(reason)
+                if detail_zh is None:
+                    detail_zh = '当前位姿未确认可通行' if plan['geometry_valid'] else '未获得可信的门口位姿'
+                alignment.update(status='stalled', stalled_reason=reason,
+                                 stalled_reason_zh=f'Tag 5 {detail_zh}', ready_for_forward=False,
                                  consecutive_idle_windows=idle_windows)
                 return None
             reason = '等待 Tag 5 的新位姿'
@@ -2796,7 +2888,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         guarded_forward = not plan['distance_verified'] and _tag4_guarded_forward_ready(nav,plan)
                         if not plan['distance_verified'] and not guarded_forward:
                             return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                                              'Tag 4 进近位姿异常，已重扫仍无法确认通道，保留持物。')
+                                              tag4_disruption['blocked_reason_zh'])
                         if guarded_forward:
                             tag4_disruption['short_forward_authorized'] = True
                         tag4_disruption = None
@@ -2877,6 +2969,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             continue
                         actions = _forward_actions(advance_steps, continuous=True, legacy=False)
                         pending_actions += len(actions)
+            deferred_side_heading = None
             for action_index, action in enumerate(actions):
                 _revalidate_heading(robot, nav)
                 if tag5_continuation is not None:
@@ -2913,12 +3006,19 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                                          approach_distance_m=entry_distance)
                             leg['tag5_midpoint'] = midpoint
                             leg.setdefault('tag5_side_windows', []).append(midpoint)
+                    small_strafe_follows = (expected_id == 4 and op == 'strafe_right_once'
+                                            and action_index == len(actions) - 1
+                                            and small == 'single_small_strafe_right' and small_ready is not None
+                                            and not getattr(robot, 'magnetic_route_only', False) and small_ready())
                     heading_result = CorridorTrial_CheckLateralHeading(robot, nav, action, before,
                         robot.last_heading_report or {}, leg, pending_actions + after_leg,
                         expected_id if is_boundary else None,
                         allow_turn=not gate_approach or (not is_boundary and
                                                         (midpoint is None or not midpoint['geometry_valid'])),
-                        allow_clearance_translation=not gate_approach and not steps[index].get('left_bias_stride_m'))
+                        allow_clearance_translation=not gate_approach and not steps[index].get('left_bias_stride_m'),
+                        small_strafe_follows=small_strafe_follows)
+                    if heading_result is CorridorLateralHeadingResult.DEFERRED_TO_SMALL_STRAFE:
+                        deferred_side_heading = leg['lateral_heading_checks'][-1]
                     if (heading_result is CorridorLateralHeadingResult.RECHECK_CLEARANCE
                             and _tag2_recheck_severe_lateral_drift(robot,nav,profile,leg,
                                 more_right=op == 'strafe_right_once' and not is_boundary) is None):
@@ -2983,6 +3083,15 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     leg['completed_actions'].append(small)
                     _corridor_boundary_checkpoint(robot, nav, expected_id, small)
                 else:
+                    if deferred_side_heading is not None:
+                        robot.corridor_recover_heading(None)
+                        report = robot.last_heading_report or {}
+                        settled = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
+                        deferred_side_heading.update(
+                            compensation_status='small_strafe_unavailable_heading_rechecked',
+                            residual_deg=settled[0] if settled else None,
+                            correction_actions=report.get('correction_actions', 0),
+                            heading_status=report.get('status'))
                     # The current stage remains usable with its original full
                     # cycle count if the optional small motion becomes unavailable.
                     if replaced_full:
@@ -3012,8 +3121,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             plan = _tag4_recover_forward_pose(robot, nav, profile, tag4_trial, plan, tag4_disruption,
                                              leg=leg, approach_steps=2, reserved_actions=after_leg)
             if not plan['distance_verified']:
-                return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                                  'Tag 4 到点前明显偏航，已重扫仍无法确认左跨通道，保留持物。')
+                return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, tag4_disruption['blocked_reason_zh'])
 
         set_status(CorridorTrialResult.WAITING_FOR_CHECKPOINT, 'stationary reacquisition of expected Tag {}'.format(expected_id))
         _report_progress(robot, 'cmd0_corridor_scan', previous_id, expected_id, leg=leg)
@@ -3088,8 +3196,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         if _align_tag5_entry(robot, nav, profile, tag5_alignment, checkpoint, alignment,
                 reserved_actions=len(base_actions)+1,
                 approach_distance_m=_tag5_approach_distance(base_actions[0])) is None:
-            return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                              'Tag 5 入口纠偏尚未完成，保留方块。')
+            reason = alignment.get('stalled_reason_zh', 'Tag 5 入口纠偏尚未完成')
+            return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, f'{reason}，保留方块。')
         if alignment.get('entry_retreat',{}).get('completed_steps') == 2:
             base_actions += ('carry_forward2',)
             delivery['approach_steps'] += 2
