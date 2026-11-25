@@ -1,21 +1,25 @@
 """Verified local and HTTPS bundle sources for R3 SSH deployment."""
 
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead, RemoteDisconnected
+from io import BytesIO
 import json
 import logging
 from pathlib import Path, PurePosixPath
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
+from zipfile import BadZipFile, ZipFile
 
 from . import remote, settings
 
@@ -24,9 +28,21 @@ _MAX_BUNDLE_FILES = 256
 _MAX_REMOTE_MANIFEST = 256 * 1024
 _MAX_REMOTE_FILE = 4 * 1024 * 1024
 _MAX_REMOTE_BUNDLE = 32 * 1024 * 1024
+_MAX_REMOTE_ARCHIVE = 8 * 1024 * 1024
+_MAX_ARCHIVE_MEMBERS = 2048
 _REMOTE_DOWNLOAD_SECONDS = 90
 _REMOTE_REQUEST_SECONDS = 12
-_REMOTE_DOWNLOAD_WORKERS = 6
+_REMOTE_DOWNLOAD_WORKERS = 3
+_REMOTE_RETRY_DELAYS = (0.2,0.5)
+_TRANSIENT_HTTP_ERRORS = frozenset((408,429,500,502,503,504))
+_TRANSIENT_NETWORK_ERRORS = frozenset((errno.ECONNRESET,errno.ECONNABORTED,errno.EPIPE,
+                                      errno.ETIMEDOUT,10053,10054,10060,socket.EAI_AGAIN))
+_GITHUB_ARCHIVE_URL = 'https://codeload.github.com/aleistercrowleybeast666/aelos_robot/zip/refs/heads/main'
+_GITHUB_ARCHIVE_BUNDLE = 'aelos_robot-main/pi_deploy_bundle/'
+
+
+class _RemoteBundleUnavailable(RuntimeError):
+    """The HTTP source did not respond with a downloadable artifact."""
 
 
 class SshLinkError(RuntimeError):
@@ -118,39 +134,55 @@ class _HttpsRedirect(HTTPRedirectHandler):
         return super().redirect_request(request,fp,code,msg,headers,newurl)
 
 
-def _remote_bundle_read(opener, source, name, limit, deadline, cache_suffix):
-    request = Request(f'{source}/{quote(name, safe="/")}{cache_suffix}', headers={
+def _remote_request(opener, url, name, limit, deadline):
+    request = Request(url, headers={
         'User-Agent':'AELOS-R3-Control','Cache-Control':'no-cache','Pragma':'no-cache',
     })
-    try:
-        remaining = deadline-monotonic()
-        if remaining <= 0:
-            raise TimeoutError('下载超过时限')
-        with opener.open(request,timeout=min(_REMOTE_REQUEST_SECONDS,remaining)) as response:
-            length = response.headers.get('Content-Length','')
-            if length.isdigit() and int(length) > limit:
-                raise ValueError('远程部署包文件超出大小限制：'+name)
-            data = bytearray()
-            while monotonic() < deadline:
-                chunk = response.read1(min(64*1024,limit+1-len(data)))
-                if not chunk:
-                    return bytes(data)
-                data.extend(chunk)
-                if len(data) > limit:
+    for attempt in range(len(_REMOTE_RETRY_DELAYS)+1):
+        try:
+            remaining = deadline-monotonic()
+            if remaining <= 0:
+                raise TimeoutError('下载超过时限')
+            with opener.open(request,timeout=min(_REMOTE_REQUEST_SECONDS,remaining)) as response:
+                declared_length = response.headers.get('Content-Length','')
+                length = int(declared_length) if declared_length.isdigit() else None
+                if length is not None and length > limit:
                     raise ValueError('远程部署包文件超出大小限制：'+name)
-            raise TimeoutError('下载超过时限')
-    except HTTPError as exc:
-        raise RuntimeError(f'无法读取远程部署包文件 {name}（HTTP {exc.code}）。') from exc
-    except (URLError,OSError,HTTPException) as exc:
-        raise RuntimeError(f'下载远程部署包文件 {name} 失败。{getattr(exc,"reason",exc)}') from exc
+                data = bytearray()
+                while monotonic() < deadline:
+                    chunk = response.read1(min(64*1024,limit+1-len(data)))
+                    if not chunk:
+                        if length is not None and len(data) != length:
+                            raise IncompleteRead(bytes(),length-len(data))
+                        return bytes(data)
+                    data.extend(chunk)
+                    if len(data) > limit:
+                        raise ValueError('远程部署包文件超出大小限制：'+name)
+                raise TimeoutError('下载超过时限')
+        except HTTPError as exc:
+            retryable = exc.code in _TRANSIENT_HTTP_ERRORS
+            error = _RemoteBundleUnavailable(f'无法读取远程部署包文件 {name}（HTTP {exc.code}）。')
+            cause = exc
+            exc.close()
+        except (URLError,OSError,HTTPException) as exc:
+            cause = exc
+            detail = getattr(exc,'reason',exc)
+            retryable = (isinstance(detail,(TimeoutError,ConnectionError,IncompleteRead,RemoteDisconnected))
+                         or getattr(detail,'errno',None) in _TRANSIENT_NETWORK_ERRORS
+                         or getattr(detail,'winerror',None) in _TRANSIENT_NETWORK_ERRORS)
+            error = _RemoteBundleUnavailable(f'下载远程部署包文件 {name} 失败。{detail}')
+        if not retryable or attempt == len(_REMOTE_RETRY_DELAYS) or monotonic() >= deadline:
+            raise error from cause
+        sleep(min(_REMOTE_RETRY_DELAYS[attempt],max(0.,deadline-monotonic())))
 
 
-def _remote_package(values, log):
-    source = settings.RemoteBundle_NormalizeUrl(values['remote_url'])
-    log('下载远程树莓派部署包…')
-    deadline = monotonic()+_REMOTE_DOWNLOAD_SECONDS
+def _remote_bundle_read(opener, source, name, limit, deadline, cache_suffix):
+    url = f'{source}/{quote(name,safe="/")}{cache_suffix}'
+    return _remote_request(opener,url,name,limit,deadline)
+
+
+def _raw_remote_package(opener, source, deadline):
     cache_suffix = '?r3_bundle='+uuid4().hex if urlsplit(source).hostname == 'raw.githubusercontent.com' else ''
-    opener = build_opener(_HttpsRedirect())
     manifest = _remote_bundle_read(opener,source,'manifest.json',_MAX_REMOTE_MANIFEST,deadline,cache_suffix)
     expected = list(_manifest_files(manifest).items())
     files = {}
@@ -169,6 +201,64 @@ def _remote_package(values, log):
                 if total > _MAX_REMOTE_BUNDLE:
                     raise ValueError('远程部署包超出总大小限制。')
                 files[name] = data
+    return manifest, files
+
+
+def _archive_member(archive, entry, limit):
+    kind = stat.S_IFMT(entry.external_attr>>16)
+    if kind not in (0,stat.S_IFREG) or entry.file_size > limit:
+        raise ValueError('GitHub 部署包含有链接、特殊文件或超限文件：'+entry.filename)
+    with archive.open(entry) as stream:
+        data = stream.read(limit+1)
+    if len(data) != entry.file_size or len(data) > limit:
+        raise ValueError('GitHub 部署包文件大小不符：'+entry.filename)
+    return data
+
+
+def _github_remote_package(opener, deadline):
+    url = _GITHUB_ARCHIVE_URL+'?r3_bundle='+uuid4().hex
+    artifact = _remote_request(opener,url,'GitHub ZIP',_MAX_REMOTE_ARCHIVE,deadline)
+    try:
+        with ZipFile(BytesIO(artifact)) as archive:
+            members = archive.infolist()
+            if len(members) > _MAX_ARCHIVE_MEMBERS:
+                raise ValueError('GitHub ZIP 文件数量超出读取限制。')
+            bundled = {}
+            for member in members:
+                if member.is_dir() or not member.filename.startswith(_GITHUB_ARCHIVE_BUNDLE):
+                    continue
+                name = member.filename.removeprefix(_GITHUB_ARCHIVE_BUNDLE)
+                if name in bundled:
+                    raise ValueError('GitHub 部署包包含重复文件：'+name)
+                bundled[name] = member
+            if 'manifest.json' not in bundled:
+                raise ValueError('GitHub ZIP 中缺少树莓派部署清单。')
+            manifest = _archive_member(archive,bundled.pop('manifest.json'),_MAX_REMOTE_MANIFEST)
+            expected = _manifest_files(manifest)
+            if bundled.keys() != expected.keys():
+                raise ValueError('GitHub ZIP 中的部署文件与清单不符。')
+            if sum(member.file_size for member in bundled.values()) > _MAX_REMOTE_BUNDLE:
+                raise ValueError('GitHub 部署包超出总大小限制。')
+            files = {name:_verify_bundle_file(_archive_member(archive,bundled[name],_MAX_REMOTE_FILE),name,digest)
+                     for name,digest in expected.items()}
+    except (BadZipFile,NotImplementedError,RuntimeError) as exc:
+        raise ValueError('GitHub 返回的部署 ZIP 无法读取。') from exc
+    return manifest, files
+
+
+def _remote_package(values, log):
+    source = settings.RemoteBundle_NormalizeUrl(values['remote_url'])
+    log('下载远程树莓派部署包…')
+    deadline = monotonic()+_REMOTE_DOWNLOAD_SECONDS
+    opener = build_opener(_HttpsRedirect())
+    if source == settings.DEFAULT_REMOTE_URL:
+        try:
+            manifest,files = _github_remote_package(opener,deadline)
+        except _RemoteBundleUnavailable:
+            log('GitHub 压缩包暂不可用，改用文件下载。')
+            manifest,files = _raw_remote_package(opener,source,deadline)
+    else:
+        manifest,files = _raw_remote_package(opener,source,deadline)
     log('远程包下载并校验完成，共 {} 个文件。'.format(len(files)))
     return manifest, files
 

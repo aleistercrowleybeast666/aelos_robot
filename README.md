@@ -19,7 +19,7 @@
 | 远程部署（默认） | 点击「部署程序」时下载仓库的当前部署包。默认地址为 `https://raw.githubusercontent.com/aleistercrowleybeast666/aelos_robot/main/pi_deploy_bundle`。可改为任意提供同一目录结构的 HTTPS 地址。 |
 | 本地部署 | 选择含 `manifest.json`、`app/` 和 `owner/` 的目录。可提前保存仓库中的 `pi_deploy_bundle/`，用于现场离线部署。 |
 
-远程地址可填部署包目录、`manifest.json` 的 HTTPS 下载地址，或对应的 GitHub 目录链接。Windows 控制台负责下载，树莓派只需可从本机通过 SSH 访问。
+远程地址可填部署包目录、`manifest.json` 的 HTTPS 下载地址，或对应的 GitHub 目录链接。使用默认地址时，控制台一次下载 GitHub 的 `main` 归档，再从中读取和校验部署包。Windows 控制台负责下载，树莓派只需可从本机通过 SSH 访问。
 
 普通树莓派部署沿用机上现有 MCU 登记。已经更新 MCU 并拿到读回回执时，可在部署时登记回执。MCU 的 Lua 文件和历史动作包由本地维护。
 

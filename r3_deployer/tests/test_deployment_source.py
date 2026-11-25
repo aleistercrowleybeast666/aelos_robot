@@ -4,12 +4,14 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import stat
 import tempfile
 import unittest
-from unittest.mock import patch
-from urllib.error import URLError
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
 from urllib.request import Request
+from zipfile import ZipFile,ZipInfo
 
 from r3_deployer import deploy, remote, settings
 
@@ -45,6 +47,20 @@ class DeploymentSourceTests(unittest.TestCase):
 
     def _opener(self, *, files=None):
         return _HttpsSource({'manifest.json':json.dumps(self.manifest).encode(),**(files or self.files)})
+
+    def _archive(self, *, overrides=None, extra=None, symlink=None):
+        artifact = io.BytesIO()
+        payload = {'manifest.json':json.dumps(self.manifest).encode(),**self.files,**(overrides or {}),
+                   **(extra or {})}
+        with ZipFile(artifact,'w') as archive:
+            archive.writestr('aelos_robot-main/README.md',b'Unrelated to the deployment bundle.')
+            for name,data in payload.items():
+                entry = ZipInfo(deploy._GITHUB_ARCHIVE_BUNDLE+name)
+                if name == symlink:
+                    entry.create_system = 3
+                    entry.external_attr = (stat.S_IFLNK|0o777)<<16
+                archive.writestr(entry,data)
+        return artifact.getvalue()
 
     def test_saved_old_settings_default_to_remote_and_keep_local_fallback(self):
         with patch.object(settings,'_read',return_value={'local_path':'D:/old_robot_bundle'}):
@@ -85,6 +101,64 @@ class DeploymentSourceTests(unittest.TestCase):
         self.assertEqual(files,self.files)
         self.assertCountEqual(opener.requests,[(name,None) for name in ('manifest.json',*self.files)])
         self.assertIn('远程包下载并校验完成，共 3 个文件。',logs)
+
+    def test_default_github_reads_one_archive_without_fetching_unrelated_files(self):
+        opener = Mock()
+        opener.open.return_value = _HttpsResponse(self._archive())
+        with patch.object(deploy,'build_opener',return_value=opener):
+            manifest,files = deploy._package(settings.DEFAULTS,lambda _:None)
+        self.assertEqual(json.loads(manifest),self.manifest)
+        self.assertEqual(files,self.files)
+        opener.open.assert_called_once()
+        url = urlsplit(opener.open.call_args.args[0].full_url)
+        self.assertEqual(url.geturl().split('?')[0],deploy._GITHUB_ARCHIVE_URL)
+
+    def test_default_github_archive_transport_failure_uses_verified_raw_files(self):
+        source_files = {'manifest.json':json.dumps(self.manifest).encode(),**self.files}
+        logs = []
+
+        def respond(request, timeout):
+            url = urlsplit(request.full_url)
+            if url.hostname == 'codeload.github.com':
+                raise HTTPError(url.geturl(),404,'Not found',None,None)
+            path = url.path.split('/pi_deploy_bundle/',1)[1]
+            return _HttpsResponse(source_files[path])
+
+        opener = Mock()
+        opener.open.side_effect = respond
+        with patch.object(deploy,'build_opener',return_value=opener):
+            _,files = deploy._package(settings.DEFAULTS,logs.append)
+        self.assertEqual(files,self.files)
+        self.assertEqual(opener.open.call_count,len(self.files)+2)
+        self.assertIn('GitHub 压缩包暂不可用，改用文件下载。',logs)
+
+    def test_default_github_archive_integrity_failures_never_use_raw_or_ssh(self):
+        for options, expected_error in (
+                ({'overrides':{'app/task_runner.py':b'altered'}},'哈希不匹配'),
+                ({'symlink':'app/task_runner.py'},'链接、特殊文件'),
+                ({'extra':{'app/extra.py':b'unlisted'}},'与清单不符')):
+            with self.subTest(options=options):
+                opener = Mock()
+                opener.open.return_value = _HttpsResponse(self._archive(**options))
+                with patch.object(deploy,'build_opener',return_value=opener), patch.object(
+                        deploy,'_connect',side_effect=AssertionError('invalid archive must not reach SSH')):
+                    with self.assertRaisesRegex(ValueError,expected_error):
+                        deploy.operate('deploy',settings.DEFAULTS,'test-password',lambda _:None)
+                opener.open.assert_called_once()
+
+    def test_remote_transport_retries_connection_reset_and_truncated_body(self):
+        opener = Mock()
+        opener.open.side_effect = (
+            URLError(OSError(10054,'connection reset')),
+            _HttpsResponse(b'cut',10),
+            _HttpsResponse(b'complete'),
+        )
+        with patch.object(deploy,'monotonic',return_value=0), patch.object(deploy,'sleep') as pause:
+            result = deploy._remote_bundle_read(opener,'https://packages.example/bundle',
+                                                'manifest.json',20,1,'')
+        self.assertEqual(result,b'complete')
+        self.assertEqual(opener.open.call_count,3)
+        self.assertEqual(pause.call_count,2)
 
     def test_invalid_remote_manifest_is_rejected_before_downloading_payload(self):
         for key, digest in (('app/../unrelated.txt','0'*64), ('app/file',0), ('app','0'*64)):
