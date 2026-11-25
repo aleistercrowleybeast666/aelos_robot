@@ -13,6 +13,10 @@ class BlockFrameUnavailable(RuntimeError):
     """The next capture window can recover this dropout."""
 
 
+class BlockCameraContractLost(BlockFrameUnavailable):
+    """Reopen the chest subscription and verify its source before using it again."""
+
+
 class BlockEvidenceExpired(RuntimeError):
     """The capture expired before the grab request was submitted."""
 
@@ -83,14 +87,14 @@ class BlockCamera:
         settle=self.cfg['settle_s'];mono_boundary=after_monotonic+settle
         ros_boundary=after_ros_ns+int(settle*1e9)
         deadline=self.clock()+timeout;window=ConfirmedWindow(self.cfg,count_only=count_only)
-        seen=0;healthy=False;last_eligible=None
+        seen=0;last_eligible=None;invalid_frames=0
         reason='no fresh post-settle images'
         options={'count_only':True} if count_only else {}
         while self.clock()<deadline:
             check()
             with self.lock:
                 if self.closed:raise RuntimeError('block camera closed')
-                if self.fault:raise RuntimeError('block camera fault: '+self.fault)
+                if self.fault:raise BlockCameraContractLost('方块相机订阅失配，将重新核对图像来源：'+self.fault)
                 if self.scope!=scope or self.load!=expected_load:raise RuntimeError('block camera scope/load changed')
                 frames=list(self.frames)
             for row in frames:
@@ -101,20 +105,33 @@ class BlockCamera:
                 if not 0<=now-row['received_monotonic']<=self.cfg['max_age_s'] or not 0<=ros_now-row['stamp_ns']<=self.cfg['max_age_s']*1e9:continue
                 try:
                     # ROS callbacks keep a small buffer. Decode only eligible frames on the route thread.
-                    detected=self.detector.detect(self.convert(row['message']),**options)
-                except Exception as exc:
-                    raise RuntimeError('block camera frame could not be processed') from exc
+                    image=self.convert(row['message'])
+                except Exception:
+                    detected=None
+                else:
+                    detected=self.detector.detect(image,**options)
+                if detected is None or detected.get('frame_valid') is False:
+                    invalid_frames+=1
+                    window=ConfirmedWindow(self.cfg,count_only=count_only)
+                    last_eligible=None
+                    continue
                 if not 0<=self.clock()-row['received_monotonic']<=self.cfg['max_age_s'] or not 0<=self.ros_now_ns()-row['stamp_ns']<=self.cfg['max_age_s']*1e9:continue
-                healthy=True;last_eligible=row;result=window.add(detected,row)
+                last_eligible=row;result=window.add(detected,row)
                 reason=result['reason']
                 if result['status'] in ('target','empty'):
-                    check();result['camera_healthy']=True;return result
+                    check();result['camera_healthy']=True
+                    if invalid_frames:result['discarded_invalid_images']=invalid_frames
+                    return result
             self.changed.wait(min(.03,max(0,deadline-self.clock())));self.changed.clear()
         check()
-        if not healthy:raise BlockFrameUnavailable('block camera has no fresh post-settle stream')
+        if last_eligible is None:
+            if invalid_frames:
+                raise BlockFrameUnavailable(f'方块相机有 {invalid_frames} 帧无法解码，等待新图像。')
+            raise BlockFrameUnavailable('block camera has no fresh post-settle stream')
         if not 0<=self.clock()-last_eligible['received_monotonic']<=self.cfg['max_age_s'] or not 0<=self.ros_now_ns()-last_eligible['stamp_ns']<=self.cfg['max_age_s']*1e9:
             raise BlockFrameUnavailable('block camera stopped delivering fresh images during observation')
         result=unknown(reason);result['camera_healthy']=True
+        if invalid_frames:result['discarded_invalid_images']=invalid_frames
         if count_only:
             result['staged_count_unresolved']=True
         result.update({k:last_eligible[k] for k in ('stamp_ns','received_monotonic','scope','load','width','height')})
@@ -124,7 +141,9 @@ class BlockCamera:
         """Immediately before native submission; does not itself authorize grasp."""
         with self.lock:
             now=self.clock();ros_now=self.ros_now_ns()
-            if self.closed or self.fault or self.scope!=scope or self.load!=load:
+            if self.fault:
+                raise BlockEvidenceExpired('方块相机订阅发生变化，待重新采集后再提交动作。')
+            if self.closed or self.scope!=scope or self.load!=load:
                 raise RuntimeError('block observation scope/camera invalidated')
             staged_pair = (row.get('status')=='unknown' and row.get('staged_count_unresolved') is True
                            and row.get('staged_default_pair') is True and row.get('grip_count')==2 and load=='empty')

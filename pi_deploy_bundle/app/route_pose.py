@@ -395,11 +395,19 @@ def _trial_ground_depth(checkpoint, nav_cfg, tag_id):
     lateral = [pose['x_m'] for pose in poses]
     headings = [pose['heading_deg'] for pose in poses]
     heading = circular_median(headings)
-    return {'distance_m': median(distances), 'distance_bounds_m': (min(distances), max(distances)),
+    evidence = {'distance_m': median(distances), 'distance_bounds_m': (min(distances), max(distances)),
             'heading_deg': heading, 'max_heading_deviation_deg': max(abs(wrap(yaw-heading)) for yaw in headings),
             'max_abs_yaw_deg': max(map(abs, headings)),
             'max_abs_lateral_m': max(map(abs, lateral)), 'lateral_bounds_m': (min(lateral), max(lateral)),
-            'projection_bounds': (min(projection), max(projection)), 'latest_stamp_ns': max(rows)}, None
+            'projection_bounds': (min(projection), max(projection)), 'latest_stamp_ns': max(rows)}
+    if tag_id == 4:
+        # Keep the actual measurements used for each departure check, including after a retreat.
+        evidence['tag4_depth_observation'] = {
+            'frame_id': nav_cfg['pose_contract']['frame'],
+            'camera_fingerprint': checkpoint['camera_info']['fingerprint'],
+            'samples': [{'stamp_ns': stamp, 'position_raw_m': row['position_raw_m'],
+                         'quaternion_raw': row['quaternion_raw']} for stamp, row in sorted(rows.items())]}
+    return evidence, None
 
 
 def RoutePose_PartialCheckpointGeometry(rows, nav_cfg, tag_id):

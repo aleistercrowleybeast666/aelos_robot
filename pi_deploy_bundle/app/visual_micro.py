@@ -369,8 +369,13 @@ class VisualMicro:
             return None
         scan=summarize(window,tag_id,self.cfg,after_ns)
         if (not scan.get('pose_usable') or not (scan.get('heading_only') or scan.get('position_usable'))
-                or scan.get('heading_mad_deg',float('inf'))>self.v['max_heading_mad_deg']):
+                or scan.get('heading_mad_deg',float('inf'))>self.v['max_heading_mad_deg']
+                or any(row.get('source_publisher') != self.cfg['pose_contract']['publisher']
+                       for row in scan['observations'])
+                or not self.io.visual_motion_ready(scan['latest_stamp_ns'])):
             return None
+        scan.update(after_ns=max(after_ns,window.get('after_ns',0)),now_ns=window['now_ns'],
+                    camera_healthy=True,contract_match=True)
         return scan,camera
 
     def _commit_accepted_heading(self,goal,pair,deadline,result,visual_basis_id,*,prefer_tag,field_feedback):
@@ -383,14 +388,20 @@ class VisualMicro:
             except _VisualObservationExpired:
                 if near_target:result['status']='partial'
                 return self._defer_expired_observation(result)
+        if result.get('previous_magnetic_reference_rejected') and not result.get('correction_executed'):
+            result.update(heading_aligned=True,reason='visual heading accepted; magnetic field changed',
+                          reason_zh='磁场强度变化，本次沿用已确认的视觉航向。')
+            self.check()
+            return result
         old=self.reference.anchor
         if old and (old.get('source')=='relative_stationary_segment_start' or
                     prefer_tag and old.get('load')==self.load):
             if abs(pair['magnetic']['norm']-old['norm'])/old['norm']>self.cfg['magnetic']['max_norm_fraction_change']:
-                if near_target:
+                if near_target or (field_feedback and prefer_tag):
                     self.reference.anchor=None
                     result.update(heading_aligned=True,magnetic={'status':'not_updated',
-                                  'reason':'magnetic magnitude changed; accept verified Tag heading alone'})
+                                  'reason':'magnetic magnitude changed; accept verified Tag heading alone'},
+                                  reason_zh='磁场强度变化，本次沿用已确认的视觉航向。')
                     self.check()
                     return result
                 if active(self.cfg):self.stop('magnetic magnitude changed before reliable visual reanchor')
@@ -402,14 +413,17 @@ class VisualMicro:
         refreshed=self.reference.refresh(pair['rows'],actual_heading,self.clock(),pair['after'],self.load,goal['id'])
         if refreshed.get('status')!='updated' or not (self.reference.anchor or {}).get('capture_verified'):
             self.reference.anchor=None
-            if active(self.cfg) and not near_target:
+            if active(self.cfg) and not near_target and not (field_feedback and prefer_tag):
                 self.stop('visual alignment could not establish consistent fresh magnetic reference')
         if self.reference.anchor is not None:
             self.reference.anchor.update(visual_basis_id=visual_basis_id,
                 owner_observation_scope=self.motion_model.observation_scope if self.motion_model else ('',-1))
         result.update(heading_aligned=True,magnetic=refreshed)
-        if not near_target:
+        if not near_target and self.reference.anchor is not None:
             result['reason']='reliable heading aligned; magnetic reference uses observed residual; x/y remain diagnostic, obstacle entry not authorized'
+        elif not near_target:
+            result.update(reason='verified visual heading aligned; magnetic reference unavailable',
+                          reason_zh='视觉航向已对准，磁航向留待下次有效采样更新。')
         self.check()
         return result
 
@@ -451,8 +465,13 @@ class VisualMicro:
         anchor=self.reference.anchor
         magnetic_reference_error=None
         if (anchor and anchor.get('source')=='reliable_tag_alignment' and anchor.get('tag_id')==tag_id and anchor.get('load')==self.load and anchor.get('capture_verified') and anchor.get('calibration_id') and anchor.get('calibration_id')==pair['magnetic'].get('calibration_id') and anchor.get('capture_session')==pair['magnetic'].get('capture_session') and type(anchor.get('load_epoch')) is int and anchor.get('load_epoch')==pair['magnetic'].get('load_epoch') and anchor.get('visual_basis_id')==visual_basis_id and self.motion_model is not None and anchor.get('owner_observation_scope')==self.motion_model.observation_scope and 0<=self.clock()-anchor['received_monotonic']<=self.cfg['post_action_heading']['max_reference_age_s']):
-            if abs(pair['magnetic']['norm']-anchor['norm'])/anchor['norm']>self.cfg['magnetic']['max_norm_fraction_change']:self.stop('magnetic magnitude changed before fused visual decision')
-            magnetic_reference_error=wrap(self.cfg['magnetic']['heading_sign']*pair['magnetic']['raw_heading_deg']+anchor['offset_deg']-goal['route_heading_deg'])
+            if abs(pair['magnetic']['norm']-anchor['norm'])/anchor['norm']>self.cfg['magnetic']['max_norm_fraction_change']:
+                if not (field_feedback and prefer_tag_heading):
+                    self.stop('magnetic magnitude changed before fused visual decision')
+                self.reference.anchor=None
+                result['previous_magnetic_reference_rejected']='field_magnitude_changed'
+            else:
+                magnetic_reference_error=wrap(self.cfg['magnetic']['heading_sign']*pair['magnetic']['raw_heading_deg']+anchor['offset_deg']-goal['route_heading_deg'])
         if prefer_tag_heading:
             result['decision_fusion']=dict(status='observed',source='trusted_tag_heading',error_deg=error,
                 target_heading_deg=goal['tag_heading_deg'],magnetic_reference_error_deg=magnetic_reference_error,
@@ -556,7 +575,7 @@ class VisualMicro:
                         else 'remaining action/time budget unavailable; reserved micro not replayed')
                 result.update(reason=reason,budget=self.budget.status());return result
             if field_feedback and not reserved:self.stop('visual correction completion missing pre-dispatch verification')
-            result['correction_executed']=True
+            result.update(correction_executed=True,before_error_deg=error)
             after_ns=done.get('after_ns')
             if type(after_ns) is not int or after_ns<=0:self.stop('micro completion ROS barrier unavailable')
             pair=self.pair(tag_id,after_ns,deadline,post=True);obs=pair['scan']
@@ -567,7 +586,18 @@ class VisualMicro:
                     or any(a.get(key)!=b.get(key) for key in ('capture_session','load_epoch','calibration_id','owner_observation_scope'))
                     or min(a['decision_capture_times'])<=max(b['decision_capture_times'])):
                 self.stop('paired magnetic observation scope or capture order changed across visual micro')
-            if abs(a['norm']-b['norm'])/b['norm']>self.cfg['magnetic']['max_norm_fraction_change']:self.stop('magnetic magnitude changed across micro')
+            if abs(a['norm']-b['norm'])/b['norm']>self.cfg['magnetic']['max_norm_fraction_change']:
+                if not (field_feedback and prefer_tag_heading):
+                    self.stop('magnetic magnitude changed across micro')
+                self.reference.anchor=None
+                self.unreliable_turns.add(name)
+                result.update(scan=obs,camera_info=pair['camera_info'],correction_actions=1,
+                              pose_accepted=False,error_deg=None,decision_fusion={},
+                              heading_unknown_after_turn=True,correction_deferred=True,
+                              reason='post-turn magnetic field changed; reacquire the current Tag heading',
+                              reason_zh='转后磁场强度变化，重新读取当前 Tag 1 航向。')
+                self.check()
+                return result
             magnetic_delta=wrap(self.cfg['magnetic']['heading_sign']*wrap(a['raw_heading_deg']-b['raw_heading_deg']))
             magnetic_error=wrap(magnetic_before_error+magnetic_delta)
             unusual_response=(magnetic_delta*delta<=0 or abs(magnetic_delta)>self.v['max_observed_step_deg']
@@ -586,6 +616,9 @@ class VisualMicro:
             if not pair['trusted']:
                 self.reference.anchor=None
                 result.update(scan=obs,after_error_deg=magnetic_error,correction_actions=1,budget=self.budget.status(),reason='ordinary target loss/untrusted pose after completed micro; fresh magnetic feedback verified; continue original route without visual reanchor',prediction_update=dict(predicted_error_deg=choice['predicted_error_deg'] if choice else wrap(error+delta),observed_error_deg=magnetic_error,source='fresh_magnetic_relative_to_last_verified_visual',prediction_not_new_sample=True))
+                if prefer_tag_heading:
+                    result.update(pose_accepted=False,error_deg=None,decision_fusion={},
+                                  heading_unknown_after_turn=True)
                 if self.motion_model and not unusual_response:
                     result['turn_observation']=self.motion_model.observe_turn(name,self.load,b,a,turn_started,turn_completed)
                 return result
@@ -645,6 +678,13 @@ class VisualMicro:
                     comparison['stationary_recheck']='confirmed' if review_complete else 'inconclusive'
                 comparison['selected_source']='trusted_tag_heading' if review_complete else 'route_advisory'
                 comparison['selected_residual_deg']=new_error
+                if prefer_tag_heading:
+                    if review_complete:
+                        result.update(error_deg=new_error,decision_fusion=dict(result['decision_fusion'],
+                                      error_deg=new_error,observed_at_ns=result['scan']['latest_stamp_ns']))
+                    else:
+                        result.update(pose_accepted=False,error_deg=None,decision_fusion={},
+                                      heading_unknown_after_turn=True)
                 aligned=review_complete and abs(new_error)<=self.v['deadband_deg']
                 result.update(status='heading_accepted_near_target' if aligned else 'partial',
                     heading_aligned=aligned,heading_acceptance='trusted_tag_after_disagreement' if aligned else None,
@@ -659,6 +699,9 @@ class VisualMicro:
             if fused.get('status')!='observed':
                 self.stop('paired same-target fusion rejected: '+str(fused.get('reason')),report=result)
             result['fused_error_deg']=fused['error_deg']
+            if prefer_tag_heading:
+                result.update(error_deg=new_error,decision_fusion=dict(result['decision_fusion'],
+                              error_deg=new_error,observed_at_ns=obs['latest_stamp_ns']))
             if self.motion_model and not unusual_response:
                 result['turn_observation']=self.motion_model.observe_turn(name,self.load,b,a,turn_started,turn_completed)
             arrival_errors=(new_error,) if prefer_tag_heading else (new_error,magnetic_error,fused['error_deg'])

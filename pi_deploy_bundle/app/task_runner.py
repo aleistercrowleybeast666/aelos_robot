@@ -1301,6 +1301,19 @@ class Robot:
             self.events.append({'visual_checkpoint_failure':{'target_id':tag_id,'reason':str(exc),'report':getattr(exc,'report',None)}})
             self.boundary_visual_observation('visual_checkpoint_failure',fault_diagnostic=True)
 
+        def observe_turned_stance():
+            after=nav.io.ros_now_ns()
+            deadline=min(self.deadline,self.clock()+cfg['settle_s']+2*cfg['observe_s'])
+            try:
+                return VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,after_ns=after,
+                    deadline=deadline,check=self.check,clock=self.clock,accept_trusted_residual=True)
+            except VisualMicroStopped as exc:
+                checked=exc.report or {}
+                windows=checked.get('events') or [{}]
+                if windows[-1].get('passive_camera_window',{}).get('recoverable') is not True:
+                    raise
+                return checked
+
         started=self.clock()
         try:
             if self.magnetic_route_only:
@@ -1416,26 +1429,32 @@ class Robot:
                     turn = self.Route_TurnFromTagHeading(tag_id,prior.get('error_deg'),
                         prior.get('scan',{}).get('latest_stamp_ns'),reserved_actions=1)
                     if turn is not None:
-                        try:
-                            checked = VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,
-                                after_ns=nav.io.ros_now_ns(),deadline=self.deadline,check=self.check,
-                                clock=self.clock,accept_trusted_residual=True)
-                        except VisualMicroStopped as exc:
-                            checked = exc.report or {}
-                            windows = checked.get('events') or [{}]
-                            if windows[-1].get('passive_camera_window',{}).get('recoverable') is not True:
-                                raise
+                        checked = observe_turned_stance()
                         if checked.get('pose_accepted'):
                             result = checked
                             turn['after_error_deg'] = checked['error_deg']
                         else:
-                            result = dict(prior, heading_unknown_after_turn=True,
-                                reason_zh='已扫码确认 Tag 1 并完成一次视觉转向，转后将在下一处扫码复核。')
+                            result = dict(checked,heading_unknown_after_turn=True,
+                                reason_zh='入口转向已完成，正在用转后的胸部相机画面重新定位。')
                         result.update(correction_executed=True,correction_actions=1,
                             camera_only_turns=[turn],camera_only_recheck=checked.get('scan'),
                             stationary_heading_rechecks=stationary_rechecks)
                         self.events.append({'tag1_departure_visual_recovery':dict(turn,
                             heading_reconfirmed=checked.get('pose_accepted') is True)})
+                if keep_searching and result.get('heading_unknown_after_turn'):
+                    checked=observe_turned_stance()
+                    result['post_turn_recheck']=checked
+                    for key in ('scan','camera_info','fresh_target_detected','pose_accepted','heading_aligned',
+                                'error_deg','decision_fusion','status','reason'):
+                        if key in checked:
+                            result[key]=checked[key]
+                    result['heading_unknown_after_turn']=not checked.get('pose_accepted')
+                    if checked.get('pose_accepted'):
+                        result['after_error_deg']=checked['error_deg']
+                        result.pop('stationary_recheck_inconclusive',None)
+                        result['reason_zh']='入口转向后已重新读到 Tag 1，按当前视觉航向进入下一段。'
+                    else:
+                        result['reason_zh']='入口转向后仍未取得可信的新位姿，已记录复测结果。'
                 if steps:
                     steps.append(result)
                     result=dict(result,correction_steps=steps,

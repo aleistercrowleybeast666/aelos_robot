@@ -273,9 +273,10 @@ class BlockDetector:
         import cv2
         import numpy as np
         if not isinstance(bgr, np.ndarray) or bgr.ndim != 3 or bgr.shape[2] != 3 or bgr.dtype != np.uint8:
-            return unknown('invalid BGR image')
+            return dict(unknown('invalid BGR image'),frame_valid=False)
         h,w = bgr.shape[:2]
-        if [w,h] != self.cfg['resolution']: return unknown('resolution changed; recalibration required')
+        if [w,h] != self.cfg['resolution']:
+            return dict(unknown('resolution changed; recalibration required'),frame_valid=False)
         if (not (self.cfg['calibration_verified'] or self.staged_trial and (count_only or self.trial_alignment))
                 or set(self.cfg['hsv_ranges']) != {'green','orange'}):
             return unknown('HSV calibration unverified')

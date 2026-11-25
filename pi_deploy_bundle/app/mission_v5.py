@@ -12,7 +12,7 @@ import types
 
 from task_runner import Robot, NotReady
 from pickup_controller import PickupController, validate as validate_pickup
-from block_camera import BlockEvidenceExpired, BlockFrameUnavailable
+from block_camera import BlockCameraContractLost, BlockEvidenceExpired, BlockFrameUnavailable
 from heading_guard import HeadingGuard, MagneticDataUnavailable
 from mission_checkpoints_v5 import (
     CheckpointArrivalResult, Checkpoint_ChooseNudge, Checkpoint_Locate, Checkpoint_ReadHeading,
@@ -306,7 +306,15 @@ class MissionRobot(Robot):
         mono=max(self.last_action_completed_monotonic or 0,self.observation_floor)
         ros=max(self.last_action_completed_ros_ns or 0,self.observation_ros_floor)
         options={'count_only':True} if count_only else {}
-        row=self.camera.observe(mono,ros,self.check,expected_load=self.load_kind,scope=self.scope(),**options)
+        try:
+            row=self.camera.observe(mono,ros,self.check,expected_load=self.load_kind,scope=self.scope(),**options)
+        except BlockCameraContractLost:
+            self.observation_floor=max(mono,self.clock())
+            self.observation_ros_floor=max(ros,self.camera.ros_now_ns())
+            self.last_block=None
+            self.camera.close()
+            self.camera=None
+            raise
         self.observation_floor=max(mono,row.get('received_monotonic',mono))
         self.observation_ros_floor=max(ros,row.get('stamp_ns',ros))
         self.last_block=row
@@ -592,7 +600,8 @@ class MissionRobot(Robot):
         adjacent=None
         misses=0
         with self._pause_route_timer():
-            while True:
+            recover_until=self.clock()+cfg['checkpoint_timeout_s']
+            while self.clock()<recover_until:
                 self.settle_since_last_completed(cfg['settle_s'])
                 after=nav.io.ros_now_ns()
                 if type(after) is not int or after<=0:
@@ -644,6 +653,10 @@ class MissionRobot(Robot):
                 except _CheckpointEvidenceExpired:
                     self._record_progress('recovering_checkpoint',reason='pose_expired',**location)
                 self.wait(self.empty_retry_s)
+            else:
+                reason=f'Tag {tag} 在配置的恢复时限内未取得可定位的位姿，已搜索转向 {sweep["turns"]} 次。'
+                self._record_progress('checkpoint_unconfirmed',direction=direction,expected_tag=tag,reason_zh=reason)
+                raise NotReady(reason)
         self.last_checkpoint=(direction,arrived)
         nav.mag.anchor=None
         self.last_heading_report=None
@@ -689,7 +702,8 @@ def execute(plan,backend,robot_factory=MissionRobot):
             phase='start_wall_pickup' if mode=='2' and r.deliveries else 'pickup'
             r._record_progress(phase)
             with r._pause_route_timer():
-                while True:
+                acquire_until=r.clock()+r.navigation_bundle['checkpoint_timeout_s']
+                while r.clock()<acquire_until:
                     try:
                         acquired=r.pickup.acquire()
                     except BlockFrameUnavailable as exc:
@@ -699,6 +713,14 @@ def execute(plan,backend,robot_factory=MissionRobot):
                         break
                     r._record_progress(phase,reason=acquired['reason'],adjustments=r.pickup.adjustments)
                     r.wait(r.empty_retry_s)
+                else:
+                    reason='已完成取物搜索和复查，仍无可抓取的目标。'
+                    r._record_progress('pickup_unconfirmed',reason_zh=reason,adjustments=r.pickup.adjustments)
+                    r.check()
+                    backend.call('finish',r.cfg['request_timeout_s'])
+                    return {'status':'pickup_unconfirmed','command':mode,'reason':reason,'events':list(r.events),
+                            'expected_load':r.load_kind,'deliveries':r.deliveries,
+                            'expected_blocks_delivered':r.blocks_delivered}
             if mode=='0-full':r.run_chain('start_to_transfer')
             r.deliver()
             if mode!='2':

@@ -449,13 +449,15 @@ def _acquire_near_tag1(robot):
             robot.check()
             event['checks'] = attempt + 1
             live = not getattr(robot.backend,'is_simulation',False)
-            if live and robot.backend.current(require_mcu=False).get('mission_v5_ready') is not True:
-                raise NotReady('Tag 1 附近取物期间 MCU 的自动动作授权已过期，请重新启动任务。')
             completed_moves = len(moves)
-            try:
-                acquired = robot.pickup.acquire(adjust=adjust,allow_stacked=True)
-            except (BlockFrameUnavailable,BlockEvidenceExpired) as exc:
-                acquired = {'status': 'no_pickup', 'reason': str(exc)}
+            if live and robot.backend.current(require_mcu=False).get('mission_v5_ready') is not True:
+                acquired = {'status':'no_pickup', 'reason':'mcu_pickup_permit_unavailable',
+                            'reason_zh':'Tag 1 接驳取物等待当前会话的 MCU 自动动作许可。'}
+            else:
+                try:
+                    acquired = robot.pickup.acquire(adjust=adjust,allow_stacked=True)
+                except (BlockFrameUnavailable,BlockEvidenceExpired) as exc:
+                    acquired = {'status': 'no_pickup', 'reason': str(exc)}
             robot.events.append({'pickup': acquired})
             event.update(status=acquired['status'],reason=acquired.get('reason'))
             if acquired['status']!='no_pickup':
@@ -470,6 +472,8 @@ def _acquire_near_tag1(robot):
             diagnosis = blocked_pair or acquired
             if stalled >= _PICKUP_RECHECKS or attempt + 1 == _TAG1_PICKUP_RECHECKS:
                 event.update(status='unconfirmed', reason=diagnosis['reason'])
+                if diagnosis['reason']=='mcu_pickup_permit_unavailable':
+                    return dict(diagnosis, reason_zh='Tag 1 接驳区已多次复查，当前会话的 MCU 取物许可仍不可用。'), moves
                 reason = ('Tag 1 附近连续未看到方块，本轮已完成一次搬运。'
                           if diagnosis.get('scene_empty') else
                           'Tag 1 附近多次观察仍未找到可抱取的方块，请检查相机和方块摆放。')
