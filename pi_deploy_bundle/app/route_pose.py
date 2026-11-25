@@ -592,20 +592,21 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
         return dict(plan, distance_verified=False, steps=approach_steps or 0,
                     reason='Tag 4 lateral offset too large for longitudinal trial')
     if near > target+band:
-        candidates = (4, 2) if approach_steps == 4 and not check_after_short_move else (2,)
+        supported = (8, 4, 2) if approach_steps == 8 else (4, 2) if approach_steps == 4 else (2,)
+        candidates = (2,) if check_after_short_move else supported
     elif approach_steps is None and far < target-band:
         candidates = (-2,)
     else:
         return dict(plan, reason='Tag 4 longitudinal position within trial tolerance')
     for stride in candidates:
         travel_bounds = settings['two_step_distance_m']
-        if (approach_steps is None or check_after_short_move) and stride > 0:
+        if (approach_steps is None or check_after_short_move or stride == 8) and stride > 0:
             # A field run traveled 19.5 cm in four steps; reserve for ~10 cm in two.
             travel_bounds = (travel_bounds[0], max(travel_bounds[1], .10))
-        if skewed and stride > 0:
+        if (skewed or stride == 8) and stride > 0:
             heading = evidence['heading_deg']
             spread = evidence['max_heading_deviation_deg']
-            lateral_shifts = [distance * sin(radians(yaw)) for distance in (0.,travel_bounds[1])
+            lateral_shifts = [distance * sin(radians(yaw)) for distance in (0.,stride/2*travel_bounds[1])
                               for yaw in (heading-spread, heading+spread)]
             left, right = evidence['lateral_bounds_m']
             predicted = left+min(lateral_shifts), right+max(lateral_shifts)
@@ -625,7 +626,7 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
             return dict(plan, steps=stride, estimated_landing_m=landing,
                         reason='Tag 4 depth supports a bounded longitudinal correction')
     reason = ('no two-step correction reliably improves Tag 4 departure depth' if approach_steps is None
-              else 'no two-step or four-step motion reliably improves Tag 4 depth')
+              else 'no supported forward group reliably improves Tag 4 depth')
     return dict(plan, reason=reason)
 
 

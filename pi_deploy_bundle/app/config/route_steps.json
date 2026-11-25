@@ -32,8 +32,7 @@
     ],
     "tag3_to_tag4": [
       {"op": "strafe_right_once", "repeat": 5, "nominal_last_small": true, "left_bias_stride_m": 0.08},
-      {"op": "carry_forward_group", "steps": 4},
-      {"op": "carry_forward_group", "steps": 4},
+      {"op": "carry_forward_group", "steps": 8},
       {"op": "carry_forward_group", "steps": 4}
     ],
     "tag4_to_tag5": [
