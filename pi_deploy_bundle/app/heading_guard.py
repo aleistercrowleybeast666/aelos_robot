@@ -794,6 +794,8 @@ class HeadingGuard:
 
     def _allow_configured_carry_followup(self, report, followup, load):
         """Use a fresh verified heading at a completed route action boundary."""
+        if report.get('entry_followup'):
+            return True
         if not self.allow_missing_magnetic or followup is None or self.blocked or self.budget.locked:
             return False
         residual = report.get('after_error_deg', report.get('error_deg'))
@@ -860,7 +862,7 @@ class HeadingGuard:
                     reason_zh='右跨后转向使偏航加大，先重读 Tag 2 或 Tag 3 复核通行余量。')
 
     def _wait_carry_boundary(self, name, load, correct, reports, correction_limit, *, entry_followup=None,
-                             excluded_turns=None,tag2_clearance_on_worsening=False):
+                             excluded_turns=None,tag2_clearance_on_worsening=False,prefer_visual_followup=None):
         callback = getattr(self, 'carry_boundary_wait_report', None)
         last = reports[-1]
         residual = last.get('after_error_deg', last.get('error_deg'))
@@ -911,7 +913,8 @@ class HeadingGuard:
                            dict(waiting, failures=failures, stationary_windows=windows))
             current = self._after_action_once(name, load, correct,
                                               allow_correction=(entry_retry or self.allow_missing_magnetic) and turns<correction_limit,
-                                              sample_override=observation, excluded_turns=excluded_turns)
+                                              sample_override=observation, excluded_turns=excluded_turns,
+                                              prefer_visual_followup=prefer_visual_followup)
             windows += 1
             if current.get('correction_actions'):
                 reports.append(current)
@@ -983,7 +986,8 @@ class HeadingGuard:
                     # The expired window was rejected before submission. Replan from a fresh stationary sample.
                     reobserved_decision=True
                     report=self._after_action_once(name,load,correct,allow_correction,
-                        sample_override=self.sample(load,stationary_retry=True),excluded_turns=excluded_turns)
+                        sample_override=self.sample(load,stationary_retry=True),excluded_turns=excluded_turns,
+                        prefer_visual_followup=prefer_visual_followup)
                     report['expired_decision_reobserved']=health
                 if recheck and report.get('correction_actions',0)==0 and self._can_recheck_carry(report):
                     if self._allow_configured_carry_followup(report,entry_followup,load):
@@ -995,7 +999,7 @@ class HeadingGuard:
                     if cooldown:self.io.settle(cooldown,self.check)
                     report=self._after_action_once(name,load,correct,allow_correction,
                                                    sample_override=self.sample(load,stationary_retry=True),
-                                                   excluded_turns=excluded_turns)
+                                                   excluded_turns=excluded_turns,prefer_visual_followup=prefer_visual_followup)
                     report['stationary_recheck']={'first_error_deg':first['error_deg'],'reason':first.get('reason')}
                     self._allow_short_transfer_segment(first,report)
                     self._allow_entry_followup(first,report,entry_followup)
@@ -1035,7 +1039,7 @@ class HeadingGuard:
                 if not self._allow_configured_carry_followup(last,entry_followup,load):
                     recovered = self._wait_carry_boundary(name, load, correct, reports, count,
                         entry_followup=entry_followup,excluded_turns=excluded_turns,
-                        tag2_clearance_on_worsening=tag2_clearance_on_worsening)
+                        tag2_clearance_on_worsening=tag2_clearance_on_worsening,prefer_visual_followup=prefer_visual_followup)
                     if recovered is not None:
                         return recovered
                     if not self._retain_route_heading_residual(name,load,last,entry_followup):
@@ -1184,7 +1188,7 @@ class HeadingGuard:
             followup = prefer_visual_followup()
             if followup is not None:
                 report.update(status='entry_heading_followup',entry_followup=followup,
-                              reason_zh='当前动作结束后已读到有效 Tag 2 位姿，先用视觉更新路线。')
+                              reason_zh=f"当前动作结束后已读到有效 Tag {followup['fresh_tag']} 位姿，先用视觉更新路线。")
                 return report
         residual_driven=recovery and not self.budget.limit_total_angle
         if abs(error) <= self.c['release_deg']:

@@ -542,6 +542,10 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
     if result['confirmed_near']:
         return dict(result, reason='Tag 2 is inside the near side of its target band',
                     reverse_clearance_available=farthest+reverse_bound <= far)
+    if (close and .04 <= nearest < near and projection[0] >= .75
+            and evidence['max_heading_deviation_deg'] <= 3. and abs(evidence['heading_deg']) > 12.):
+        return dict(result, heading_to_correct_deg=evidence['heading_deg'], retreat_before_turn=True,
+                    reason='Tag 2 below departure depth; verify a retreat on the approach before turning')
     approach_range = (near, max(far, _TAG2_FAR_APPROACH_LIMIT_M))
     if not stable or projection[0] <= 0 or not _within((nearest, farthest), approach_range):
         return dict(result, reason='Tag 2 heading, distance or measurement spread outside trial window')
@@ -737,6 +741,15 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
         result['projected_lateral_bounds_m'] = bounds
         if _within(bounds, (-limit,limit)):
             return dict(result, ready_for_forward=True, reason='Tag 5 next straight fits the trial passage')
+        # Near the gate a nearly parallel stance can miss the projected limit by
+        # millimetres even though every observation puts the body inside it.
+        if (not entering and _within(depth_bounds, (.10, .20)) and max_abs_heading <= 2.
+                and lateral_bounds[1] - lateral_bounds[0] <= .005
+                and _within(lateral_bounds, (-limit, limit))
+                and _within(bounds, (-limit - .003, limit + .003))):
+            return dict(result, ready_for_forward=True, near_parallel_entry=True,
+                        reason='Tag 5 near-parallel entry within the projected edge allowance',
+                        reason_zh='门前多帧确认机身已对正，预计直行横偏超出常规余量不超过 3 mm，开始进场。')
         reason = 'Tag 5 projected path exceeds the lateral passage tolerance'
     else:
         reason = 'Tag 5 heading outside the passage tolerance'

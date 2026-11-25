@@ -49,26 +49,25 @@
   },
   "return_chain": {
     "base_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
-    "tag5": [
-      {"op": "free_forward"}
-    ],
+    "tag5": [],
     "tag6": [
-      {"op": "empty_forward2", "repeat": 2}
+      {"op": "free_forward", "repeat": 2}
     ],
     "tag7": [
-      {"op": "empty_strafe_left", "repeat": 4},
-      {"op": "empty_forward2", "repeat": 3}
+      {"op": "empty_strafe_left", "repeat": 5},
+      {"op": "free_forward", "repeat": 2}
     ],
     "tag1": [
-      {"op": "empty_strafe_right", "repeat": 5},
-      {"op": "empty_forward2"}
+      {"op": "empty_strafe_right", "repeat": 9}
     ],
     "transfer_approach": [
-      {"op": "empty_forward2", "repeat": 2}
+      {"op": "empty_forward2"},
+      {"op": "free_forward", "repeat": 2}
     ],
     "transfer_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
     "station_side": [
-      {"op": "empty_strafe_right", "repeat": 6}
+      {"op": "empty_strafe_left", "repeat": 4},
+      {"op": "empty_forward2", "repeat": 2}
     ]
   },
   "wall_pickup_advance_steps": 4,

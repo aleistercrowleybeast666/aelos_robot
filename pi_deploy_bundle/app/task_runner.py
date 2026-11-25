@@ -338,7 +338,9 @@ class Robot:
             raise
         followup=(self.last_heading_report or {}).get('entry_followup',{})
         boundary=getattr(self,'last_boundary_visual',None) or {}
-        if (entry_context is None or followup.get('fresh_tag')!=2
+        cached_target = 2 if entry_context is not None else getattr(self,'_route_end_expected_tag',None)
+        if (cached_target is None or followup.get('fresh_tag')!=cached_target
+                or boundary.get('target_id')!=cached_target
                 or boundary.get('stance_completed_ns')!=self.last_action_completed_ros_ns):
             self.boundary_visual_observation(name)
         self.transfer_index+=1
@@ -427,14 +429,17 @@ class Robot:
             turn['selected_response_deg'] = selection_response
         return turn
 
-    def Route_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns):
+    def Route_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns, *, direction=None):
         """Keep a fresh expected Tag's yaw error in the magnetic target for this segment."""
         unavailable = RouteTagHeadingRebaseResult.UNAVAILABLE
         bundle = getattr(self,'navigation_bundle',None)
-        if (tag_id not in (1,2,3,4) or not self._allows_missing_magnetic()
+        empty_return = (self.load_kind == 'empty' and getattr(self,'route_command',None) == '2'
+                        and ((direction == 'return' and tag_id in (5,6,7,1))
+                             or (direction == 'outbound' and tag_id == 1)))
+        loaded_route = direction is None and self.load_kind in ('single','double') and tag_id in (1,2,3,4)
+        if (not (empty_return or loaded_route) or not self._allows_missing_magnetic()
                 or getattr(self.backend,'is_simulation',False)
                 or not bundle or not bundle['post_action_heading'].get('enabled')
-                or self.load_kind not in ('single','double')
                 or type(error_deg) not in (int,float) or not math.isfinite(error_deg) or abs(error_deg)>180
                 or type(observed_at_ns) is not int or observed_at_ns<=0):
             return unavailable
@@ -443,7 +448,7 @@ class Robot:
             return unavailable
         self.check()
         nav = self.ensure_navigation_io()
-        goal = next((point for point in nav.cfg['legs']['outbound'] if point['id']==tag_id),None)
+        goal = next((point for point in nav.cfg['legs'][direction or 'outbound'] if point['id']==tag_id),None)
         live = getattr(nav.io,'visual_motion_ready',None)
         if goal is None or live is None or not live(observed_at_ns):
             return unavailable
@@ -579,6 +584,36 @@ class Robot:
         _,plan,_=decision
         return {'next_action':next_action or 'scan_tag2','fresh_tag':2,
                 'visual_heading_deg':plan['heading_deg'],'position_confirmed':False}
+
+    def _tag4_visual_before_magnetic_turn(self, name, nav, settings):
+        """Give the next Tag 4 approach decision the pose before magnetic correction moves it."""
+        from entrance_trial import EntranceTrial_BoundaryCheckpoint
+        from route_pose import RoutePose_PlanTag4Longitudinal
+        report = self.boundary_visual_observation(name, expected_tag=4)
+        checkpoint = EntranceTrial_BoundaryCheckpoint(self,nav,4,action=name,report=report)
+        if (checkpoint is None and report and report.get('boundary_valid') and report.get('camera_healthy')
+                and report.get('contract_match') and report.get('camera_info_ready')):
+            # The first stationary frames may still be arriving when the magnetometer completes.
+            observe = getattr(nav.io,'observe_checkpoint_id',None)
+            if observe is not None:
+                try:
+                    observe(4,report['after_ns'],min(.35,nav.cfg['observe_s']),self.check)
+                except OSError:
+                    self.check()
+                    return None
+                report = self.boundary_visual_observation(name,expected_tag=4)
+                checkpoint = EntranceTrial_BoundaryCheckpoint(self,nav,4,action=name,report=report)
+        if checkpoint is None:
+            return None
+        pose = RoutePose_PlanTag4Longitudinal(checkpoint,nav.cfg,settings,approach_steps=4)
+        depth=pose.get('distance_bounds_m')
+        lateral=pose.get('lateral_bounds_m')
+        if (not depth or not lateral or pose['projection_bounds'][0]<=0 or depth[0]<=0
+                or depth[1]-depth[0]>.025 or lateral[1]-lateral[0]>.025
+                or pose['max_heading_deviation_deg']>3.):
+            return None
+        return {'next_action':'scan_tag4','fresh_tag':4,'visual_heading_deg':pose['heading_deg'],
+                'position_confirmed':False}
     def at_selected_boundary(self):
         c=self.cfg.get('transfer_test',{})
         return bool(getattr(self,'transfer_mode',False) and c.get('enabled') and
@@ -810,6 +845,11 @@ class Robot:
                 if expected_tag is not None:
                     sample_options['entry_followup']=lambda:{'next_action':'scan_checkpoint',
                         'expected_tag':expected_tag,'position_confirmed':False}
+                    tag4_settings=self.cfg.get('route_steps',{}).get('tag4_forward_trial') or {}
+                    if (expected_tag==4 and allow_correction and tag4_settings.get('enabled') is True
+                            and name in CARRY_HEADING_ACTIONS):
+                        sample_options['prefer_visual_followup']=lambda:self._tag4_visual_before_magnetic_turn(
+                            name,nav,tag4_settings)
             if getattr(self,'_transfer_turn_pending',False):
                 sample_options['transfer_turn_pending']=True
             result=guard.after_action(name,self.load_kind,correct,allow_correction,**sample_options)
@@ -1551,8 +1591,18 @@ class Robot:
         travel=settings.get('approach_two_step_distance_m',
                             settings.get('two_step_distance_m',(0.,_TAG1_PROBE_DEFAULT_MAX_TRAVEL_M)))
         far_threshold=max(.34 if geometry['samples']==1 else .29, travel[1]+.16)
-        if live and near>=far_threshold and far<=.55 and not approach.get('far_probe_done'):
-            return decision.ADVANCE_FAR,geometry
+        if live and near>=far_threshold and far<=.55:
+            if not approach.get('far_probe_done'):
+                return decision.ADVANCE_FAR,geometry
+            previous = approach.get('last_far_pose') or {}
+            camera = result.get('camera_info') or {}
+            if (geometry['samples'] >= 2 and previous.get('fingerprint')
+                    and camera.get('ready') is True and camera.get('fingerprint') == previous['fingerprint']
+                    and previous.get('restart_barrier_ns') == restart
+                    and approach.get('last_forward_completed_ros_ns') == stance
+                    and previous['stamp_ns'] < stance < geometry['latest_stamp_ns']
+                    and previous['near_m'] - far >= max(.002, far - near, previous['spread_m'])):
+                return decision.ADVANCE_FAR,geometry
         return decision.WAIT_AMBIGUOUS,geometry
 
     def _advance_to_reacquire_tag1(self,nav,goal,result,deadline,approach,stance_evidence,*,controller=None):
@@ -1594,6 +1644,13 @@ class Robot:
                 approach['last_forward_completed_ros_ns']=self.last_action_completed_ros_ns
                 if outcome is _Tag1ReacquireResult.ADVANCE_FAR:
                     approach['far_probe_done']=True
+                    near,far=geometry['distance_bounds_m']
+                    camera=result.get('camera_info') or {}
+                    window=(result.get('tag_observation') or {}).get('camera_window_status') or {}
+                    approach['last_far_pose']={'near_m':near,'spread_m':far-near,
+                        'stamp_ns':geometry['latest_stamp_ns'],
+                        'fingerprint':camera.get('fingerprint') if camera.get('ready') is True else None,
+                        'restart_barrier_ns':window.get('restart_barrier_ns',0)}
             result=self._reobserve_terminal_tag(nav,goal,result,deadline,controller=controller,
                 record=False,wait_s=_TAG1_QUICK_SCAN_S,quick_id=True)
             approach['observations'].append(dict(result.get('tag_observation') or {},

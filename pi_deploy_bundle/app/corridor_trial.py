@@ -29,7 +29,6 @@ _TAG2_BOUNDARY_HINT_MAX_AGE_NS = 8_000_000_000
 _TAG4_APPROACH_GROUPS = 4
 _TAG4_STRAIGHT_LATERAL_M = .16
 _TAG4_CLEARANCE_YAW_DEG = 22.
-_TAG4_RECOVERY_CENTER_STRAFES = 2
 _TAG4_NEAR_LEFT_MARGIN_M = .015
 _TAG4_LEFT_PROBE_DEPTH_M = .15
 _TAG4_LEFT_CLEARANCE_FLOOR_M = .125
@@ -53,6 +52,7 @@ _TAG5_ENTRY_TRIMS = 2
 _TAG5_STEP_UPPER_M = .05
 _TAG5_OUTSIDE_RECOVERY_DEPTH_M = .24
 _TAG5_OUTSIDE_SIDE_DEPTH_M = .18
+_TAG5_ALIGNED_SIDE_DEPTH_M = .16
 _TAG5_TIGHT_SIDE_DEPTH_M = .14
 _TAG5_TIGHT_TURN_MARGIN_M = .025
 _TAG5_SMALL_SIDE_TRAVEL_UPPER_M = .035
@@ -885,6 +885,28 @@ def _tag4_guarded_forward_ready(nav, plan):
             and live is not None and live(plan['latest_stamp_ns']))
 
 
+def _side_step_depth_sweep(depth, headings, signed_travel, window, wallward_floor, *, signed_observation=True):
+    """Bound the full side step including slip, using the camera range for motion away from the wall."""
+    shifts = [0., *(signed_travel * sin(radians(yaw)) for yaw in headings)]
+    floor = window[0] if signed_observation and min(shifts) == 0. else max(window[0], wallward_floor)
+    return depth[0] + min(shifts), depth[1] + max(shifts), floor
+
+
+def _tag4_centering_progress(plan, last_center):
+    before = last_center.get('before_lateral_bounds_m')
+    after = plan['lateral_bounds_m']
+    stamp = plan.get('latest_stamp_ns')
+    completed = last_center.get('completed_ros_ns')
+    if (not before or type(stamp) is not int or type(completed) is not int
+            or stamp <= max(completed, last_center['before_stamp_ns'])):
+        return False
+    side = 1 if before[0] > 0 else -1
+    old_inner, old_outer = sorted(side*x for x in before)
+    new_inner, new_outer = sorted(side*x for x in after)
+    return (0 < new_inner <= new_outer < old_inner
+            and old_outer - new_outer >= max(.001, old_outer - old_inner, new_outer - new_inner))
+
+
 def _tag4_recovery_strafe(plan, recovery, settings):
     """Choose a single turn-clearance stride or a measured move back toward the route."""
     near, far = plan['distance_bounds_m']
@@ -899,15 +921,18 @@ def _tag4_recovery_strafe(plan, recovery, settings):
               -1 if left > 0 and right > _TAG4_STRAIGHT_LATERAL_M else 0)
     outside = max(abs(left), abs(right))
     travel = _TAG4_RECOVERY_STRAFE_UPPER_M
+    clearance = recovery.get('clearance_strafe') or {}
+    turn_depth = clearance.get('minimum_turn_depth_m')
+    retry_at_wall = (turn_depth is not None and near < turn_depth
+                     and 'clearance_strafe_retry' not in recovery)
     if (_TAG4_CLEARANCE_YAW_DEG <= abs(yaw) <= 35.
-            and 'clearance_strafe' not in recovery and not centers and outside <= .22):
+            and (not clearance or retry_at_wall) and not centers and outside <= .22):
         turn_side = -1 if yaw < 0 else 1
         # Keep the whole step closer to the corridor center when the pose proves a side.
         preferred = (1 if right <= -travel / 2 else -1 if left >= travel / 2 else turn_side)
         directions, purpose = (preferred, -preferred), 'clearance_strafe'
-    elif (inward and abs(yaw) < _TAG4_CLEARANCE_YAW_DEG
-            and len(centers) < _TAG4_RECOVERY_CENTER_STRAFES and outside <= .30
-            and (not centers or abs(median((left, right))) < abs(centers[-1]['before_lateral_m']) - .01)):
+    elif (inward and abs(yaw) < _TAG4_CLEARANCE_YAW_DEG and outside <= .30
+            and (not centers or _tag4_centering_progress(plan, centers[-1]))):
         directions, purpose = (inward,), 'centering_strafes'
     else:
         return None
@@ -920,8 +945,9 @@ def _tag4_recovery_strafe(plan, recovery, settings):
             continue
         if left + min(0., shift) < -lateral_limit or right + max(0., shift) > lateral_limit:
             continue
-        depth_shifts = [shift * sin(radians(angle)) for angle in (yaw - spread, yaw + spread)]
-        if near + min(0., *depth_shifts) >= max(min_depth, target - band):
+        sweep_near, sweep_far, floor = _side_step_depth_sweep(
+            (near, far), (yaw - spread, yaw + spread), shift, (min_depth, max_depth), target - band)
+        if floor <= sweep_near and sweep_far <= max_depth:
             operation = 'strafe_left_once' if direction < 0 else 'strafe_right_once'
             return operation, purpose
     return None
@@ -935,7 +961,7 @@ def _tag4_can_reverse_approach(plan, settings, last_action, *, minimum_departure
     lower_target = settings.get('target_distance_m', .175) - settings.get('deadband_m', .035)
     if minimum_departure_m is not None:
         lower_target = max(lower_target, minimum_departure_m)
-    if not max(minimum, .06) <= near <= far < lower_target:
+    if not minimum <= near <= far < lower_target:
         return False
     yaw, spread = plan['heading_deg'], plan['max_heading_deviation_deg']
     projection_min, projection_max = plan.get('projection_bounds', (0., 0.))
@@ -995,13 +1021,21 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
             bounds = issue['lateral_bounds_m']
             side = (_tag4_recovery_strafe(plan, recovery, settings)
                     if strafe is not None and goal.get('allow_strafe') is True else None)
+            turn_depth = settings.get('target_distance_m', .175) - settings.get('deadband_m', .035)
+            near_wall_clearance = (side is not None and side[1] == 'clearance_strafe'
+                                   and plan['distance_bounds_m'][0] < turn_depth)
+            if near_wall_clearance and (type(robot.last_action_completed_ros_ns) is not int
+                                        or stamp <= robot.last_action_completed_ros_ns):
+                side = None
             remaining = robot.cfg['max_body_macros_per_journey'] - robot.count - reserved_actions
             can_reverse = ('approach_retreat' not in recovery and remaining >= 2
                            and _tag4_can_reverse_approach(plan, settings,
                                (leg['completed_actions'] or [prior_action])[-1],
                                minimum_departure_m=(_TAG4_LEFT_CLEARANCE_FLOOR_M if
                                    approach_steps is None and settings.get('left_departure_reference') else None)))
-            has_side_clearance = 'clearance_strafe' in recovery or recovery.get('centering_strafes')
+            clearance = recovery.get('clearance_strafe') or {}
+            has_side_clearance = (clearance and plan['distance_bounds_m'][0] >= clearance.get('minimum_turn_depth_m', 0.)
+                                  or recovery.get('centering_strafes'))
             direct_turn_room = (side is None and abs(error) <= 30.
                                 and plan['distance_bounds_m'][0] >= settings.get('target_distance_m', .175)
                                 and max(map(abs, bounds)) <= .12
@@ -1019,8 +1053,12 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
                     record = {'action': operation, 'before_error_deg': error,
                               'before_lateral_m': median(bounds), 'reason_zh': reason}
                     if purpose == 'clearance_strafe':
-                        recovery[purpose] = record
+                        if near_wall_clearance:
+                            record['minimum_turn_depth_m'] = turn_depth
+                        recovery['clearance_strafe_retry' if clearance else purpose] = record
                     else:
+                        record.update(before_lateral_bounds_m=list(bounds), before_stamp_ns=stamp,
+                                      completed_ros_ns=robot.last_action_completed_ros_ns)
                         recovery.setdefault(purpose, []).append(record)
                     moved = True
             elif can_reverse and live(stamp):
@@ -1051,6 +1089,10 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
             break
         if moved:
             motion_evidence_stamp = stamp
+            if (recovery.get('clearance_strafe') or {}).get('minimum_turn_depth_m') is not None:
+                completed = robot.last_action_completed_ros_ns
+                if type(completed) is int:
+                    motion_evidence_stamp = max(stamp, completed)
             collected_after_motion = False
         plan = _tag4_position_plan(robot, nav, profile, settings, approach_steps=approach_steps,
                                    boundary_first=moved, reuse_settled_cache=moved)
@@ -1189,8 +1231,9 @@ def _tag4_authorize_near_left(robot, nav, settings, plan, leg, *, reserved_actio
         # sweep with the taught depth band. Reserve extra room for an oblique stride.
         parallel = max(map(abs, shifts)) <= _TAG4_PARALLEL_DEPTH_DRIFT_M
         floor = lower_target if parallel else max(lower_target, _TAG4_LEFT_CLEARANCE_FLOOR_M)
-    floor = max(min_depth, floor)
-    depth_after = depth[0] + min(shifts), depth[1] + max(shifts)
+    near, far, floor = _side_step_depth_sweep(depth, (heading-spread, heading+spread), -travel,
+                                             (min_depth, max_depth), floor)
+    depth_after = near, far
     swept_lateral = lateral[0] - travel, lateral[1]
     if (not floor <= depth_after[0] <= depth_after[1] <= max_depth
             or max(map(abs, swept_lateral)) > _TAG4_STRAIGHT_LATERAL_M):
@@ -1587,10 +1630,13 @@ def _tag2_recover_heading_clearance(robot, nav, profile, leg, plan, settings, *,
         return None
     depth = plan['distance_bounds_m']
     near, far = settings['distance_window_m']
-    travel = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])[1]
+    short, travel = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])
     yaw = plan['heading_deg']
     shifts = (0., *(-travel * sin(radians(angle)) for angle in (yaw - spread, yaw + spread)))
-    if (not near <= depth[0] <= depth[1] <= far - travel * projection[1]
+    # A short retreat moves away from the tag along ground just covered. The
+    # landing, rather than the already-too-close starting pose, must clear the near limit.
+    if (not .04 <= depth[0] <= depth[1] <= far - travel * projection[1]
+            or depth[0] + short * projection[0] < near
             or bounds[0] + min(shifts) < -_TAG2_DEPARTURE_LATERAL_M
             or bounds[1] + max(shifts) > _TAG2_DEPARTURE_LATERAL_M):
         return None
@@ -1780,42 +1826,62 @@ def _tag2_lateral_clearance_issue(plan, live):
 def _recover_tag2_lateral_start(robot, nav, profile, leg, plan, settings, *,
                                reserved_actions, candidate_counts):
     """Confirm the effect of one right stride borrowed from the normal corridor plan."""
-    def depth_clear(current):
+    def clear(current):
+        depth = current.get('distance_bounds_m')
+        lateral = current.get('lateral_bounds_m')
+        if not depth or not lateral or lateral[1]-lateral[0] > .025 or depth[1]-depth[0] > .025:
+            return False
+        yaw = current.get('heading_deg')
+        spread = current.get('max_heading_deviation_deg', float('inf'))
+        if yaw is None or abs(yaw) > 8. or spread > 3.:
+            return False
         near, far = settings['distance_window_m']
-        low, high = current['distance_bounds_m']
-        return near + .02 <= low <= high <= far - .02 and high - low <= .025
+        # Verify the signed depth swept by the planned right stride, including the starting pose.
+        shifts = [0., *(.10 * sin(radians(angle)) for angle in (yaw - spread, yaw + spread))]
+        return (near <= depth[0]+min(shifts) and depth[1]+max(shifts) <= far
+                and lateral[0] >= -.30 and lateral[1]+.10 <= _TAG2_DEPARTURE_LATERAL_M)
 
     side_action = getattr(robot, 'corridor_side_action', None)
     departure = (leg.get('configured_steps') or [{}])[0]
-    if (side_action is None or departure.get('op') != 'strafe_right_once' or departure.get('repeat', 0) < 2
-            or plan['lateral_bounds_m'][0] < -.30 or plan['lateral_bounds_m'][1] >= 0.
-            or abs(plan['heading_deg']) > 8. or not depth_clear(plan)
-            or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']):
+    live = getattr(nav.io, 'visual_motion_ready', None)
+    if (side_action is None or live is None or departure.get('op') != 'strafe_right_once'
+            or departure.get('repeat', 0) < 2 or plan['lateral_bounds_m'][1] >= 0.):
         return None
     operation = 'strafe_right_once'
     recovery = {'operation': operation, 'before_lateral_bounds_m': plan['lateral_bounds_m'],
-                'confirmed': False}
+                'confirmed': False, 'nominal_strides_used': 0, 'observations': []}
     leg['tag2_lateral_recovery'] = recovery
-    _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg,
-                     reason_zh='Tag 2 明显偏左，先执行计划内的一步右跨，再确认走廊入口。')
-    side_action(operation)
-    leg['completed_actions'].append(operation)
-    pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, reuse_settled_cache=True, quick_id=True,
-                                                 boundary_first=True)
-    after = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings, candidate_counts=candidate_counts)
-    bounds = after.get('lateral_bounds_m')
-    recovery['after_lateral_bounds_m'] = bounds
-    live = getattr(nav.io, 'visual_motion_ready', None)
-    if (bounds is None or bounds[1] - bounds[0] > .025 or bounds[0] < -_TAG2_DEPARTURE_LATERAL_M
-            or bounds[1] > _TAG2_DEPARTURE_LATERAL_M or bounds[0] <= plan['lateral_bounds_m'][1] + .02
-            or abs(after['heading_deg']) > 8. or after['max_heading_deviation_deg'] > 3.
-            or not depth_clear(after)
-            or live is None or not live(after['latest_stamp_ns'])):
-        return None
-    leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
-    recovery.update(confirmed=True, nominal_strides_used=1)
-    return pose, after
-
+    current = plan
+    for _ in range(min(2, departure['repeat']-1)):
+        if (not clear(current) or not live(current['latest_stamp_ns'])
+                or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']):
+            break
+        _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg,
+                         reason_zh='Tag 2 偏左，合入计划内的一步右跨，再按新位姿核对入口。')
+        side_action(operation)
+        leg['completed_actions'].append(operation)
+        recovery['nominal_strides_used'] += 1
+        pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, reuse_settled_cache=True, quick_id=True,
+                                                     boundary_first=True)
+        after = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings, candidate_counts=candidate_counts)
+        bounds = after.get('lateral_bounds_m')
+        recovery['after_lateral_bounds_m'] = bounds
+        recovery['observations'].append({'lateral_bounds_m': bounds, 'latest_stamp_ns': after.get('latest_stamp_ns')})
+        if (not bounds or bounds[1]-bounds[0] > .025 or after.get('max_heading_deviation_deg', 180.) > 3.
+                or abs(after.get('heading_deg',180.)) > 8. or not _tag2_departure_distance_ok(after, settings)
+                or (after.get('projection_bounds') or (0.,))[0] < .85
+                or after.get('latest_stamp_ns',0) <= robot.last_action_completed_ros_ns
+                or not live(after['latest_stamp_ns'])):
+            break
+        if -_TAG2_DEPARTURE_LATERAL_M <= bounds[0] <= bounds[1] <= _TAG2_DEPARTURE_LATERAL_M:
+            leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
+            recovery['confirmed'] = True
+            return pose, after
+        # Another scheduled stride is justified only by separated windows moving toward center.
+        if bounds[1] >= 0. or bounds[0] <= current['lateral_bounds_m'][1]:
+            break
+        current = after
+    return None
 
 def _tag2_project_short_approach_lateral(robot, plan, settings):
     """Propagate Tag 2 lateral error across one acknowledged forward pair."""
@@ -2028,7 +2094,7 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
             latest.update(reason='Tag 2 is inside the strafe window after reframing')
         fresh = bool(live and live(latest.get('latest_stamp_ns', 0))) if yaw is not None or step_count else True
         if yaw is not None and turn_from_tag is not None:
-            if (abs(yaw) >= _TAG2_CLEARANCE_YAW_DEG and fresh
+            if ((abs(yaw) >= _TAG2_CLEARANCE_YAW_DEG or latest.get('retreat_before_turn')) and fresh
                     and not (leg.get('tag2_heading_clearance') or leg.get('tag2_close_reframe'))):
                 observation = _tag2_recover_heading_clearance(robot, nav, profile, leg, latest, settings,
                                                                reserved_actions=reserved_actions)
@@ -2040,6 +2106,9 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
                                                         candidate_counts=candidate_counts)
                 leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
                 continue
+            if latest.get('retreat_before_turn'):
+                initial['last_approach_reason_zh'] = '后退后仍未测到可转向的前后余量。'
+                break
             if last_turn and abs(yaw) > abs(last_turn['before_error_deg'])-1.:
                 latest.update(reason='Tag 2 turn did not reduce measured heading error')
                 break
@@ -2091,7 +2160,7 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
         step_count = latest['planned_steps']
         fresh = True  # The recovery validates a newly observed, same-stance pose.
         initial.update(planned_steps=step_count, approach_distance_m=latest['distance_m'],
-                       last_approach_reason='Tag 2 lateral clearance confirmed after one planned right stride')
+                       last_approach_reason='Tag 2 lateral clearance confirmed after planned right strafe recovery')
     if (rebase is not None and latest.get('max_heading_deviation_deg', float('inf')) <= 3.
             and abs(latest['heading_deg']) <= 12.):
         outcome = rebase(2, latest['heading_deg'], latest['latest_stamp_ns'])
@@ -2221,8 +2290,9 @@ def _tag3_heading_clearance_action(robot, leg, hint, *, reserved_actions):
     yaw, spread = hint['heading_deg'], hint['max_heading_deviation_deg']
     for direction in (preferred, -preferred):
         shifts = (0., *(direction * travel * sin(radians(angle)) for angle in (yaw - spread, yaw + spread)))
+        near_recovery = (.08 <= near < .10 and min(shifts[1:]) > 0 and near + min(shifts[1:]) >= .10)
         if (min(left, left + direction * travel) >= -.30 and max(right, right + direction * travel) <= .16
-                and near + min(shifts) >= .10 and far + max(shifts) <= .40):
+                and (near + min(shifts) >= .10 or near_recovery) and far + max(shifts) <= .40):
             return 'strafe_right_once' if direction > 0 else 'strafe_left_once'
     return None
 
@@ -2260,6 +2330,7 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
             if not live(hint['latest_stamp_ns']):
                 heading.update(status='heading_clearance_expired', clearance_blocked=True)
                 return None, None
+            near_recovery = hint['distance_bounds_m'][0] < .10
             side_action(operation)
             leg['completed_actions'].append(operation)
             heading['clearance_action'] = operation
@@ -2268,6 +2339,15 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
             if hint is None:
                 heading.update(status='clearance_pose_unconfirmed', clearance_blocked=True)
                 return pose, refreshed
+            if near_recovery:
+                # At the near edge the signed side step only creates room. Measure its
+                # real landing against the turn threshold before allowing any rotation.
+                landing = RoutePose_Tag3HeadingRecovery(refreshed, nav.cfg)
+                if (landing is None or landing['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
+                        or not live(landing['latest_stamp_ns']) or landing['distance_bounds_m'][0] < .10):
+                    heading.update(status='turn_depth_unconfirmed_after_strafe', clearance_blocked=True)
+                    return pose, refreshed
+                hint = landing
         else:
             # Leave room for the translation that can accompany a small turn.
             near, far = hint.get('distance_bounds_m', (0., 0.))
@@ -2288,6 +2368,8 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
         cleared = 'clearance_action' in heading
         for _ in range(3 if cleared else 1):
             yaw = hint['heading_deg']
+            previous_spread = hint.get('max_heading_deviation_deg', 3.)
+            previous_stamp = hint['latest_stamp_ns']
             turn = turn_from_tag(3, yaw, hint['latest_stamp_ns'], reserved_actions=reserved_actions)
             if turn is None:
                 break
@@ -2302,7 +2384,13 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
                 if cleared or direct_turn_fallback:
                     heading.update(status='post_turn_pose_unconfirmed', clearance_blocked=True)
                 break
-            if abs(hint['heading_deg']) < _TAG3_CLEARANCE_YAW_DEG or abs(yaw) - abs(hint['heading_deg']) < 1.:
+            remaining = hint['heading_deg']
+            gain = abs(yaw) - abs(remaining)
+            # Small stable gains can justify another bounded turn after a clearance
+            # stride; overlapping or sign-reversing feedback cannot.
+            resolved_gain = (yaw * remaining > 0 and hint['latest_stamp_ns'] > previous_stamp
+                             and gain > previous_spread + hint.get('max_heading_deviation_deg', 3.))
+            if abs(remaining) < _TAG3_CLEARANCE_YAW_DEG or (gain < 1. and not resolved_gain):
                 break
     if (heading.get('clearance_action') or direct_turn_fallback) and hint is not None and abs(hint['heading_deg']) >= _TAG3_CLEARANCE_YAW_DEG:
         heading.update(status='yaw_remains_outside_corridor', clearance_blocked=True)
@@ -2464,7 +2552,8 @@ def _tag5_passage_plan(robot, nav, settings, checkpoint, *, approach_distance_m=
     ready = getattr(nav.io, 'visual_motion_ready', None)
     if plan['geometry_valid'] and (type(completed) is not int or ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(geometry_valid=False, ready_for_forward=False, operation=None,
-                    reason='Tag 5 passage observation expired')
+                    reason='Tag 5 passage observation expired', reason_zh='Tag 5 门口位姿已过期，等待动作完成后的新帧。')
+        plan.pop('near_parallel_entry', None)
     return plan
 
 
@@ -2520,18 +2609,30 @@ def _tag5_wider_side_recovery(plan, settings, operation):
     near, far = bounds if side == 'strafe_left_once' else (-bounds[1], -bounds[0])
     travel = _LARGE_STRAFE_TRAVEL_UPPER_M
     max_yaw = plan['max_abs_heading_deg']
-    heading_bounds = plan.get('heading_bounds_deg', (-max_yaw, max_yaw))
+    measured = _tag5_has_heading_bounds(plan)
+    heading_bounds = plan['heading_bounds_deg'] if measured else (-max_yaw, max_yaw)
     direction = -1 if side == 'strafe_left_once' else 1
     # Depth grows when a side step points away from the marker. Also allow
     # zero movement, since a completed cross-step may barely shift the robot.
-    depth_shift = min(0., *(direction * travel * sin(radians(yaw)) for yaw in heading_bounds))
+    min_depth = (_TAG5_ALIGNED_SIDE_DEPTH_M if measured and max_yaw <= 5.
+                 else _TAG5_OUTSIDE_SIDE_DEPTH_M)
+    window = settings.get('passage_depth_window_m', (.075, .45))
+    sweep_near, sweep_far, floor = _side_step_depth_sweep(
+        plan['depth_bounds_m'], heading_bounds, direction * travel, window, min_depth, signed_observation=measured)
     if (far > limit and near - travel >= -limit + .01
-            and plan['depth_bounds_m'][0] + depth_shift >= _TAG5_OUTSIDE_SIDE_DEPTH_M):
+            and sweep_near >= floor and sweep_far <= window[1]):
         return side
     return None
 
 
-def _tag5_small_strafe_feedback(before, after, operation):
+def _tag5_has_heading_bounds(plan):
+    bounds = plan.get('heading_bounds_deg')
+    return (isinstance(bounds, (list, tuple)) and len(bounds) == 2
+            and all(type(value) in (float, int) and isfinite(value) for value in bounds)
+            and bounds[0] <= bounds[1])
+
+
+def _tag5_small_strafe_feedback(before, after, operation, settings):
     """Check the measured inward shift and the worst edge of the planned straight."""
     if (operation not in SMALL_SIDE_ACTIONS.values() or after.get('operation') != operation
             or not before.get('lateral_bounds_m') or not after.get('lateral_bounds_m')
@@ -2548,18 +2649,20 @@ def _tag5_small_strafe_feedback(before, after, operation):
     edge_gain = before_edge - after_edge
     yaw = after.get('heading_bounds_deg')
     depth = after.get('depth_bounds_m')
-    if not yaw or not depth:
+    if not _tag5_has_heading_bounds(after) or not depth:
         return None
     travel = _TAG5_SMALL_SIDE_TRAVEL_UPPER_M
-    depth_loss = min(0., *(-direction * travel * sin(radians(angle)) for angle in yaw))
+    window = settings.get('passage_depth_window_m', (.075, .45))
+    sweep_near, sweep_far, floor = _side_step_depth_sweep(depth, yaw, -direction * travel,
+                                                          window, _TAG5_TIGHT_SIDE_DEPTH_M)
     scatter = max(before_outer - before_inner, after_outer - after_inner)
     # A small gait can move only a few millimetres. Use separated body positions
     # and an independently improving projected edge, taking the window spread into account.
     repeat = (after_inner >= travel / 2 and inward_gap > 0
               and edge_gain >= max(.001, scatter)
-              and depth[0] + depth_loss >= _TAG5_TIGHT_SIDE_DEPTH_M)
+              and sweep_near >= floor and sweep_far <= window[1])
     return {'inward_gap_m': inward_gap, 'outer_edge_gain_m': edge_gain, 'window_spread_m': scatter,
-            'projected_min_depth_m': depth[0] + depth_loss, 'continue_small_strafe': repeat,
+            'projected_min_depth_m': sweep_near, 'continue_small_strafe': repeat,
             'before_stamp_ns': before['latest_stamp_ns'], 'after_stamp_ns': after['latest_stamp_ns']}
 
 
@@ -2570,10 +2673,13 @@ def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False):
     depth = plan.get('depth_bounds_m')
     lateral = plan.get('lateral_bounds_m')
     yaw = plan.get('max_abs_heading_deg')
+    min_depth, max_depth = settings.get('passage_depth_window_m', (.075, .45))
     if (depth is None or lateral is None or yaw is None
-            or not .09 <= depth[0] <= depth[1] < _TAG5_OUTSIDE_RECOVERY_DEPTH_M or abs(yaw) > 25.):
+            or not min_depth <= depth[0] <= depth[1] < _TAG5_OUTSIDE_RECOVERY_DEPTH_M
+            or depth[1] + _TAG5_RETREAT_TRAVEL_UPPER_M > max_depth or abs(yaw) > 25.):
         return False
-    heading_bounds = plan.get('heading_bounds_deg', (-yaw, yaw))
+    measured = _tag5_has_heading_bounds(plan)
+    heading_bounds = plan['heading_bounds_deg'] if measured else (-yaw, yaw)
     # A backward step changes lateral position opposite to the body heading.
     shifts = [0., *(-_TAG5_RETREAT_TRAVEL_UPPER_M * sin(radians(angle)) for angle in heading_bounds)]
     limit = settings.get('lateral_clearance_m', .075)
@@ -2583,12 +2689,10 @@ def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False):
     # An almost parallel retreat at the lip can stay entirely on the inward side
     # of the current outer edge. Verify both signs over the whole observed yaw range.
     outward = ((lateral[0] > 0 and max(shifts) > 0) or (lateral[1] < 0 and min(shifts) < 0))
-    max_depth = settings.get('passage_depth_window_m', (.075, .45))[1]
-    return (stalled_small_step and plan.get('lateral_recovery_allowed') is True
+    return (stalled_small_step and measured and plan.get('lateral_recovery_allowed') is True
             and not outward and lateral[0] * lateral[1] > 0
             and max(map(abs, shifts)) <= _TAG5_SIDE_PROGRESS_M
-            and max(map(abs, swept)) <= limit and depth[0] >= _TAG5_TIGHT_SIDE_DEPTH_M
-            and depth[1] + _TAG5_RETREAT_TRAVEL_UPPER_M <= max_depth)
+            and max(map(abs, swept)) <= limit)
 
 
 def _tag5_heading_clearance(robot, nav, plan, settings):
@@ -2614,13 +2718,16 @@ def _tag5_heading_clearance(robot, nav, plan, settings):
     moves = [(side, _LARGE_STRAFE_TRAVEL_UPPER_M, _TAG5_OUTSIDE_SIDE_DEPTH_M)]
     if small_ready:
         moves.insert(0, (SMALL_SIDE_ACTIONS[side], _TAG5_SMALL_SIDE_TRAVEL_UPPER_M, _TAG5_TIGHT_SIDE_DEPTH_M))
-    heading_bounds = plan.get('heading_bounds_deg', (-spread, spread))
+    measured = _tag5_has_heading_bounds(plan)
+    heading_bounds = plan['heading_bounds_deg'] if measured else (-spread, spread)
     direction = -1 if side == 'strafe_left_once' else 1
+    window = settings.get('passage_depth_window_m', (.075, .45))
     for action, travel, depth_floor in moves:
         # Even the largest response must not move farther from the center or past the lip.
-        depth_shift = min(0., *(direction * travel * sin(radians(angle)) for angle in heading_bounds))
+        sweep_near, sweep_far, floor = _side_step_depth_sweep(depth, heading_bounds, direction * travel,
+                                                              window, depth_floor, signed_observation=measured)
         if (travel + _TAG5_SIDE_PROGRESS_M <= near + far
-                and depth[0] + depth_shift >= depth_floor):
+                and sweep_near >= floor and sweep_far <= window[1]):
             return action
     return None
 
@@ -2669,7 +2776,7 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
         if operation is not None or wider is not None:
             error = abs(plan.get('alignment_error_m', plan['lateral_error_m']))
             if last_side is not None and error >= last_side[1] - _TAG5_SIDE_PROGRESS_M:
-                feedback = _tag5_small_strafe_feedback(last_side[2], plan, last_side[0])
+                feedback = _tag5_small_strafe_feedback(last_side[2], plan, last_side[0], settings)
                 if feedback is not None:
                     plan['small_strafe_feedback'] = feedback
                 if feedback and feedback['continue_small_strafe']:
@@ -3497,7 +3604,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     continue
                 if tag4_fused_heading or (use_tag5_passage and expected_id == 5):
                     robot.action(action, monitor_only_as=action)
-                elif checkpoint_action is not None and is_boundary:
+                elif checkpoint_action is not None and (is_boundary or
+                        (use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP
+                         and action_index == len(actions)-1)):
                     checkpoint_action(action,expected_id)
                 else:
                     robot.action(action)

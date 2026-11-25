@@ -41,9 +41,6 @@ PAIR_REQUIRED_OPS = frozenset(physical for logical, physical in PAIR_ROUTE_OPS.i
                                                  PICKUP_BACKWARD8_ACTION)) | {'grab_double'}
 _PICKUP_ADJUSTMENTS = {'pickup_left': 'empty_strafe_left', 'pickup_right': 'empty_strafe_right',
                       'pickup_advance': 'empty_forward2'}
-_TAG1_PICKUP_RETRACE = {'empty_forward2': 'carry_forward2', 'empty_strafe_left': 'strafe_left_once',
-                        'empty_strafe_right': 'strafe_right_once'}
-_TAG1_RETURN_ENTRY_DEPTH_M = (.08, .32)
 
 
 def _pickup_side_groups(actions):
@@ -97,7 +94,10 @@ def _run_startup_retreat(robot, nav, pending, report):
     unrun = deque(_pickup_retreat_groups(robot.backend, 2 * retreat_count))
     boundary = {'planned_steps': 2 * retreat_count, 'groups': [steps for _, steps in unrun],
                 'continuous': len(unrun) == 1, 'completed_actions': [], 'heading_status': 'pending'}
-    report['retreat'] = boundary
+    if 'retreat' in report:
+        report.setdefault('additional_retreats', []).append(boundary)
+    else:
+        report['retreat'] = boundary
     completed_groups = []
     while unrun:
         operation, strides = unrun.popleft()
@@ -165,7 +165,7 @@ def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
         reason_zh=f"侧跨前航向余差 {boundary['residual_deg']:+.1f}°，再次纠偏和扫码后仍未确认下一跨方向。")
 
 
-def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
+def _run_pickup_exit(robot, nav, *, actions=None):
     steps = robot.cfg.get('route_steps', {})
     corridor = steps.get('corridor') or CorridorTrial_DefaultChain()
     ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
@@ -179,15 +179,18 @@ def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
     robot.events.append({'pickup_exit': report})
     pending = deque(actions)
     deadband = nav.cfg['post_action_heading']['deadband_deg']
-    startup = command in ('1', '2') and check_tag1 is None
+    startup = command in ('1', '2')
     previous = _run_startup_retreat(robot, nav, pending, report) if startup else {}
     if previous.get('side_start_authorized') is False:
         report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
         return report
     while pending:
-        if check_tag1 is not None and check_tag1():
-            report['skipped_after_tag1_recheck'] = list(pending)
-            break
+        if startup and pending[0] == 'cmd0_carry_backward2':
+            previous = _run_startup_retreat(robot, nav, pending, report)
+            if previous.get('side_start_authorized') is False:
+                report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
+                return report
+            continue
         action = pending.popleft()
         residual, drift = previous.get('residual_deg'), previous.get('drift_deg')
         side_count = {'cmd0_strafe_left3':3,'cmd0_strafe_left4':4}.get(action)
@@ -232,30 +235,20 @@ def _tag1_pickup_adjustment_limits(steps):
     return steps.get('wall_pickup_advance_steps',2)//2, steps.get('wall_pickup_side_limit',2)
 
 
-def _tag1_pickup_exit_actions(adjustments):
-    # After a 180° turn the same body-relative direction reverses each world move.
-    return _pickup_side_groups(_TAG1_PICKUP_RETRACE[name] for name in reversed(adjustments))
-
-
-def _tag1_retrace_recheck(robot, nav, turn_report):
-    observation = {'expected_id': 1, 'detected': False, 'observation_windows': 0}
-    observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, observation, lambda: None,
-        single_window=True, quick_id=True, reuse_settled_cache=True)
-    hint = RoutePose_TrialLateralHint(observation, nav.cfg, 1)
-    attempt = {'status': observed.value, 'reason': reason, 'pose': hint}
-    turn_report['entry_previews'].append(attempt)
-    if observed is EntranceTrialResult.CAMERA_UNAVAILABLE:
-        # A camera fault should be handled by the final entry scan without replaying the route.
-        return True
-    if hint is None:
-        return False
-    live = getattr(nav.io, 'visual_motion_ready', None)
-    ready = (observed is EntranceTrialResult.CHECKPOINT_DETECTED
-             and live is not None and live(hint['latest_stamp_ns'])
-             and max(map(abs, hint['lateral_bounds_m'])) <= .10
-             and _TAG1_RETURN_ENTRY_DEPTH_M[0] <= hint['distance_m'] <= _TAG1_RETURN_ENTRY_DEPTH_M[1])
-    attempt['close_enough_for_entry_scan'] = ready
-    return ready
+def _tag1_pickup_exit_actions(approach):
+    # The turn precedes pickup. Undo the actual walk in the same body frame, in reverse order.
+    reverse = {'empty_forward2': ('back', 2), 'free_forward': ('back', 5),
+               'empty_strafe_left': ('strafe_right_once', 1), 'empty_strafe_right': ('strafe_left_once', 1)}
+    actions = []
+    for direction, group in groupby((reverse[name] for name in reversed(approach)), key=lambda motion: motion[0]):
+        count = sum(strides for _, strides in group)
+        if direction == 'back':
+            if count % 2:
+                raise ValueError('接驳取物区同一段连续前进须为偶数步，以便按后退动作的两步单位原路返回')
+            actions.extend(['cmd0_carry_backward2'] * (count // 2))
+        else:
+            actions.extend(CorridorTrial_GroupStrafes(direction, count, continuous=True, monitor_every=4))
+    return tuple(actions)
 
 
 def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
@@ -326,9 +319,15 @@ def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
             if any(abs(return_chain[name]['target_delta_deg']) != 180 for name in ('base_turn','transfer_turn')):
                 raise ValueError('循环返程需在大本营和中转区掉头 180°')
             max_adjustments = sum(_tag1_pickup_adjustment_limits(steps))
-            worst = max(worst, outbound_cost + return_chain['transfer_turn']['repeat'] + 2*max_adjustments)
-            if ReturnTrial_MaxBodyMacros(return_chain)+nav['max_extra_actions_per_journey']>cfg['max_body_macros_per_journey']:
+            station = [step['op'] for step in return_chain['station_side'] for _ in range(step.get('repeat',1))]
+            retrace = _tag1_pickup_exit_actions(station)
+            worst = max(worst, outbound_cost + _pickup_exit_macro_budget(retrace) + max_adjustments)
+            transfer = sum(step.get('repeat',1) for step in return_chain['transfer_approach'])
+            empty_cost = (ReturnTrial_MaxBodyMacros(return_chain) + transfer + return_chain['transfer_turn']['repeat']
+                          + len(station) + max_adjustments + 1 + nav['max_extra_actions_per_journey'])
+            if empty_cost > cfg['max_body_macros_per_journey']:
                 raise NotReady('empty return exceeds journey macro budget BEFORE motion')
+            worst = max(worst, empty_cost)
         else:
             return_chain = steps.get('return_chain') or ReturnTrial_DefaultChain()
             worst += return_chain['base_turn']['repeat']
@@ -513,14 +512,15 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             robot.prepare_heading_segment()
             guard = robot.heading_guard
             second_trip = result['completed_returns'] > 0
-            pickup_heading = dict(guard.reference.anchor or {}) if not second_trip and guard else None
+            pickup_heading = dict(guard.reference.anchor or {}) if guard else None
             exit_actions = None
             if second_trip:
                 acquired,moves = _acquire_near_tag1(robot)
                 if acquired['status']=='no_pickup':
                     result.update(status='pickup_unconfirmed', pickup=acquired, reason=acquired['reason_zh'])
                     break
-                exit_actions = _tag1_pickup_exit_actions(moves)
+                exit_actions = _tag1_pickup_exit_actions(result['return_trial']['station_side_actions'] + moves)
+                _restart_leg_budget(robot)
             else:
                 robot._record_progress('pickup')
                 blocked_pair = None
@@ -559,20 +559,7 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             robot._record_progress('transfer_to_entry',observed_count=acquired['observed_count'],
                                    grip_count=acquired['grip_count'],planned_count=acquired['planned_count'],
                                    stacked_triple=acquired['stacked_triple'])
-            check_tag1 = None
-            if second_trip:
-                from return_trial import ReturnTrial_DefaultChain
-                turn = (steps.get('return_chain') or ReturnTrial_DefaultChain())['transfer_turn']
-                operation = 'right_turn' if turn['target_delta_deg'] > 0 else 'left_turn'
-                turn_report = {'target_delta_deg': turn['target_delta_deg'], 'operation': operation,
-                               'protocol_completed': False, 'entry_previews': []}
-                robot.events.append({'tag1_pickup_turn': turn_report})
-                result['tag1_pickup_turn'] = turn_report
-                robot.turn(turn['repeat'], operation, target_delta_deg=turn['target_delta_deg'],
-                           nominal_step_deg=abs(turn['target_delta_deg']) / turn['repeat'])
-                turn_report['protocol_completed'] = True
-                check_tag1 = lambda: _tag1_retrace_recheck(robot, nav, turn_report)
-            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions, check_tag1=check_tag1)
+            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions)
 
             for key in ('next_segment','corridor_trial','checkpoint'):
                 result.pop(key,None)
@@ -630,7 +617,7 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                 break
             if simulation:
                 backend.cycle_boundary(robot)
-            from return_trial import ReturnTrial_Run
+            from return_trial import ReturnTrial_DefaultChain, ReturnTrial_ReachPickupStation, ReturnTrial_Run
             _restart_leg_budget(robot)
             result['return_started']=True
             returned=ReturnTrial_Run(robot)
@@ -639,7 +626,10 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                 result.update(status='return_trial_unconfirmed', checkpoint=returned.get('checkpoint'), reason=returned['reason'])
                 break
             result['completed_returns']+=1
-            _restart_leg_budget(robot)
+            station = ReturnTrial_ReachPickupStation(robot, steps.get('return_chain') or ReturnTrial_DefaultChain(), returned)
+            if not station['ready']:
+                result.update(status='return_trial_unconfirmed', checkpoint=1, reason=station['reason_zh'])
+                break
             robot.pickup.reset_after_delivery()
             robot.pickup_active=True
 
@@ -700,6 +690,16 @@ class _SyntheticOutboundRobot(_OutboundPickupRobot):
 
     def settle_since_last_completed(self, seconds):
         self.check()
+
+    def chain_step(self, step, **options):
+        super().chain_step(step, **options)
+        if self.load_kind == 'empty' and abs(step.get('target_delta_deg', 0)) == 180:
+            # The dry-run backend models completed turns at the commanded angle.
+            self.navigator.mag.anchor = {'load':'empty', 'planned_group_target':True}
+            self.last_heading_report = {'error_deg':0., 'simulation_only':True, 'sample':{'reference':{
+                'load':'empty', 'capture_verified':True, 'usable_for_heading':True,
+                'received_monotonic':self.clock(), 'capture_session':'simulation',
+                'load_epoch':0, 'calibration_id':'synthetic_empty_turn'}}}
 
     def scan_ar(self):
         camera = self.navigator.preflight_health_snapshot()['camera_info']

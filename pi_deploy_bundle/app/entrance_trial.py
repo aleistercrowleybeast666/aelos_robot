@@ -29,6 +29,7 @@ TAG1_CLEARANCE_YAW_DEG = 20.
 _TAG1_CLEARANCE_SIDE_M = .10
 _TAG1_CLEARANCE_STRIDE_UPPER_M = .10
 _TAG1_CLEARANCE_DEPTH_M = (.11, .45)
+_TAG1_CLEARANCE_EDGE_MARGIN_M = .01
 _PARTIAL_POSE_HISTORY_NS = 6_000_000_000
 _PARTIAL_POSE_HISTORY_FRAMES = 8
 
@@ -346,10 +347,17 @@ def _tag1_clearance_strafe(geometry):
         return None
     yaw = geometry['heading_deg']
     spread = geometry['max_heading_deviation_deg']
-    depth_shifts = (0., *(direction * _TAG1_CLEARANCE_STRIDE_UPPER_M * sin(radians(angle))
-                         for angle in (yaw-spread, yaw+spread)))
+    shifts = tuple(direction * _TAG1_CLEARANCE_STRIDE_UPPER_M * sin(radians(angle))
+                   for angle in (yaw-spread, yaw+spread))
     depth_min, depth_max = _TAG1_CLEARANCE_DEPTH_M
-    if near+min(depth_shifts) < depth_min or far+max(depth_shifts) > depth_max:
+    inside = near + min(0., *shifts) >= depth_min and far + max(0., *shifts) <= depth_max
+    # Immediately outside a boundary, a lateral clearance may also recover depth.
+    # All measured yaws must move inward, and a full stride must be able to reach the band.
+    from_near = (depth_min-_TAG1_CLEARANCE_EDGE_MARGIN_M <= near < depth_min
+                 and near + min(shifts) >= depth_min and far + max(shifts) <= depth_max)
+    from_far = (depth_max < far <= depth_max+_TAG1_CLEARANCE_EDGE_MARGIN_M
+                and far + max(shifts) <= depth_max and near + min(shifts) >= depth_min)
+    if not (inside or from_near or from_far):
         return None
     return 'strafe_left_once' if direction < 0 else 'strafe_right_once'
 
@@ -414,16 +422,33 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
             stationary_wait_reason_zh=f'Tag 1 横偏和航向偏差较大，先{label}一步，再用新画面修正航向。'))
         side(operation)
         recovery.update(clearance_action=operation, clearance_geometry=geometry)
+        before_camera = (alignment.get('camera_info') or {}).get('fingerprint')
         alignment = _tag1_observe_after_recovery(robot, nav, goal, recovery)
         if alignment is None:
             return None
         error = alignment['error_deg']
         stamp = alignment['scan']['latest_stamp_ns']
-        if abs(error) >= TAG1_CLEARANCE_YAW_DEG:
+        near, far = geometry['distance_bounds_m']
+        depth_min, depth_max = _TAG1_CLEARANCE_DEPTH_M
+        if abs(error) >= TAG1_CLEARANCE_YAW_DEG or not (depth_min <= near <= far <= depth_max):
             updated = _tag1_recovery_geometry(robot, nav, alignment['scan'])
-            before = max(map(abs, geometry['lateral_bounds_m']))
-            if updated is None or max(map(abs, updated['lateral_bounds_m'])) > before-.01:
-                recovery['reason_zh'] = 'Tag 1 让位后仍偏航较大，新画面未确认横偏减小，保留视觉余差。'
+            if (updated is None or updated['latest_stamp_ns'] <= geometry['latest_stamp_ns']
+                    or not before_camera or (alignment.get('camera_info') or {}).get('fingerprint') != before_camera):
+                recovery['reason_zh'] = 'Tag 1 让位后未取得同一相机的新位姿，保留视觉余差。'
+                return alignment
+            near, far = updated['distance_bounds_m']
+            if not depth_min <= near <= far <= depth_max:
+                recovery['reason_zh'] = 'Tag 1 让位后仍在转向距离范围外，保留视觉余差。'
+                return alignment
+            sign = 1 if operation == 'strafe_left_once' else -1
+            low, high = sorted(sign*x for x in geometry['lateral_bounds_m'])
+            low_after, high_after = sorted(sign*x for x in updated['lateral_bounds_m'])
+            gain = high - max(abs(low_after), abs(high_after))
+            spread = max(high-low, high_after-low_after)
+            recovery.update(lateral_gain_m=gain, lateral_window_spread_m=spread)
+            if (abs(error) >= TAG1_CLEARANCE_YAW_DEG and gain < .01
+                    and not (0 <= low_after <= high_after < low and gain >= max(.002, spread))):
+                recovery['reason_zh'] = 'Tag 1 让位后仍偏航较大，新画面未能区分横偏改善和帧间波动，保留视觉余差。'
                 return alignment
     if abs(error) > deadband and (not already_turned or 'clearance_action' in recovery):
         correction = turn(1, error, stamp, reserved_actions=reserved_actions)

@@ -460,12 +460,25 @@ class MissionRobot(Robot):
                     continue  # Complete only the remaining configured turns.
                 after=guard.last_sample
                 if not before or not after:
+                    if configured:
+                        continue
                     break
                 actual=wrap(sign*(after['raw_heading_deg']-before['raw_heading_deg']))
                 error=wrap(sign*after['raw_heading_deg']+anchor['offset_deg']-anchor['route_heading_deg'])
                 self.events.append({'mission_planned_turn':op,'observed_deg':actual,'residual_deg':error})
                 if abs(error)<=original['deadband_deg']:
                     return
+                if configured:
+                    # At the beginning of a half turn a small slip can wrap the
+                    # residual from -180 to +179. It is still half a turn away.
+                    if actual*step['target_delta_deg']<=0:
+                        continue
+                    prior_error=wrap(error-actual)
+                    crossed=(prior_error*step['target_delta_deg']<=0<=error*step['target_delta_deg']
+                             and abs(prior_error)<=abs(actual))
+                    if crossed or (abs(error)<abs(prior_error) and abs(error)<=abs(actual)/2+3.):
+                        break
+                    continue
                 if actual*step['target_delta_deg']<=0 or error*step['target_delta_deg']>=0:
                     break
                 if abs(error)<=abs(actual)/2+3.:
