@@ -534,12 +534,17 @@ class Robot:
         self.check_magnetic_before_motion(configured=True)
         self._complete_body_action(name, self.cfg['request_timeout_s'])
 
-    def corridor_recover_heading(self,expected_tag=None,*,boundary='corridor_side_boundary'):
+    def corridor_recover_tag2_heading(self,expected_tag=None):
+        self.corridor_recover_heading(expected_tag,tag2_clearance_on_worsening=True)
+
+    def corridor_recover_heading(self,expected_tag=None,*,boundary='corridor_side_boundary',
+                                 tag2_clearance_on_worsening=False):
         """Sample after the last completed motion and correct toward the saved target."""
         self._route_end_expected_tag=expected_tag
         self.last_heading_report=None
         try:
-            self.monitor_heading(boundary)
+            options={'tag2_clearance_on_worsening':True} if tag2_clearance_on_worsening else {}
+            self.monitor_heading(boundary,**options)
         except Exception:
             self.record_fall_diagnostic(boundary)
             self.boundary_visual_observation(boundary,fault_diagnostic=True)
@@ -744,7 +749,7 @@ class Robot:
         self.navigator.load_kind=self.load_kind
         return self.navigator
 
-    def monitor_heading(self,name,allow_correction=True):
+    def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False):
         name=getattr(self,'heading_turn_phase',None) or name
         cfg=getattr(self,'navigation_bundle',None)
         if (self.magnetic_route_only or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
@@ -789,6 +794,8 @@ class Robot:
         started=self.clock()
         try:
             sample_options={}
+            if tag2_clearance_on_worsening:
+                sample_options['tag2_clearance_on_worsening']=True
             if self.last_action_completed_monotonic is not None:
                 sample_options['action_completed_monotonic']=self.last_action_completed_monotonic
             entry_context=getattr(self,'_entry_forward_context',None)

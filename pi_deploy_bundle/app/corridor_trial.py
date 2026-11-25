@@ -40,6 +40,7 @@ _TAG3_TRIAL_MAX_RIGHT_STRIDES = 7
 _TAG2_CARRIED_LATERAL_MARGIN_M = .02
 _TAG2_CARRIED_MAX_YAW_DEG = 12.
 _TAG2_CAUTION_LATERAL_M = .05
+_TAG2_EDGE_PROBE_LATERAL_M = .10
 _TAG2_APPROACH_NEAR_MARGIN_M = .025
 _TAG2_DEPARTURE_LATERAL_M = .16
 _TAG2_CLEARANCE_YAW_DEG = 22.
@@ -415,11 +416,15 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
             and deadband < abs(initial[0]) <= 2 * deadband):
         check['compensation_status'] = 'heading_deferred_to_small_strafe'
         return CorridorLateralHeadingResult.DEFERRED_TO_SMALL_STRAFE
-    if (tag2_to_tag3 and initial is not None and abs(initial[0]) > _LATERAL_CLEARANCE_HEADING_DEG
-            and (drift is None or abs(drift) >= _LATERAL_LARGE_DRIFT_DEG)):
-        check['large_drift'] = True
-        check['compensation_status'] = 'abrupt_drift_needs_clearance_recheck'
-        return CorridorLateralHeadingResult.RECHECK_CLEARANCE
+    if tag2_to_tag3:
+        abrupt = (initial is not None and abs(initial[0]) > _LATERAL_CLEARANCE_HEADING_DEG
+                  and (drift is None or abs(drift) >= _LATERAL_LARGE_DRIFT_DEG))
+        previously_severe = (initial is None and before is not None and abs(before[0]) >= _LATERAL_LARGE_DRIFT_DEG)
+        if abrupt or previously_severe:
+            if previously_severe:
+                check['residual_deg'] = before[0]
+            check.update(large_drift=True, compensation_status='abrupt_drift_needs_clearance_recheck')
+            return CorridorLateralHeadingResult.RECHECK_CLEARANCE
     if not verified:
         status = 'drift_unverified'
     elif abs(drift) <= deadband or abs(initial[0]) <= deadband:
@@ -465,36 +470,46 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
     check['compensation_status'] = status
     if initial is not None and abs(initial[0]) <= deadband:
         return CorridorLateralHeadingResult.PROCEED
-    robot.corridor_recover_heading(expected_tag)
+    recover_heading = (getattr(robot, 'corridor_recover_tag2_heading', robot.corridor_recover_heading)
+                       if tag2_to_tag3 else robot.corridor_recover_heading)
+    recover_heading(expected_tag)
     recovery = robot.last_heading_report or {}
     settled = CorridorTrial_HeadingSnapshot(recovery, after=True, load=load)
     check.update(residual_deg=settled[0] if settled else None,
                  correction_actions=recovery.get('correction_actions', 0),
                  heading_status=recovery.get('status'))
+    if tag2_to_tag3:
+        last_verified = settled if settled is not None else initial
+        if last_verified is not None and abs(last_verified[0]) >= _LATERAL_LARGE_DRIFT_DEG:
+            check.update(residual_deg=last_verified[0], large_drift=True,
+                         compensation_status='post_turn_yaw_needs_clearance_recheck')
+            return CorridorLateralHeadingResult.RECHECK_CLEARANCE
     return CorridorLateralHeadingResult.PROCEED
 
 
-def _tag2_recheck_severe_lateral_drift(robot, nav, profile, leg, *, more_right):
-    """Require current route geometry after a side group reports an abrupt heading change."""
+def _tag2_recheck_severe_lateral_drift(robot, nav, profile, leg, *, more_right, reserved_actions=0):
+    """Require current route geometry after a side group reports a severe heading error."""
     drift = leg['lateral_heading_checks'][-1]
     recovery = {'status':'rechecking','drift_deg':drift['drift_deg'],
-                'magnetic_error_deg':drift['error_after_strafe_deg'],'observations':[]}
+                'magnetic_error_deg':drift['residual_deg'], 'trigger':drift['compensation_status'],
+                'observations':[]}
     leg.setdefault('tag2_severe_side_recoveries', []).append(recovery)
     # A possible wall contact invalidates the old stance and its dead reckoning.
     leg.pop('tag2_side_hint', None)
     leg.pop('tag2_projected_side_hint', None)
     leg['tag2_backward_clearance_allowed'] = False
     _report_progress(robot,'cmd0_departure_reobserve',2,3,leg=leg,
-                     reason_zh='侧跨后航向突变，正在重读 Tag 2 和 Tag 3，确认墙边通行余量。')
-    stance = robot.last_action_completed_ros_ns
+                     reason_zh='侧跨或转向后的航向余差较大，重读 Tag 2 和 Tag 3，确认墙边通行余量。')
     live = getattr(nav.io,'visual_motion_ready',None)
     rebase = getattr(robot,'Route_RebaseTagHeading',None)
     settings = robot.cfg.get('route_steps', {}).get('tag2_forward_trial') or {}
     near, far = settings.get('distance_window_m',(.08,.26))
     deadband = nav.cfg['post_action_heading']['deadband_deg']
-    for tag_id in (3,2):
-        robot.check()
-        _, observation = _refresh_checkpoint_pose(robot,nav,profile,tag_id,quick_id=True)
+    turn_from_tag = getattr(robot, 'Route_TurnFromTagHeading', None)
+
+    def observe(tag_id):
+        stance = robot.last_action_completed_ros_ns
+        _, observation = _refresh_checkpoint_pose(robot,nav,profile,tag_id,quick_id=True,advisory_windows=2)
         window = {'tag_id':tag_id, 'detected':observation['detected'],
                   'scan_windows':observation.get('quick_scan_windows',[])}
         recovery['observations'].append(window)
@@ -504,16 +519,45 @@ def _tag2_recheck_severe_lateral_drift(robot, nav, profile, leg, *, more_right):
                 or hint['latest_stamp_ns'] <= stance or robot.last_action_completed_ros_ns != stance
                 or not live(hint['latest_stamp_ns'])):
             window['result'] = 'current_pose_unavailable'
-            continue
+            return window, None
         window['pose'] = hint
+        return window, hint
+
+    def clear(hint, tag_id):
         left, right = hint['lateral_bounds_m']
-        yaw = hint['heading_deg']
         # The reliable hint's depth spread can be up to 2.5 cm. Keep a further
         # 2 cm clear of the near edge while the last wall contact is uncertain.
-        if (not near + .045 <= hint['distance_m'] <= far or max(abs(left),abs(right)) > _TAG2_DEPARTURE_LATERAL_M
-                or abs(yaw) > deadband or (tag_id == 3 and more_right and right > _TAG3_RIGHT_OFFSET_M)):
+        return (near + .045 <= hint['distance_m'] <= far
+                and max(abs(left),abs(right)) <= _TAG2_DEPARTURE_LATERAL_M
+                and (not more_right or tag_id != 3 or right <= _TAG3_RIGHT_OFFSET_M))
+
+    for tag_id in (3,2):
+        robot.check()
+        window, hint = observe(tag_id)
+        if hint is None:
+            continue
+        if not clear(hint, tag_id):
             window['result'] = 'pose_outside_clearance'
             continue
+        yaw = hint['heading_deg']
+        if abs(yaw) > deadband:
+            turn = None
+            if (turn_from_tag is not None and 'visual_turn' not in recovery
+                    and hint['distance_m'] >= near + .07
+                    and max(map(abs, hint['lateral_bounds_m'])) <= .10):
+                turn = turn_from_tag(tag_id, yaw, hint['latest_stamp_ns'], reserved_actions=reserved_actions)
+            if turn is None:
+                window['result'] = 'insufficient_turning_clearance'
+                continue
+            recovery['visual_turn'] = turn
+            window, hint = observe(tag_id)
+            if hint is None:
+                continue
+            yaw = hint['heading_deg']
+            turn['after_error_deg'] = yaw
+            if not clear(hint, tag_id) or abs(yaw) > deadband:
+                window['result'] = 'post_turn_clearance_not_confirmed'
+                continue
         reference = rebase(tag_id,yaw,hint['latest_stamp_ns']).value if rebase is not None else 'unavailable'
         if reference != 'applied':
             window['result'] = 'magnetic_reference_unavailable'
@@ -2979,6 +3023,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 close_to_target = ('distance_m' in hint and 'target_distance_m' in tag2_settings
                                    and hint['distance_m'] < tag2_settings['target_distance_m'])
                 off_center = lateral is not None and max(map(abs, lateral)) >= _TAG2_CAUTION_LATERAL_M
+                if (index == 0 and lateral is not None and deadband is not None and visual_error is not None
+                        and abs(visual_error) > deadband and max(map(abs, lateral)) >= _TAG2_EDGE_PROBE_LATERAL_M):
+                    leg['tag2_narrow_departure'] = True
                 if (leg.get('tag2_narrow_departure') or not leg['departure_tag_confirmed'] or (deadband is not None and
                         any(value is not None and abs(value)>deadband for value in (visual_error, residual, initial_error)))
                         or close_to_target or off_center or leg.get('tag2_close_reframe')):
@@ -3249,9 +3296,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         deferred_side_heading = leg['lateral_heading_checks'][-1]
                     if (heading_result is CorridorLateralHeadingResult.RECHECK_CLEARANCE
                             and _tag2_recheck_severe_lateral_drift(robot,nav,profile,leg,
-                                more_right=op == 'strafe_right_once' and not is_boundary) is None):
+                                more_right=op == 'strafe_right_once' and not is_boundary,
+                                reserved_actions=pending_actions + after_leg) is None):
+                        yaw = leg['lateral_heading_checks'][-1]['residual_deg']
                         return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                                          'Tag 2 → 3 侧跨后航向突变，重扫未确认通行余量，保留持物。')
+                                          f'Tag 2 → 3 航向余差 {yaw:+.1f}°，重扫未确认安全的侧跨或转向余量。')
                     if (tag3_midpoint and not can_read_boundary
                             and (action == 'cmd0_strafe_right3'
                                  or leg.get('tag2_cautious_strafes') and action_index == len(actions)-2)):

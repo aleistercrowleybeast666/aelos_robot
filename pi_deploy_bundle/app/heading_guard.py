@@ -13,6 +13,7 @@ CORRIDOR_HEADING_ACTIONS = frozenset(('corridor_departure', 'corridor_side_bound
 _ENTRY_STRAIGHT_LIMIT_DEG = 15.
 _STATIONARY_HEADING_SPREAD_DEG = 3.
 _CORRIDOR_MEDIUM_LEFT_TRIGGER_DEG = 15.
+_TAG2_CLEARANCE_RESIDUAL_DEG = 30.
 _CARRY_STATIONARY_RECHECK_WINDOWS = 2
 _FEEDBACK_SCOPE_FIELDS = ('capture_session', 'load_epoch', 'owner_observation_scope', 'calibration_id')
 _STREAM_INTERRUPTION_REASONS = frozenset(('capture_stream_unhealthy', 'sample_stale'))
@@ -840,8 +841,26 @@ class HeadingGuard:
                       reason_zh='已复测航向并记录余差，按预定路线进入下一段或扫码。')
         return True
 
+    def _tag2_clearance_handoff(self, reports, load):
+        last=reports[-1]
+        before, after=last.get('error_deg'),last.get('after_error_deg')
+        verification=last.get('correction_diagnostic') or {}
+        if (last.get('correction_actions')!=1 or verification.get('post_capture_verified') is not True
+                or verification.get('failures') or type(before) not in (int,float) or type(after) not in (int,float)
+                or not math.isfinite(before) or not math.isfinite(after)
+                or abs(after)<_TAG2_CLEARANCE_RESIDUAL_DEG
+                or abs(after)-abs(before)<_STATIONARY_HEADING_SPREAD_DEG
+                or self._target_observation_faults(self.last_verified_sample[1],load)):
+            return None
+        self.check()
+        return dict(last,status='tag2_clearance_recheck',remaining_heading_error_deg=after,
+                    forward_translation_allowed=False,correction_steps=reports,
+                    correction_actions=sum(report.get('correction_actions',0) for report in reports),
+                    reason='a verified turn worsened the corridor heading; recheck Tag 2 or Tag 3 before moving',
+                    reason_zh='右跨后转向使偏航加大，先重读 Tag 2 或 Tag 3 复核通行余量。')
+
     def _wait_carry_boundary(self, name, load, correct, reports, correction_limit, *, entry_followup=None,
-                             excluded_turns=None):
+                             excluded_turns=None,tag2_clearance_on_worsening=False):
         callback = getattr(self, 'carry_boundary_wait_report', None)
         last = reports[-1]
         residual = last.get('after_error_deg', last.get('error_deg'))
@@ -898,6 +917,10 @@ class HeadingGuard:
                 reports.append(current)
                 turns += current['correction_actions']
                 windows_without_motion = 0
+                if tag2_clearance_on_worsening:
+                    handoff=self._tag2_clearance_handoff(reports,load)
+                    if handoff is not None:
+                        return dict(handoff,stationary_recovery={'initial_error_deg':residual,'windows':windows})
             else:
                 windows_without_motion += 1
             if not self._allow_configured_carry_followup(current,entry_followup,load) and entry_retry:
@@ -923,7 +946,8 @@ class HeadingGuard:
                 return None
 
     def after_action(self,name,load,correct,allow_correction=True,action_completed_monotonic=None,*,
-                     entry_followup=None,transfer_turn_pending=False,prefer_visual_followup=None):
+                     entry_followup=None,transfer_turn_pending=False,prefer_visual_followup=None,
+                     tag2_clearance_on_worsening=False):
         self._nominal_retry_used=False
         count=self.c.get('micro_trial',{}).get('max_actions_per_checkpoint',1) if self.c.get('micro_trial',{}).get('bounded_route_mode') else 1
         if name=='planned_turn_complete' and self.c.get('micro_trial',{}).get('bounded_route_mode'):count=self.c['micro_trial'].get('max_actions_per_turn_group',count)
@@ -931,6 +955,7 @@ class HeadingGuard:
         excluded_turns={}
         recovery=self.boundary_recovery_enabled(name,load)
         route_feedback=self._uses_route_feedback(name,load)
+        tag2_clearance_on_worsening=(tag2_clearance_on_worsening and route_feedback and name=='corridor_side_boundary')
         if transfer_turn_pending and recovery and self.c['execute'] and allow_correction:
             # Translation is finished. Keep the initial reference and let the planned turn use the current heading.
             report=self._after_action_once(name,load,correct,allow_correction=False,
@@ -986,6 +1011,10 @@ class HeadingGuard:
                 raise
             reports.append(report)
             if report.get('correction_actions',0)!=1:break
+            if tag2_clearance_on_worsening:
+                handoff=self._tag2_clearance_handoff(reports,load)
+                if handoff is not None:
+                    return handoff
             if abs(report.get('after_error_deg',0))<=correction_target:break
             if recovery:
                 if name!='planned_turn_complete' and self._allow_configured_carry_followup(report,entry_followup,load):
@@ -1005,7 +1034,8 @@ class HeadingGuard:
             if residual is None or (abs(residual)>self.c['deadband_deg'] and not continuation):
                 if not self._allow_configured_carry_followup(last,entry_followup,load):
                     recovered = self._wait_carry_boundary(name, load, correct, reports, count,
-                        entry_followup=entry_followup,excluded_turns=excluded_turns)
+                        entry_followup=entry_followup,excluded_turns=excluded_turns,
+                        tag2_clearance_on_worsening=tag2_clearance_on_worsening)
                     if recovered is not None:
                         return recovered
                     if not self._retain_route_heading_residual(name,load,last,entry_followup):

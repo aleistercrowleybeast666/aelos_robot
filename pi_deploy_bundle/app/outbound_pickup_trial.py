@@ -59,7 +59,7 @@ def _pickup_side_groups(actions):
 
 def _pickup_exit_actions(steps, corridor, *, small_ready, command=None):
     actions = steps.get('pickup_exit', PICKUP_EXIT_ACTIONS)
-    if command == '1':
+    if command in ('1', '2'):
         actions = steps.get('command1_pickup_exit', actions)
     return _pickup_side_groups(move for action in actions for move in (
         CorridorTrial_MirroredPickupStrafes(corridor, small_ready=small_ready)
@@ -71,31 +71,33 @@ def _pickup_exit_macro_budget(actions):
     return len(actions) + actions.count('cmd0_strafe_left3') + actions.count('cmd0_strafe_left4')
 
 
-def _run_command1_retreat(robot, pending, report):
-    """Use the longest verified native retreat and align once after the retreat."""
+def _pickup_retreat_groups(backend, remaining, *, allow_native_six=True):
+    groups = []
+    for native_steps, operation in ((8, PICKUP_BACKWARD8_ACTION),
+                                    (6, PICKUP_BACKWARD6_ACTION), (4, PICKUP_BACKWARD4_ACTION)):
+        if remaining < native_steps or (native_steps == 6 and not allow_native_six):
+            continue
+        ready = getattr(backend, f'pickup_backward{native_steps}_ready', lambda: False)
+        live_six = (native_steps == remaining == 6
+                    and getattr(backend, 'Pickup_CanTryBackward6', lambda: False)() is True)
+        if ready() is True or live_six:
+            repeats, remaining = divmod(remaining, native_steps)
+            groups.extend([(operation, native_steps)] * repeats)
+    groups.extend([('cmd0_carry_backward2', 2)] * (remaining // 2))
+    return groups
+
+
+def _run_startup_retreat(robot, nav, pending, report):
+    """Complete the shared first-pickup retreat, then realign before the first strafe."""
     retreat_count = sum(1 for _ in takewhile(lambda op: op == 'cmd0_carry_backward2', pending))
     if not retreat_count:
         return {}
     for _ in range(retreat_count):
         pending.popleft()
-    retreat, groups = [], []
-    remaining = 2 * retreat_count
-    for native_steps, operation in ((8, PICKUP_BACKWARD8_ACTION),
-                                    (6, PICKUP_BACKWARD6_ACTION), (4, PICKUP_BACKWARD4_ACTION)):
-        ready = getattr(robot.backend, f'pickup_backward{native_steps}_ready', None)
-        verified = remaining >= native_steps and ready is not None and ready() is True
-        live_six = (native_steps == remaining == 6
-                    and getattr(robot.backend, 'Pickup_CanTryBackward6', lambda: False)() is True)
-        if verified or live_six:
-            repeats, remaining = divmod(remaining,native_steps)
-            retreat.extend([operation]*repeats)
-            groups.extend([native_steps]*repeats)
-    retreat.extend(['cmd0_carry_backward2']*(remaining//2))
-    groups.extend([2]*(remaining//2))
-    boundary = {'planned_steps': sum(groups), 'groups': groups, 'continuous': len(groups) == 1,
-                'completed_actions': [], 'heading_status': 'pending'}
+    unrun = deque(_pickup_retreat_groups(robot.backend, 2 * retreat_count))
+    boundary = {'planned_steps': 2 * retreat_count, 'groups': [steps for _, steps in unrun],
+                'continuous': len(unrun) == 1, 'completed_actions': [], 'heading_status': 'pending'}
     report['retreat'] = boundary
-    unrun = deque(zip(retreat, groups))
     completed_groups = []
     while unrun:
         operation, strides = unrun.popleft()
@@ -104,7 +106,8 @@ def _run_command1_retreat(robot, pending, report):
         except PickupRetreatUnavailable:
             if operation != PICKUP_BACKWARD6_ACTION:
                 raise
-            unrun.extendleft([('cmd0_carry_backward2', 2)] * 3)
+            fallback = _pickup_retreat_groups(robot.backend, strides, allow_native_six=False)
+            unrun.extendleft(reversed(fallback))
             boundary.update(continuous=False, native_six_unavailable=True,
                             groups=completed_groups + [group for _,group in unrun])
             continue
@@ -120,7 +123,46 @@ def _run_command1_retreat(robot, pending, report):
                     heading_before_correction_deg=measured[0] if measured else None,
                     residual_deg=settled[0] if settled else None,
                     correction_actions=heading.get('correction_actions', 0))
+    severe_heading = max(25., 3 * nav.cfg['post_action_heading']['deadband_deg'])
+    last_verified = settled if settled is not None else measured
+    if last_verified is not None and abs(last_verified[0]) >= severe_heading:
+        boundary['residual_deg'] = last_verified[0]
+        _recover_startup_side_heading(robot, nav, boundary, severe_heading)
     return boundary
+
+
+def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
+    """Recover once more from a verified large residual before taking the first side stride."""
+    robot.corridor_recover_heading(boundary='pickup_retreat_complete')
+    heading = robot.last_heading_report or {}
+    residual = CorridorTrial_HeadingSnapshot(heading, after=True, load=robot.load_kind)
+    check = {'heading_status': heading.get('status','heading_unavailable'),
+             'residual_deg': residual[0] if residual else None,
+             'correction_actions': heading.get('correction_actions', 0)}
+    boundary['heading_recheck'] = check
+    boundary['correction_actions'] += check['correction_actions']
+    if residual is not None:
+        boundary['residual_deg'] = residual[0]
+        if abs(residual[0]) < severe_heading:
+            return
+
+    if getattr(getattr(nav, 'io', None), 'visual_motion_ready', None) is not None:
+        view = {'expected_id':1, 'detected':False, 'observation_windows':0}
+        observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, view, lambda: None,
+            single_window=True, quick_id=True, reuse_settled_cache=True)
+        hint = RoutePose_TrialLateralHint(view, nav.cfg, 1) if observed is EntranceTrialResult.CHECKPOINT_DETECTED else None
+        check['tag1'] = {'status':observed.value, 'reason':reason, 'pose':hint}
+        if (hint is not None and nav.io.visual_motion_ready(hint['latest_stamp_ns'])
+                and max(map(abs, hint['lateral_bounds_m'])) <= .10
+                and abs(hint['heading_deg']) < severe_heading):
+            boundary.update(residual_deg=hint['heading_deg'], heading_status='tag1_verified')
+            rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+            if rebase is not None:
+                check['heading_reference'] = rebase(1,hint['heading_deg'],hint['latest_stamp_ns']).value
+            return
+
+    boundary.update(side_start_authorized=False,
+        reason_zh=f"侧跨前航向余差 {boundary['residual_deg']:+.1f}°，再次纠偏和扫码后仍未确认下一跨方向。")
 
 
 def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
@@ -137,8 +179,11 @@ def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
     robot.events.append({'pickup_exit': report})
     pending = deque(actions)
     deadband = nav.cfg['post_action_heading']['deadband_deg']
-    previous = (_run_command1_retreat(robot, pending, report)
-                if command == '1' else {})
+    startup = command in ('1', '2') and check_tag1 is None
+    previous = _run_startup_retreat(robot, nav, pending, report) if startup else {}
+    if previous.get('side_start_authorized') is False:
+        report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
+        return report
     while pending:
         if check_tag1 is not None and check_tag1():
             report['skipped_after_tag1_recheck'] = list(pending)
@@ -146,8 +191,8 @@ def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
         action = pending.popleft()
         residual, drift = previous.get('residual_deg'), previous.get('drift_deg')
         side_count = {'cmd0_strafe_left3':3,'cmd0_strafe_left4':4}.get(action)
-        # Keep the final three strides together through ordinary residuals in command 1.
-        limit = 2*deadband if command=='1' and side_count==3 else deadband
+        # Keep the final three startup strides together through ordinary residuals.
+        limit = 2*deadband if startup and side_count==3 else deadband
         if (side_count is not None and residual is not None
                 and (abs(residual) > limit
                      or (previous['correction_actions'] == 0 and drift is not None
@@ -169,6 +214,17 @@ def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
         CorridorTrial_CheckLateralHeading(robot, nav, action, before, robot.last_heading_report or {},
             report, len(pending), expected_tag=None if pending else 1, allow_clearance_translation=False)
         previous = report['lateral_heading_checks'][-1]
+        if startup and pending:
+            residual = previous.get('residual_deg')
+            if residual is None:
+                residual = previous.get('error_after_strafe_deg')
+            severe_heading = max(25., 3 * deadband)
+            if residual is not None and abs(residual) >= severe_heading:
+                previous['residual_deg'] = residual
+                _recover_startup_side_heading(robot, nav, previous, severe_heading)
+                if previous.get('side_start_authorized') is False:
+                    report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
+                    return report
     return report
 
 
@@ -452,9 +508,9 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
         while True:
             robot.prepare_heading_segment()
             guard = robot.heading_guard
-            pickup_heading = (dict(guard.reference.anchor or {}) if plan['mode']=='1' and guard else None)
-            exit_actions = None
             second_trip = result['completed_returns'] > 0
+            pickup_heading = dict(guard.reference.anchor or {}) if not second_trip and guard else None
+            exit_actions = None
             if second_trip:
                 acquired,moves = _acquire_near_tag1(robot)
                 if acquired['status']=='no_pickup':
@@ -516,6 +572,10 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
 
             for key in ('next_segment','corridor_trial','checkpoint'):
                 result.pop(key,None)
+            if result['pickup_exit'].get('status') == 'side_start_heading_unconfirmed':
+                result.update(status='pickup_exit_heading_unconfirmed', stage=1, next_stage_started=False,
+                              reason=result['pickup_exit']['reason_zh'])
+                break
             robot._record_progress('outbound_entry_scan', expected_tag=1)
             entry_check = {'tag_id': 1, 'confirmed_for_forward': False, 'status': 'scanning'}
             robot.events.append({'pickup_exit_entry': entry_check})
