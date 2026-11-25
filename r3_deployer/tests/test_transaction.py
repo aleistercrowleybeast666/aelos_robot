@@ -325,9 +325,10 @@ class DeploymentTransactionTests(unittest.TestCase):
                 remote._commit(self.target, self.ticket, readback)
         self.assertFalse((self.target/remote.MARKER).exists())
 
-    def test_eight_step_pickup_overlay_registers_the_exact_manifest_and_owner_gate(self):
+    def test_low_release_overlay_registers_the_exact_manifest_and_owner_gate(self):
         baseline = self._mcu_receipt()
         files = self._private_mcu_manifest(settings.DEFAULT_MCU_OVERLAY)
+        self.assertEqual(files, {**baseline['files'], **remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256})
         readback = dict(baseline, files=files)
         self.assertEqual(remote.validate_mcu_readback(readback,baseline['files']),readback)
         boot = 'ae8ca915-435e-4481-a85d-b097ed2a2f14'
@@ -339,6 +340,19 @@ class DeploymentTransactionTests(unittest.TestCase):
         with patch.object(remote,'_boot_id',return_value=boot):
             result = remote._commit(self.target,self.ticket,readback)
         self.assertTrue(result['mcu_readback_registered'])
+
+    def test_previous_eight_step_and_low_release_receipts_require_exact_files(self):
+        baseline = self._mcu_receipt()
+        expected = baseline['files']
+        for variant in (remote._MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256,
+                        remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256):
+            with self.subTest(actions=variant['lua/craic_actions.lua']):
+                receipt = dict(baseline, files={**expected, **variant})
+                self.assertEqual(remote.validate_mcu_readback(receipt, expected), receipt)
+        mixed = dict(baseline, files={**expected, **remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256,
+                     'lua/craic_single_micro.lua': remote._MCU_PICKUP_BACKWARD8_SHA256['lua/craic_single_micro.lua']})
+        with self.assertRaisesRegex(ValueError, 'MCU 回执与受支持的动作包不符'):
+            remote.validate_mcu_readback(mixed, expected)
 
     def test_tuned_receipt_rejects_missing_extra_or_changed_files(self):
         readback = self._mcu_receipt()

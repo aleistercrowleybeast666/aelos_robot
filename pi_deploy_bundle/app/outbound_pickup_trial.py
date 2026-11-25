@@ -235,8 +235,10 @@ def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
                                              continuous=True, legacy=False)
     entry_reserve = 2 if (steps.get('tag2_forward_trial') or {}).get('enabled') else 0
     tag5_passage = (steps.get('tag5_entry_lateral') or {}).get('verify_passage') is True
+    extra_home_steps = steps.get('command2_before_base_turn_extra_steps', 0) if mode == '2' else 0
     outbound_cost = (1 + len(entry_ops) + entry_reserve
-                     + CorridorTrial_MaxBodyMacros(corridor, tag5_passage=tag5_passage)
+                     + CorridorTrial_MaxBodyMacros(corridor, tag5_passage=tag5_passage,
+                                                  extra_home_steps=extra_home_steps)
                      + nav['max_extra_actions_per_journey'])
     worst = outbound_cost + exit_cost
     if mode == '2':
@@ -506,7 +508,10 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                 result.update(status='stage2_trial_unconfirmed', stage=2, next_segment=segment,
                               next_stage_started=segment['next_stage_started'], reason=segment['reason'])
                 if segment['detected'] or segment.get('continue_estimated') is True:
-                    corridor = CorridorTrial_Run(robot, segment, entry_alignment=alignment)
+                    turns_at_base = plan['mode'] == '2' and result['completed_returns'] == 0
+                    extra_home_steps = steps.get('command2_before_base_turn_extra_steps', 0) if turns_at_base else 0
+                    corridor = CorridorTrial_Run(robot, segment, entry_alignment=alignment,
+                                                  extra_home_steps=extra_home_steps)
                     delivered = corridor['release_protocol_completed']
                     result.update(status='task_complete' if delivered else 'stage3_trial_unconfirmed',
                                   stage=4 if delivered else 3, checkpoint=corridor['checkpoint'],

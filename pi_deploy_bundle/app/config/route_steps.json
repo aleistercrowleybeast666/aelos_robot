@@ -26,6 +26,7 @@
     "single_small_strafe_left"
   ],
   "command2_continue_return": true,
+  "command2_before_base_turn_extra_steps": 2,
   "corridor": {
     "tag2_to_tag3": [
       {"op": "strafe_right_once", "repeat": 5}

@@ -67,7 +67,7 @@ def CorridorTrial_DefaultChain():
     return chain
 
 
-def CorridorTrial_ValidateChain(chain):
+def CorridorTrial_ValidateChain(chain, *, extra_home_steps=0):
     """Normalize the four legs, with an empty Tag 4 to Tag 5 leg scanning in place."""
     names = (*(name for _, _, name in _LEGS), _DROP)
     if not isinstance(chain, dict) or chain.keys() != set(names):
@@ -81,6 +81,8 @@ def CorridorTrial_ValidateChain(chain):
             raise ValueError(f'{name} 须填写非空动作列表')
         if name == _DROP and (len(steps) < 2 or steps[-1] != {'op': 'place_single'}):
             raise ValueError(f'{name} 须先前进，再以一次 place_single 结束')
+        if name == _DROP and extra_home_steps:
+            steps = [*steps[:-1], {'op': _FORWARD_GROUP, 'steps': extra_home_steps}, steps[-1]]
         normalized[name] = []
         for index, step in enumerate(steps, 1):
             label = f'{name} 的第 {index} 个动作'
@@ -207,9 +209,9 @@ def _nominal_macro_count(steps, *, continuous, legacy):
     return total
 
 
-def CorridorTrial_MaxBodyMacros(chain, *, continuous=True, legacy=False, tag5_passage=False):
+def CorridorTrial_MaxBodyMacros(chain, *, continuous=True, legacy=False, tag5_passage=False, extra_home_steps=0):
     """Count planned actions and possible stride fusion, apart from the shared navigation budget."""
-    chain = CorridorTrial_ValidateChain(chain)
+    chain = CorridorTrial_ValidateChain(chain, extra_home_steps=extra_home_steps)
     if not continuous:
         raise ValueError('Tag 5 放物需要已验证的连续路线 MCU 能力')
     total = 1  # The single-object release.
@@ -1838,7 +1840,7 @@ def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None):
         'frame_diagnostics': observation.get('quick_scan_windows', [])}
 
 
-def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
+def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=0):
     """Run the estimated suffix in order, recording intermediate marks that are missed."""
     entry_detected = next_segment.get('detected') is True
     result = {'status': CorridorTrialResult.ROUTE_UNAVAILABLE.value, 'reason': 'preparing corridor trial',
@@ -1871,7 +1873,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
 
     chain = robot.cfg.get('route_steps', {}).get('corridor')
     try:
-        chain = CorridorTrial_ValidateChain(CorridorTrial_DefaultChain() if chain is None else chain)
+        chain = CorridorTrial_ValidateChain(CorridorTrial_DefaultChain() if chain is None else chain,
+                                            extra_home_steps=extra_home_steps)
     except ValueError as exc:
         return set_status(CorridorTrialResult.ROUTE_UNAVAILABLE, str(exc))
 
@@ -2544,6 +2547,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
     delivery = {'completed_actions': ['carry_forward2'] if tag5_probe_steps else [],
                 'approach_steps': sum(step['steps'] for step in approach),
                 'configured_steps': chain[_DROP]}
+    if extra_home_steps:
+        delivery['extra_home_steps'] = extra_home_steps
     result['delivery'] = delivery
     checkpoint = result['legs'][-1]
     if use_tag5_passage:
@@ -2600,7 +2605,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
     delivery['release_operation'] = 'place_double' if carrying_pair else PLACE_ACTION
     result.update(release_protocol_completed=True, expected_load=robot.load_kind)
     return set_status(CorridorTrialResult.DELIVERY_COMPLETED,
-                      '已扫到 Tag 5，进场后的双抱松手及回站姿动作已完成。' if carrying_pair
+                      '已扫到 Tag 5，进场后的双抱放物及回站姿动作已完成。' if carrying_pair
                       else 'single-object release protocol completed after Tag 5 and base approach')
 
 

@@ -93,8 +93,12 @@ PICKUP_BACKWARD8_CODE_SHA256 = dict(PICKUP_BACKWARD6_CODE_SHA256, **{
 PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256 = dict(PICKUP_BACKWARD8_CODE_SHA256, **{
     'lua/craic_single_micro.lua': '390935bd8ef1c073c0609d8bac7c171a572539d270330d3db8d630b8de0a751b',
 })
+PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256 = dict(PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256, **{
+    'lua/craic_actions.lua': '94e6eb25149bc6e00181997618c3bea54ba28a13af622fc38fa6c15ffddc3989',
+})
 _PICKUP_BACKWARD_CODE_VARIANTS = (PICKUP_BACKWARD4_CODE_SHA256, PICKUP_BACKWARD6_CODE_SHA256,
-                                  PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256)
+                                  PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256,
+                                  PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256)
 _PAIR_ROUTE_CODE_VARIANTS = (PAIR_ROUTE_CODE_SHA256, *_PICKUP_BACKWARD_CODE_VARIANTS)
 _CMD0_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
@@ -215,7 +219,8 @@ class MicroGate:
         actions = r.get('verified_files_sha256',{}).get('lua/craic_actions.lua')
         return bool(self.deployment_ready() and r.get('single_grab_policy')=='repeat_after_success_empty_only'
                     and actions in (REQUIRED_CODE_SHA256['lua/craic_actions.lua'],
-                                    PAIR_ROUTE_CODE_SHA256['lua/craic_actions.lua']))
+                                    PAIR_ROUTE_CODE_SHA256['lua/craic_actions.lua'],
+                                    PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256['lua/craic_actions.lua']))
 
     def mission_ready(self, epoch, recovery_ready):
         r=self.deployment or {}

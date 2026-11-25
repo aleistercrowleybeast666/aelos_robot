@@ -82,7 +82,7 @@ def Cmd0Motion_LoadRouteSteps(project):
         raise ValueError('无法读取路线步数配置 route_steps.json') from exc
     optional = {'command0_transfer', 'pickup_exit', 'command1_pickup_exit', 'corridor', 'return_chain', 'wall_pickup_advance_steps',
                 'micro_turn_filter', 'tag5_entry_lateral', 'tag2_forward_trial', 'command2_continue_return',
-                'wall_pickup_side_limit', 'tag4_forward_trial'}
+                'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps'}
     if not isinstance(steps, dict) or not defaults.keys() <= steps.keys() or steps.keys()-defaults.keys()-optional:
         raise ValueError('路线步数配置需要 transfer_forward_steps 和 tag1_to_tag2_forward_steps 两项')
     if any(type(steps[key]) is not int or not 2 <= steps[key] <= 80 for key in defaults):
@@ -101,6 +101,9 @@ def Cmd0Motion_LoadRouteSteps(project):
             raise ValueError(f'{field} 包含不支持的抱物动作')
     if 'command2_continue_return' in steps and type(steps['command2_continue_return']) is not bool:
         raise ValueError('command2_continue_return 需填写 true 或 false')
+    before_base_turn = steps.get('command2_before_base_turn_extra_steps', 0)
+    if type(before_base_turn) is not int or before_base_turn not in (0, 2, 4):
+        raise ValueError('命令 2 第一次放物前可在大本营内补进 0、2 或 4 步')
     if 'corridor' in steps:
         from corridor_trial import CorridorTrial_ValidateChain
         steps['corridor'] = CorridorTrial_ValidateChain(steps['corridor'])
