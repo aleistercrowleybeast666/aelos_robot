@@ -66,6 +66,7 @@ _TAG1_IDLE_REOBSERVATIONS = 3
 _TAG1_REOBSERVE_SCANS = ('no_tag', 'id_seen_pose_untrusted', 'unreliable')
 _TAG1_PROBE_DEFAULT_MAX_TRAVEL_M = .125
 _TAG1_UNCONFIRMED_REASON_ZH = '入口已完成找码与原地复核，仍未确认 Tag 1，请检查机器人位置和胸部相机。'
+_TAG1_POSE_UNCONFIRMED_REASON_ZH = '已识别 Tag 1，当前位姿未能验证，无法确认进场方向。'
 
 def load(path):
     cfg=json.loads(Path(path).read_text(encoding='utf-8'))
@@ -1244,8 +1245,10 @@ class Robot:
                 else:
                     idle_windows+=1
                     if idle_windows>=_TAG1_IDLE_REOBSERVATIONS:
-                        recovery.update(status='stalled', reason_zh=_TAG1_UNCONFIRMED_REASON_ZH)
-                        return dict(result,reason=_TAG1_UNCONFIRMED_REASON_ZH,reason_zh=_TAG1_UNCONFIRMED_REASON_ZH)
+                        reason=(_TAG1_POSE_UNCONFIRMED_REASON_ZH if tag_id in result['scan'].get('ids',())
+                                else _TAG1_UNCONFIRMED_REASON_ZH)
+                        recovery.update(status='stalled',reason_zh=reason)
+                        return dict(result,reason=reason,reason_zh=reason)
         def record_checkpoint_failure(exc):
             self.events.append({'visual_checkpoint_failure':{'target_id':tag_id,'reason':str(exc),'report':getattr(exc,'report',None)}})
             self.boundary_visual_observation('visual_checkpoint_failure',fault_diagnostic=True)
@@ -1306,7 +1309,8 @@ class Robot:
                             result=dict(result,correction_executed=False,correction_actions=0)
                         completed_groups=approach.get('motion_groups',0)
                         result=self._reobserve_terminal_tag(nav,goal,result,deadline,controller=controller,
-                            record=False,wait_s=_TAG1_QUICK_SCAN_S if forward_search else 5.,quick_id=quick_entry)
+                            record=False,wait_s=_TAG1_QUICK_SCAN_S if forward_search else 5.,quick_id=quick_entry,
+                            reuse_settled_cache=not forward_search)
                         if forward_search and not result.get('correction_executed'):
                             result=self._advance_to_reacquire_tag1(nav,goal,result,deadline,approach,stance_evidence,
                                                                      controller=controller)
@@ -1319,8 +1323,16 @@ class Robot:
                         else:
                             idle_windows+=1
                     if needs_reobserve(result):
-                        recovery.update(status='stalled', reason_zh=_TAG1_UNCONFIRMED_REASON_ZH)
-                        result=dict(result,reason=_TAG1_UNCONFIRMED_REASON_ZH,reason_zh=_TAG1_UNCONFIRMED_REASON_ZH)
+                        nominal = self._tag1_nominal_entry(nav,result) if forward_search else None
+                        if nominal is not None:
+                            reason='已识别 Tag 1，画面中的码位置稳定。沿当前磁航向按基准步数进入下一段。'
+                            recovery.update(status='nominal_entry_accepted',reason_zh=reason)
+                            return dict(result,tag1_nominal_entry=True,nominal_entry_evidence=nominal,
+                                        reason=reason,reason_zh=reason)
+                        reason=(_TAG1_POSE_UNCONFIRMED_REASON_ZH if 1 in result['scan'].get('ids',())
+                                else _TAG1_UNCONFIRMED_REASON_ZH)
+                        recovery.update(status='stalled',reason_zh=reason)
+                        result=dict(result,reason=reason,reason_zh=reason)
                     return result
                 if forward_search:
                     entry_wait=min(_TAG1_QUICK_SCAN_S,self.cfg['terminal_scan']['timeout_s'])
@@ -1531,6 +1543,59 @@ class Robot:
         return (tag == 1 and getattr(self,'route_command','0') in ('0','1','2')
                 and supported_load and self._allows_missing_magnetic())
 
+    def _tag1_nominal_entry(self, nav, result):
+        """Accept the known entrance with stable current ID/position and an existing heading reference."""
+        from corridor_trial import CorridorTrial_HeadingSnapshot
+
+        scan = result.get('scan') or {}
+        evidence = result.get('tag_observation') or {}
+        camera = result.get('camera_info') or {}
+        contract = nav.cfg['pose_contract']
+        pinned = nav.cfg['visual_micro']['camera_info']
+        stance, after, now = self.last_action_completed_ros_ns, scan.get('after_ns'), scan.get('now_ns')
+        if (scan.get('status') not in ('id_seen_pose_untrusted','unreliable') or scan.get('ids') != [1]
+                or scan.get('observed_ids') != [1] or self.magnetic_route_only
+                or (nav.mag.anchor or {}).get('load') != self.load_kind
+                or evidence.get('camera_healthy') is not True or evidence.get('contract_match') is not True
+                or evidence.get('camera_ready_for_motion') is False
+                or pinned.get('source_confirmed') is not True or camera.get('ready') is not True
+                or not camera.get('fingerprint') or camera['fingerprint'] != pinned.get('expected_fingerprint')
+                or contract.get('capture_time_confirmed') is not True
+                or (contract.get('body_forward'),contract.get('body_right')) != ('+x','-y')
+                or any(type(value) is not int for value in (stance,after,now)) or not 0 < stance <= after < now):
+            return None
+        heading = CorridorTrial_HeadingSnapshot(self.last_heading_report or {},after=True,load=self.load_kind)
+        completed = self.last_action_completed_monotonic
+        if (heading is None or type(completed) not in (int,float) or not completed <= heading[1] <= self.clock()
+                or abs(heading[0]) > min(16.,2*nav.cfg['post_action_heading']['deadband_deg'])):
+            return None
+        frame = contract['frame']
+        positions = {}
+        for row in scan.get('observations', ()):
+            stamp = row.get('stamp_ns')
+            if (row.get('id') != 1 or row.get('frame_id') != frame or row.get('headers_disagree')
+                    or row.get('source_publisher') != contract['publisher'] or row.get('source_topic') != nav.cfg['topic']
+                    or type(stamp) is not int or not 0 <= now-stamp <= nav.cfg['max_age_s']*1e9 or stamp <= after):
+                continue
+            position = row.get('position_raw_m') or {}
+            coordinates = tuple(position.get(axis) for axis in ('x','y','z'))
+            if any(type(value) not in (int,float) or not math.isfinite(value) for value in coordinates):
+                return None
+            positions[stamp] = coordinates
+        if len(positions) < nav.cfg['min_frames']:
+            return None
+        latest = max(positions)
+        live = getattr(nav.io,'visual_motion_ready',None)
+        if live is None or not live(latest):
+            return None
+        x, y, z = zip(*positions.values())
+        if (not .14 <= min(x) <= max(x) <= .22 or max(map(abs,y)) > .06
+                or any(max(values)-min(values) > .025 for values in (x,y,z))):
+            return None
+        return {'accepted_frames':len(positions),'body_forward_bounds_m':(min(x),max(x)),
+                'body_side_bounds_m':(min(y),max(y)),'magnetic_heading_error_deg':heading[0],
+                'latest_stamp_ns':latest}
+
     @staticmethod
     def _entry_waits_for_decoded_tag(result):
         evidence=result.get('tag_observation') or {}
@@ -1599,7 +1664,7 @@ class Robot:
         return result
 
     def _reobserve_terminal_tag(self,nav,goal,result,deadline,*,controller=None,record=True,wait_s=5.,
-                                quick_id=False):
+                                quick_id=False,reuse_settled_cache=True):
         """Read one fresh stationary Tag window after ordinary loss."""
         previous=result.get('scan',{})
         quick_entry=quick_id and goal['id']==1
@@ -1616,7 +1681,8 @@ class Robot:
         if type(after_ns) is not int or after_ns<=0:
             raise RuntimeError('fresh terminal scan clock unavailable')
         stance=self.last_action_completed_ros_ns
-        if quick_entry and nav.cfg.get('reuse_post_completion_observations') is True and type(stance) is int:
+        if (quick_entry and reuse_settled_cache and nav.cfg.get('reuse_post_completion_observations') is True
+                and type(stance) is int):
             settled=stance+int(nav.cfg['settle_s']*1e9)
             if 0<stance<=settled<=after_ns:
                 # Reuse only fresh frames captured after this stance settled, including partial windows.
@@ -1660,7 +1726,7 @@ class Robot:
                 'observed_ids':scan['observed_ids'],'scan_status':scan['status'],'body_commands':0,**evidence}})
         report=dict(result,scan=scan,status='partial',pose_accepted=False,heading_aligned=False,
             position_controlled=False,ready_for_obstacle=False,
-            expected_id=target, tag_observation=evidence,
+            expected_id=target, tag_observation=evidence, camera_info=window.get('camera_info',{}),
             fresh_target_detected=seen or result.get('fresh_target_detected',False),
             reason=('expected Tag seen in final stationary window; no alignment motion'
                     if seen else 'expected Tag absent after final stationary observation'))

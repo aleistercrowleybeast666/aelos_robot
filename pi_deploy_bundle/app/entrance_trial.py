@@ -31,15 +31,17 @@ _PARTIAL_POSE_HISTORY_FRAMES = 8
 def EntranceTrial_IsEntryAccepted(alignment):
     observation = alignment.get('scan', {})
     heading = alignment.get('decision_fusion', {})
-    return (alignment.get('expected_id') == 1
+    identified = (alignment.get('expected_id') == 1
             and alignment.get('fresh_target_detected') is True
-            and alignment.get('pose_accepted') is True
+            and alignment.get('camera_info', {}).get('ready') is True
+            and observation.get('ids') == [1])
+    if alignment.get('tag1_nominal_entry') is True:
+        return identified
+    return (identified and alignment.get('pose_accepted') is True
             and (alignment.get('heading_aligned') is True
                  or alignment.get('heading_residual_advisory') is True)
             and heading.get('source') == 'trusted_tag_heading'
             and heading.get('target_heading_deg') == 0
-            and alignment.get('camera_info', {}).get('ready') is True
-            and observation.get('ids') == [1]
             and observation.get('pose_usable') is True)
 
 
@@ -429,16 +431,22 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
             return set_status(EntranceTrialResult.CAMERA_UNAVAILABLE, 'chest camera stream or calibration changed before entry trial')
 
     entry_stance_ns = robot.last_action_completed_ros_ns
+    nominal_entry = bool(entry_alignment and entry_alignment.get('tag1_nominal_entry') is True)
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     tag_rebased = False
-    if rebase is not None and entry_alignment and EntranceTrial_IsEntryAccepted(entry_alignment):
+    if rebase is not None and not nominal_entry and entry_alignment and EntranceTrial_IsEntryAccepted(entry_alignment):
         from task_runner import RouteTagHeadingRebaseResult
         entry_scan = entry_alignment['scan']
         fused = entry_alignment['decision_fusion']
         outcome = rebase(start['tag'], fused.get('error_deg'), entry_scan.get('latest_stamp_ns'))
         result['tag_heading_rebase'] = outcome.value
         tag_rebased = outcome is RouteTagHeadingRebaseResult.APPLIED
-    if not tag_rebased:
+    if nominal_entry:
+        robot.prepare_heading_segment(fresh=False)
+        result['entry_heading_source'] = 'retained_magnetic_reference'
+        result['forward_plan'] = {'status': 'nominal', 'count': target_steps,
+                                  'reason': 'Tag 1 identified, but metric pose was not used'}
+    elif not tag_rebased:
         # Establish a fresh relative zero if the Tag reading has expired or the
         # Mag stream cannot be paired with the confirmed departure stance.
         nav.mag.anchor = None
@@ -446,7 +454,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
     if (nav.cfg['post_action_heading'].get('enabled') and nav.mag.anchor is None
             and not getattr(robot,'magnetic_route_only',False)):
         return set_status(EntranceTrialResult.MOTION_NOT_STARTED, 'fresh straight-segment heading reference unavailable')
-    if entry_alignment is not None:
+    if entry_alignment is not None and not nominal_entry:
         profile = RoutePose_Load(robot.project)
         trial = route_steps.get('tag2_forward_trial') or {}
         trial_options = []

@@ -110,9 +110,13 @@ def main(argv=None,connector=None):
                 if 'corridor_trial' in row:
                     corridor=row['corridor_trial']
                     if corridor.get('release_protocol_completed'):
-                        steps=corridor.get('delivery',{}).get('approach_steps')
+                        delivery=corridor.get('delivery',{})
+                        steps=delivery.get('approach_steps')
                         advance='持物前进 {} 步'.format(steps) if type(steps) is int else '持物前进'
-                        print('已扫到 Tag 5，{}和单块放物动作已完成。'.format(advance),flush=True)
+                        operation=delivery.get('release_operation')
+                        pair=(operation=='place_double' if operation else row.get('pickup',{}).get('grip_count')==2)
+                        release='双抱松手并回站姿' if pair else '单块放物'
+                        print(f'已扫到 Tag 5，{advance}和{release}动作已完成。',flush=True)
                     elif corridor['detected']:
                         print('已扫到 Tag 5，当前保持持物。',flush=True)
                     else:

@@ -30,6 +30,7 @@ _TAG4_APPROACH_GROUPS = 4
 _TAG3_RIGHT_OFFSET_M = .075
 _TAG3_TRIAL_MAX_RIGHT_STRIDES = 7
 _TAG2_CARRIED_LATERAL_MARGIN_M = .02
+_TAG2_CARRIED_MAX_YAW_DEG = 12.
 _TAG2_CAUTION_LATERAL_M = .05
 _TAG2_DEPARTURE_LATERAL_M = .16
 _LATERAL_LARGE_DRIFT_DEG = 30.
@@ -1255,6 +1256,31 @@ def _recover_tag2_lateral_start(robot, nav, profile, leg, plan, settings, *,
     return pose, after
 
 
+def _tag2_project_short_approach_lateral(robot, plan, settings):
+    """Propagate Tag 2 lateral error across one acknowledged forward pair."""
+    bounds = plan.get('lateral_bounds_m')
+    yaw = plan.get('heading_deg')
+    report = getattr(robot, 'last_heading_report', None) or {}
+    if (bounds is None or bounds[1] - bounds[0] > .025 or yaw is None
+            or abs(yaw) > _TAG2_CARRIED_MAX_YAW_DEG or report.get('action') != 'carry_forward2'):
+        return None
+    end = CorridorTrial_HeadingSnapshot(report, after=False, load=robot.load_kind)
+    settled = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
+    if (end is None or settled is None or end[2] != settled[2] or abs(end[0]) > 25.
+            or abs(settled[0]) > _TAG2_CARRIED_MAX_YAW_DEG):
+        return None
+    travel = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])
+    # The before-correction heading bounds translation. A turn at the end
+    # can induce separate translational slip, accounted for by the margin.
+    shifts = [distance * sin(radians(angle)) for distance in travel for angle in (yaw, end[0])]
+    margin = _TAG2_CARRIED_LATERAL_MARGIN_M
+    return {'tag_id': 2, 'basis': 'tag2_short_approach_projection',
+            'measured_lateral_bounds_m': bounds,
+            'lateral_bounds_m': (bounds[0] + min(shifts) - margin, bounds[1] + max(shifts) + margin),
+            'heading_deg': settled[0], 'heading_at_forward_end_deg': end[0],
+            'latest_stamp_ns': plan['latest_stamp_ns']}
+
+
 def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
                        continuous, candidate_counts, reserved_actions, require_verified):
     """Correct heading, select the full forward distance, then follow the plan."""
@@ -1384,8 +1410,13 @@ def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
             initial['last_approach_reason'] = followup['reason']
             return pose, False
     initial.update(protocol_completed=True, ready_to_strafe=True)
-    # The pre-motion lateral pose is stale after straightening or advancing.
+    # The pre-motion pose no longer describes this stance. Keep an estimate
+    # separately so only the missed-Tag 3 path may use it.
     leg.pop('tag2_side_hint', None)
+    if initial.get('heading_reference') == 'applied' and initial['planned_actions'] == ['carry_forward2']:
+        hint = _tag2_project_short_approach_lateral(robot, latest, settings)
+        if hint is not None:
+            leg['tag2_projected_side_hint'] = hint
     leg['tag2_backward_clearance_allowed'] = landing[1] + reverse_bound <= far
     return {}, True
 
@@ -1469,20 +1500,35 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
     return pose, refreshed
 
 
-def _tag3_lateral_hint(tag2_leg, nav, deadband, refreshed=None):
+def _tag3_lateral_hint(tag2_leg, nav, deadband, refreshed=None, *, departure_turned=False):
     hint = RoutePose_TrialLateralHint(refreshed if refreshed is not None else tag2_leg, nav.cfg, 3)
-    if hint is not None or refreshed is not None:
+    if hint is not None or departure_turned or (refreshed is not None and refreshed.get('detected')):
         return hint
-    hint = tag2_leg.get('tag2_side_hint')
+    hint = tag2_leg.get('tag2_side_hint') if refreshed is None else None
+    projected = tag2_leg.get('tag2_projected_side_hint')
     checks = tag2_leg.get('lateral_heading_checks') or ()
     right = 'strafe_right_once'
     strides = {native:count for (operation,count),native in SIDE_ACTIONS.items() if operation==right}
     strides[right] = 1
-    if (hint is None or not checks or deadband is None
-            or sum(strides.get(check['action'],0) for check in checks)!=5
-            or any(check['action'] not in strides or check.get('residual_deg') is None or abs(check['residual_deg'])>deadband
-                   or check.get('correction_actions') or check.get('compensation_status')=='applied'
-                   for check in checks)):
+    if not checks or sum(strides.get(check['action'], 0) for check in checks) != 5:
+        return None
+    if projected is not None and tag2_leg.get('detected') is False:
+        # Keep the estimate only across an uninterrupted traverse with
+        # verified headings. Dropping a Tag must not hide an unmeasured turn.
+        scan = (refreshed if refreshed is not None else tag2_leg).get('scan') or {}
+        if (scan.get('camera_healthy') is not True or scan.get('contract_match') is not True
+                or any(check.get('drift_deg') is None
+                       or check.get('residual_deg') is None or abs(check['residual_deg']) > _TAG2_CARRIED_MAX_YAW_DEG
+                       or check.get('correction_actions') or check.get('compensation_status') == 'applied'
+                       for check in checks)):
+            return None
+        hint = projected
+    elif (hint is None or deadband is None
+          or any(check.get('residual_deg') is None or abs(check['residual_deg']) > deadband
+                 or check.get('correction_actions') or check.get('compensation_status') == 'applied'
+                 for check in checks)):
+        return None
+    if any(check['action'] not in strides for check in checks):
         return None
     left, right = hint['lateral_bounds_m']
     return dict(hint, lateral_bounds_m=(left-_TAG2_CARRIED_LATERAL_MARGIN_M,
@@ -1511,7 +1557,17 @@ def _tag3_trial_side_plan(step, hint, *, small_available):
     small = SMALL_SIDE_ACTIONS[operation] if small_available else None
     plan = {'status': 'field_baseline', 'tag_id': 3, 'operation': operation, 'nominal_count': nominal,
             'reason_zh': 'Tag 3 横向位姿未确认，沿用实测基线右跨。'}
-    if hint is not None:
+    if hint is not None and hint.get('basis') == 'tag2_short_approach_projection':
+        stride = step.get('left_bias_stride_m')
+        plan['trial_lateral_hint'] = hint
+        if stride is not None and hint['lateral_bounds_m'][1] < -stride:
+            count, small = nominal, None
+            offset_cm = -100 * median(hint['lateral_bounds_m'])
+            plan.update(status='tag3_left_bias_fused',
+                        reason_zh=f'未扫到 Tag 3，由 Tag 2 推算仍偏左约 {offset_cm:.1f} cm，最后一小跨换成大跨，共 {count} 大跨。')
+        else:
+            plan['reason_zh'] = 'Tag 2 的横偏估计不足以调整右跨，沿用基线距离。'
+    elif hint is not None:
         left_count = _tag3_left_bias_count(step, hint)
         if left_count is not None and left_count >= count:
             count, small = left_count, None
@@ -2082,7 +2138,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                             reason_zh='Tag 3 横向位姿未确认且进段航向偏差仍大，沿用基线右跨，省略额外侧跨。',
                             incoming_heading_residual_deg=recent[0], departure_heading_residual_deg=recent[1])
                     elif not carrying_pair and count>nominal+1:
-                        if hint is not None and hint['lateral_bounds_m'][0]>_TAG3_RIGHT_OFFSET_M:
+                        if (hint is not None and hint.get('basis') != 'tag2_short_approach_projection'
+                                and hint['lateral_bounds_m'][0] > _TAG3_RIGHT_OFFSET_M):
                             count -= 1
                             side_plan.update(count=count, trial_lateral_hint=hint,
                                 reason='stationary lateral evidence favors one fewer full right stride')
@@ -2127,7 +2184,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
             if previous_id == 3 and step.get('nominal_last_small') and not calibrated and count == nominal and not small:
                 deadband = nav.cfg['post_action_heading'].get('deadband_deg')
                 previous_leg = result['legs'][-2]
-                hint = _tag3_lateral_hint(previous_leg, nav, deadband, tag3_refresh)
+                departure_turned = bool((leg.get('departure_heading') or {}).get('correction_actions'))
+                hint = _tag3_lateral_hint(previous_leg, nav, deadband, tag3_refresh,
+                                          departure_turned=departure_turned)
                 live = getattr(nav.io, 'visual_motion_ready', None)
                 if hint and hint['tag_id'] == 3 and (not live or not live(hint['latest_stamp_ns'])):
                     hint = None
@@ -2143,7 +2202,10 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                     incoming_residual = incoming.get('last_verified_error_deg', incoming.get('error_after_strafe_deg'))
                 side_plan['incoming_heading_residual_deg'] = incoming_residual
                 partial_tag3 = (previous_leg.get('checkpoint_not_seen') or {}).get('cause') == 'insufficient_frames'
-                if hint is None and (carrying_pair or partial_tag3):
+                if (side_plan['status'] == 'tag3_left_bias_fused' and hint
+                        and hint.get('basis') == 'tag2_short_approach_projection'):
+                    monitor_every = min(monitor_every or 3, 3)
+                elif hint is None and (carrying_pair or partial_tag3):
                     monitor_every = min(monitor_every or 2, 2)
                     if partial_tag3:
                         side_plan['partial_frames_use_baseline_groups'] = True
@@ -2535,10 +2597,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
     _report_progress(robot, 'cmd0_delivery_release', 5, 5)
     robot.action(PLACE_ACTION)
     delivery['completed_actions'].append(PLACE_ACTION)
+    delivery['release_operation'] = 'place_double' if carrying_pair else PLACE_ACTION
     result.update(release_protocol_completed=True, expected_load=robot.load_kind)
     return set_status(CorridorTrialResult.DELIVERY_COMPLETED,
-                      ('two-object' if carrying_pair else 'single-object')
-                      + ' release protocol completed after Tag 5 and base approach')
+                      '已扫到 Tag 5，进场后的双抱松手及回站姿动作已完成。' if carrying_pair
+                      else 'single-object release protocol completed after Tag 5 and base approach')
 
 
 def _tag5_continuous_left_group(plan, remaining, load):
