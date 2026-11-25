@@ -270,6 +270,7 @@ class HeadingGuard:
                 (load_epoch is not None and getattr(self.io,'magnetic_load_epoch',None)!=load_epoch)):
             self.fault('magnetic owner, capture session or load epoch changed during collection')
             return {'status':'rejected','reason':'observation scope changed'},None
+        rows=[r for r in rows if isinstance(r,dict)]
         if any(r.get('expected_load',load)!=load for r in rows):
             self.fault('magnetic expected load changed')
             return {'status':'rejected','reason':'different expected load'},None
@@ -284,12 +285,13 @@ class HeadingGuard:
                         (load_epoch is None or row.get('load_epoch')==load_epoch))
             rows=[r for r in rows if eligible(r)]
             for key in ('session','load_epoch','calibration_id'):
-                values={r.get(key) for r in rows}
-                if len(values)>1:
+                if rows and any(r.get(key)!=rows[0].get(key) for r in rows[1:]):
                     self.fault('mixed magnetic '+key+' in post-action window')
                     return {'status':'rejected','reason':'mixed '+key},None
         probe = MagneticReference(self.cfg['magnetic'])
-        result = probe.refresh(rows, 0., now, after, load, None)
+        accepted=[]
+        result = probe.refresh(rows, 0., now, after, load, None, accepted)
+        rows=accepted
         if result['status'] != 'updated':
             if (self.allow_missing_magnetic and result.get('reason') in _UNSTABLE_MAGNETIC_WINDOWS and rows
                     and all(r.get('capture_source')=='verified_sensor_capture' for r in rows)):

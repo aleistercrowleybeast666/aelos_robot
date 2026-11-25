@@ -34,21 +34,50 @@ def ground_pose(row,contract):
             'body_right_in_tag_right':dot(br,right),
             'ground_up_dot':dot(up,bu),'stamp_ns':row['stamp_ns'],'id':row['id']}
 
+def Observation_DistinctTagRows(rows):
+    """Rows for one expected marker, keyed by capture time. A conflicting capture has no vote."""
+    captures = {}
+    conflicts = set()
+    for row in rows:
+        stamp = row['stamp_ns']
+        if stamp in conflicts:
+            continue
+        previous = captures.get(stamp)
+        if previous is None:
+            captures[stamp] = row
+            continue
+        left, right = previous.get('quaternion_raw'), row.get('quaternion_raw')
+        same_rotation = left == right
+        if not same_rotation and isinstance(left, dict) and isinstance(right, dict):
+            # Unit quaternions q and -q encode the same orientation.
+            same_rotation = all(type(right.get(k)) in (int, float) and left.get(k) == -right[k]
+                                for k in ('x','y','z','w'))
+        if previous.get('position_raw_m') != row.get('position_raw_m') or not same_rotation:
+            conflicts.add(stamp)
+            del captures[stamp]
+    return captures
+
+
 def summarize(window,expected_id,cfg,after_ns=0):
-    c=cfg['pose_contract'];now=window.get('now_ns',0);after_ns=max(after_ns,window.get('after_ns',0));seen=set();rows=[];all_ids=set();reasons=[]
+    c=cfg['pose_contract'];now=window.get('now_ns',0);rows=[];all_ids=set();reasons=[]
+    barriers = (after_ns, window.get('after_ns',0), window.get('camera_restart_ns',0))
+    if type(now) is not int or any(type(stamp) is not int for stamp in barriers):
+        return {'status':'unreliable','expected_id':expected_id,'observed_ids':[], 'observations':[], 'ids':[],
+                'samples':0, 'pose_usable':False, 'position_usable':False, 'reason':'invalid camera window time'}
+    after_ns = max(barriers)
     for row in window.get('observations',[]):
         try:
-            stamp=row['stamp_ns'];key=(row['id'],stamp,row['frame_id'],row.get('source_topic'))
+            stamp=row['stamp_ns']
+            if type(row.get('id')) is not int:continue
             if type(stamp) is not int or stamp<=after_ns or not 0<=now-stamp<=cfg['max_age_s']*1e9:continue
             if row.get('source_topic')!=cfg['topic']:continue
             if row.get('source_publisher') not in (None,c['publisher']):continue
             all_ids.add(row['id'])
             if row['id']!=expected_id:continue
             if row.get('headers_disagree') or row['frame_id'].lstrip('/')!=c['frame'].lstrip('/'):continue
-            if key in seen:continue
-            seen.add(key)
             rows.append(row)
-        except (ValueError,KeyError,TypeError):continue
+        except (ValueError,KeyError,TypeError,AttributeError):continue
+    rows=list(Observation_DistinctTagRows(rows).values())
     result={'status':'no_tag','expected_id':expected_id,'observed_ids':sorted(all_ids),'observations':rows,
             'ids':[],'samples':len(rows),'pose_usable':False,'position_usable':False,
             'confidence_semantics':'ALVAR per-observation confidence not established; fresh-frame and geometry checks only'}
@@ -103,25 +132,65 @@ MAGNETIC_INSUFFICIENT_SAMPLES = 'insufficient fresh magnetic receipt events'
 class MagneticReference:
     """只有可靠视觉航向才刷新偏置；mag仅作航向，绝不作为位置/距离。"""
     def __init__(self,cfg):self.cfg=cfg;self.anchor=None
-    def refresh(self,samples,route_heading_deg,now,after_receipt,load,tag_id):
+    def refresh(self,samples,route_heading_deg,now,after_receipt,load,tag_id,accepted_samples=None):
         if not self.cfg['enabled']:return {'status':'disabled'}
-        good=[];seen=set()
-        for s in samples:
+        if type(route_heading_deg) not in (int,float) or not math.isfinite(route_heading_deg):
+            return {'status':'rejected','reason':'invalid route heading'}
+        accepted = []
+        headings, norms, raw_norms = [], [], []
+        receipts, captures = {}, {}
+        max_age = self.cfg['max_age_s']
+        for row in samples:
+            if not isinstance(row, dict) or row.get('expected_load', load) != load:
+                continue
             try:
-                if s.get('expected_load',load)!=load:continue
-                t=s['received_monotonic'];h=float(s['heading_deg']);xyz=tuple(s['xyz'])
-                # 实机uint16源的旧版计算可能给360；与0等价，不外推超界值。
-                if not after_receipt<t<=now or now-t>self.cfg['max_age_s'] or not 0<=h<=360:continue
-                h=h%360.
-                if len(xyz)!=3 or not all(math.isfinite(v) and -32768<=v<=32767 for v in xyz) or not math.isfinite(sum(v*v for v in xyz)) or sum(v*v for v in xyz)<=0:continue
-                # 仅去重接收事件；稳定XYZ允许重复，接收新鲜不等于传感采样新鲜。
-                if t in seen:continue
-                seen.add(t);good.append((h,magnetic_field_norm(xyz,self.cfg,s)))
-            except (ValueError,KeyError,TypeError):continue
-        if len(good)<self.cfg['min_samples']:return {'status':'skipped','reason':MAGNETIC_INSUFFICIENT_SAMPLES}
-        h=circular_median([a for a,b in good])%360.;norm=statistics.median(b for a,b in good)
-        if mad([a for a,b in good],h,True)>self.cfg['max_mad_deg']:return {'status':'rejected','reason':'magnetic heading unstable'}
-        if max(abs(b-norm) for a,b in good)/norm>self.cfg['max_norm_fraction_change']:return {'status':'rejected','reason':'magnetic field magnitude unstable within window'}
+                receipt = row['received_monotonic']
+                heading = float(row['heading_deg'])
+                xyz = tuple(row['xyz'])
+                if (type(receipt) not in (int,float) or not after_receipt < receipt <= now
+                        or now - receipt > max_age or not 0 <= heading <= 360):
+                    continue
+                if len(xyz) != 3 or not all(type(v) in (int,float) and -32768 <= v <= 32767 for v in xyz) or not any(xyz):
+                    continue
+                heading %= 360.
+                captured = row.get('captured_monotonic')
+                verified = row.get('capture_source') == 'verified_sensor_capture'
+                if verified:
+                    if type(captured) not in (int,float) or not after_receipt < captured <= receipt or now - captured > max_age:
+                        continue
+                    if row.get('capture_semantics') == 'conservative_software_lower_bound' and not isinstance(row.get('session'), str):
+                        continue
+                norm = magnetic_field_norm(xyz, self.cfg, row)
+                reading = (heading, xyz, row.get('session'), row.get('load_epoch'), row.get('calibration_id'))
+                if ((receipt in receipts and receipts[receipt] != reading)
+                        or (verified and captured in captures and captures[captured] != reading)):
+                    return {'status':'skipped','reason':MAGNETIC_INSUFFICIENT_SAMPLES,'window_issue':'conflicting_capture_replay'}
+                repeated = receipt in receipts or (verified and captured in captures)
+                receipts[receipt] = reading
+                if verified:
+                    captures[captured] = reading
+                if not repeated:
+                    accepted.append(row)
+                    headings.append(heading)
+                    norms.append(norm)
+                    raw_norms.append(math.sqrt(sum(v*v for v in xyz)))
+            except (ValueError, KeyError, TypeError, OverflowError):
+                continue
+        # A sensor restart or load/calibration change splits a measurement window.
+        # A fresh window can re-establish the reference on the next boundary.
+        capture_verified = bool(accepted) and all(row.get('capture_source') == 'verified_sensor_capture' for row in accepted)
+        if capture_verified and any(
+                row.get(key)!=accepted[0].get(key) for row in accepted[1:]
+                for key in ('session','load_epoch','calibration_id')):
+            return {'status':'skipped','reason':MAGNETIC_INSUFFICIENT_SAMPLES,'window_issue':'mixed_capture_scope'}
+        if accepted_samples is not None:
+            accepted_samples.extend(accepted)
+        if len(accepted) < self.cfg['min_samples']:
+            return {'status':'skipped','reason':MAGNETIC_INSUFFICIENT_SAMPLES}
+        h = circular_median(headings) % 360.
+        norm = statistics.median(norms)
+        if mad(headings,h,True)>self.cfg['max_mad_deg']:return {'status':'rejected','reason':'magnetic heading unstable'}
+        if max(abs(v-norm) for v in norms)/norm>self.cfg['max_norm_fraction_change']:return {'status':'rejected','reason':'magnetic field magnitude unstable within window'}
         sign=self.cfg['heading_sign'];offset=None if sign is None else wrap(route_heading_deg-sign*h)
         old=self.anchor
         if old and old['load']==load:
@@ -129,12 +198,12 @@ class MagneticReference:
             if offset is not None and old['offset_deg'] is not None and abs(wrap(offset-old['offset_deg']))>self.cfg['max_offset_jump_deg']:return {'status':'rejected','reason':'magnetic/visual disagreement'}
             if offset is None and abs(abs(wrap(h-old['raw_heading_deg']))-abs(wrap(route_heading_deg-old['route_heading_deg'])))>self.cfg['max_offset_jump_deg']:return {'status':'rejected','reason':'unverified magnetic sign and unexpected heading jump'}
         self.anchor={'source':'reliable_tag_alignment' if tag_id is not None else 'sampling_probe','tag_id':tag_id,'load':load,'raw_heading_deg':h,'route_heading_deg':route_heading_deg,'offset_deg':offset,
-                     'capture_verified':bool(good) and all(s.get('capture_source')=='verified_sensor_capture' and type(s.get('captured_monotonic')) in (int,float) and after_receipt < s['captured_monotonic'] <= now and now-s['captured_monotonic'] <= self.cfg['max_age_s'] for s in samples),
-                     'norm':norm,'norm_basis':('calibrated_horizontal' if self.cfg.get('field_norm_calibration') else 'raw_xyz_legacy'),'raw_norm':statistics.median(math.sqrt(sum(v*v for v in s['xyz'])) for s in samples),'received_monotonic':now,'usable_for_heading':sign is not None,
+                     'capture_verified':capture_verified,
+                     'norm':norm,'norm_basis':('calibrated_horizontal' if self.cfg.get('field_norm_calibration') else 'raw_xyz_legacy'),'raw_norm':statistics.median(raw_norms),'received_monotonic':now,'usable_for_heading':sign is not None,
                      'freshness':'ROS receipt time only; repeated XYZ allowed; sensor capture freshness unverified'}
-        if self.anchor['capture_verified'] and all(s.get('capture_semantics')=='conservative_software_lower_bound' for s in samples):
+        if self.anchor['capture_verified'] and all(s.get('capture_semantics')=='conservative_software_lower_bound' for s in accepted):
             self.anchor['freshness']='DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp'
-            self.anchor['capture_session']=samples[-1]['session']
-            self.anchor['calibration_id']=samples[-1].get('calibration_id','')
-            self.anchor['load_epoch']=samples[-1].get('load_epoch')
+            self.anchor['capture_session']=accepted[-1]['session']
+            self.anchor['calibration_id']=accepted[-1].get('calibration_id','')
+            self.anchor['load_epoch']=accepted[-1].get('load_epoch')
         return dict(status='updated',reference=dict(self.anchor))

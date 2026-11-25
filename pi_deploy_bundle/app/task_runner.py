@@ -602,8 +602,10 @@ class Robot:
             observe = getattr(nav.io,'observe_checkpoint_id',None)
             if observe is not None:
                 try:
-                    observe(4,report['after_ns'],min(.35,nav.cfg['observe_s']),self.check)
-                except OSError:
+                    from visual_micro import VisualCamera_Read, VisualCameraUnavailable
+                    VisualCamera_Read(lambda check: observe(4, report['after_ns'], min(.35, nav.cfg['observe_s']), check),
+                                      self.check)
+                except VisualCameraUnavailable:
                     self.check()
                     return None
                 report = self.boundary_visual_observation(name,expected_tag=4)
@@ -995,13 +997,21 @@ class Robot:
                 and (fault_diagnostic or entry_context is None and route_expected is None)):
             return None
         if getattr(self.backend,'is_simulation',False):return None
+        owner_error = None
+        def check_snapshot_owner():
+            nonlocal owner_error
+            try:
+                self.check()
+            except Exception as exc:
+                owner_error = exc
+                raise
         try:
             nav=self.ensure_navigation_io();snapshot=getattr(nav.io,'boundary_visual_snapshot',None)
             completed=getattr(self,'last_action_completed_ros_ns',None)
             if snapshot is None or type(completed) is not int or completed<=0:return None
             settle=max(cfg.get('settle_s',0),cfg.get('post_action_heading',{}).get('settle_s',0))
             barrier=completed+int(settle*1e9)
-            window=snapshot(barrier,self.check)
+            window=snapshot(barrier,check_snapshot_owner)
             from nav_observation import summarize
             target=2 if entry_context is not None else route_expected
             if target is None:
@@ -1022,7 +1032,9 @@ class Robot:
             return report
         except Exception as exc:
             if not fault_diagnostic:
-                self.check()  # Cancellation or deadline remains authoritative.
+                if owner_error is not None:
+                    raise owner_error
+                self.check()  # A real camera fault can coincide with a new cancellation.
             self.events.append({'boundary_visual_observation':{'action':name,'fault_diagnostic':fault_diagnostic,
                 'read_error':str(exc),'correction_actions':0}})
             return None

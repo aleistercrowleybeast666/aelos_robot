@@ -14,6 +14,9 @@ from r3_micro_gate import MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_P
 
 WIRE_BASE=0x2A00
 CANCELLED_BOUNDARY=WIRE_BASE+0xFE
+# The installed bridge polls from its top-level idle loop with a 200 ms REQ timeout.
+_IDLE_DRAIN_MIN_S=.25
+_IDLE_DRAIN_MAX_S=2.5
 _MCU_ERROR='MCU ERROR; automatic requests blocked'
 VALID_KEYS=frozenset([0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,
  0xC9,0xCA,0xCB,0xCD,0xCE,0xCF,0xDC,0xDE,0xDF,0xE9,0xEA,0xEB,
@@ -39,6 +42,7 @@ class Gate:
         self.last_wire_key=0
         self.last_rejection=None;self.last_result=None;self.operation_seq=0
         self._may_hold_load=False
+        self._accepted_nonces=set()
         self.recovery=RecoveryGate(self.session,self.clock)
         self.micro=MicroGate(self.session,self.clock,boot_id)
 
@@ -75,6 +79,7 @@ class Gate:
             # 长按/重复键不重新开放会话，也不反复增加取消纪元。
             if force_epoch or self.mode=='auto' or self.current and not self.current['cancelled']:
                 self.epoch+=1
+                self._accepted_nonces.clear()
             self.mode='manual';self.reason=reason
             self.recovery.clear('cancel/takeover invalidated recovery acknowledgment')
             self.micro.clear()
@@ -129,6 +134,8 @@ class Gate:
         with self.cv:
             key=self.decoded_key(params)
             bridge_idle=(params==[WIRE_BASE] and type(params[0]) is int)
+            if not bridge_idle and self.current and self.current['cancelled']:
+                self.current.pop('cancelled_idle_at',None)
             if params==[CANCELLED_BOUNDARY]:
                 # v5的有序REQ在MCU函数返回后报告取消；不是COMPLETE/身体成功。
                 self.cancel('MCU cancelled at returned native boundary')
@@ -143,12 +150,22 @@ class Gate:
             if key in (0,0xDA):self.last_wire_key=0
             if self.current and self.current['dispatched']:
                 c=self.current
-                if (c['op']==PAIR_PROBE and bridge_idle and not c['complete']
-                        and (c['cancelled'] or c.get('mcu_error_before_start') and not c['started'])):
+                if c['cancelled'] and bridge_idle and not c.get('waiter_active') and not c['drained']:
+                    # The cancelled caller has already returned. Repeated, spaced idle
+                    # REQs from this ABI prove Lua has returned to polling even when
+                    # its final COMPLETE was lost. They never establish body success.
+                    now=self.clock()
+                    first=c.get('cancelled_idle_at')
+                    if first is None or not 0<=now-first<=_IDLE_DRAIN_MAX_S:
+                        c['cancelled_idle_at']=now
+                    elif now-first>=_IDLE_DRAIN_MIN_S:
+                        c.update(drained=True,drain_source='ordered_idle_requests_after_cancel')
+                        self.cv.notify_all()
+                elif (c['op']==PAIR_PROBE and bridge_idle and not c['complete'] and not c['cancelled']
+                        and c.get('mcu_error_before_start') and not c['started']):
                     # Older Lua reports an unknown alias via ERROR, then returns to idle.
                     # A repeated REQ alone is not a verdict on the dispatched probe.
-                    if not c['cancelled']:
-                        c['probe_unavailable']=True
+                    c['probe_unavailable']=True
                     c['drained']=True
                     self.cv.notify_all()
                 elif (c['op'] in PICKUP_BACKWARD6_OPS and bridge_idle
@@ -174,7 +191,10 @@ class Gate:
         with self.cv:
             c=self.current
             if not c:return # 保留旧手动/服务的完成语义
-            if c['cancelled'] or c['complete']:return
+            if c['cancelled']:
+                c.pop('cancelled_idle_at',None)
+                return
+            if c['complete']:return
             if not c['dispatched']:
                 c['ignored_predispatch_start']+=1
                 return
@@ -194,7 +214,7 @@ class Gate:
                 return
             if c['complete']:return
             if c['cancelled']:
-                c['drained']=True;self.cv.notify_all();return
+                c.update(drained=True,drain_source='late_complete');self.cv.notify_all();return
             if not c['started']:
                 self.cancel('unexpected COMPLETE');return
             c['complete']=True;c['drained']=True;self.cv.notify_all()
@@ -214,6 +234,8 @@ class Gate:
                 self.last_rejection={'op':op,'request_nonce':nonce,'code':code,'published_at_s':time.time()};return False
             if session!=self.session or epoch!=self.epoch:return reject('session_or_epoch_mismatch')
             if op=='cancel':self.cancel('client cancelled');return True
+            if nonce is not None and nonce in self._accepted_nonces:
+                return reject('request_nonce_replayed')
             if not self.status()['mcu_ready']:return reject('MCU_handshake_missing_or_stale')
             if self.current:return reject('native_in_flight_or_not_drained')
             if self.queue:return reject('existing_queue_not_empty')
@@ -230,9 +252,10 @@ class Gate:
                 self.mode='auto';self.last_key=0;self.reason='explicit stand' if op=='stand' else 'explicit automatic start'
             elif op not in PROBE_OPS and self.mode!='auto':return reject('automatic_mode_required')
             self.operation_seq+=1
+            if nonce is not None:self._accepted_nonces.add(nonce)
             c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':HASHES[op],'epoch':self.epoch,'op':op,'dispatched':False,
                 'started':False,'complete':False,'cancelled':False,'drained':False,
-                'ignored_predispatch_start':0,'ignored_predispatch_complete':0}
+                'ignored_predispatch_start':0,'ignored_predispatch_complete':0,'waiter_active':True}
             self.current=c;self.queue.append(c['native']);deadline=self.clock()+timeout
             while not (c['complete'] or c['cancelled'] or c.get('probe_unavailable') or c.get('retreat_unavailable')):
                 left=deadline-self.clock()
@@ -259,13 +282,17 @@ class Gate:
                     self.mode='manual';self.reason='normal stand request finished; MCU load set empty; physical pose unverified' if op=='stand' else 'chain finished'
             elif not c['dispatched'] or c['drained']:
                 self.current=None
+            c['waiter_active']=False
             # 已下发但被取消的动作保留到迟到COMPLETE排空；
             # 不能先解锁，让旧完成帧被当作新动作完成。
             return ok
 
     def clear_drained(self):
         with self.cv:
-            if self.current and self.current['cancelled'] and self.current['drained']:
+            c=self.current
+            if c and c['cancelled'] and c['drained'] and not c.get('waiter_active'):
+                if self.last_result and self.last_result.get('operation_seq')==c.get('operation_seq'):
+                    self.last_result=dict(self.last_result,drained=True,drain_source=c.get('drain_source','cancelled_boundary'))
                 self.current=None
 
 

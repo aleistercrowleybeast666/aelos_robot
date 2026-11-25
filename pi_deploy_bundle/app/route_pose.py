@@ -8,7 +8,7 @@ from statistics import median
 
 from cmd0_motion import COMMAND0_ENTRY_FORWARD_STEPS, SMALL_SIDE_ACTIONS
 from entry_camera import finite
-from nav_observation import circular_median, ground_pose, summarize, wrap
+from nav_observation import Observation_DistinctTagRows, circular_median, ground_pose, summarize, wrap
 from pixel_diagnostics import load_entrance_reference
 
 
@@ -365,31 +365,53 @@ def _trial_position_rows(checkpoint, nav_cfg, tag_id):
     after, now = scan.get('after_ns'), scan.get('now_ns')
     if type(after) is not int or type(now) is not int or not 0 < after < now:
         return {}, 'checkpoint observation time is invalid'
-    positions = {}
+    restart = scan.get('camera_restart_ns', 0)
+    if type(restart) is not int:
+        return {}, 'checkpoint camera restart time is invalid'
+    after = max(after, restart)
+    eligible = []
     for row in scan.get('observations', ()):
+        if not isinstance(row, dict):
+            continue
         stamp = row.get('stamp_ns')
         if (row.get('id') != tag_id or row.get('frame_id') != '/map' or row.get('headers_disagree')
                 or row.get('source_publisher') != contract['publisher'] or row.get('source_topic') != nav_cfg['topic']
                 or type(stamp) is not int or not after < stamp <= now
                 or now - stamp > nav_cfg['max_age_s'] * 1e9):
             continue
-        position = row.get('position_raw_m') or {}
-        x, y = position.get('x'), position.get('y')
-        if finite(x) and finite(y):
+        eligible.append(row)
+    positions = {}
+    for stamp, row in Observation_DistinctTagRows(eligible).items():
+        position = row.get('position_raw_m')
+        if isinstance(position, dict) and finite(position.get('x')) and finite(position.get('y')):
             positions[stamp] = row
     if len(positions) < nav_cfg['min_frames']:
         return {}, 'not enough distinct checkpoint position samples'
     return positions, None
 
 
-def _trial_ground_depth(checkpoint, nav_cfg, tag_id):
+def _trial_ground_samples(checkpoint, nav_cfg, tag_id, *, minimum=0):
     rows, problem = _trial_position_rows(checkpoint, nav_cfg, tag_id)
     if problem:
+        return {}, [], problem
+    valid = {}
+    poses = []
+    for stamp, row in rows.items():
+        try:
+            pose = ground_pose(row, nav_cfg['pose_contract'])
+        except (ValueError, KeyError, TypeError):
+            continue
+        valid[stamp] = row
+        poses.append(pose)
+    if len(poses) < max(minimum, nav_cfg['min_frames']):
+        return {}, [], f'Tag {tag_id} ground-plane estimate unavailable'
+    return valid, poses, None
+
+
+def _trial_ground_depth(checkpoint, nav_cfg, tag_id):
+    rows, poses, problem = _trial_ground_samples(checkpoint, nav_cfg, tag_id)
+    if problem:
         return {}, problem
-    try:
-        poses = [ground_pose(row, nav_cfg['pose_contract']) for row in rows.values()]
-    except (ValueError, KeyError, TypeError):
-        return {}, f'Tag {tag_id} ground-plane estimate unavailable'
     distances = [-pose['forward_m'] for pose in poses]
     projection = [pose['body_forward_in_tag_forward'] for pose in poses]
     lateral = [pose['x_m'] for pose in poses]
@@ -416,13 +438,18 @@ def RoutePose_PartialCheckpointGeometry(rows, nav_cfg, tag_id):
     if (contract.get('capture_time_confirmed') is not True
             or contract.get('body_forward') != '+x' or contract.get('body_right') != '-y'):
         return None
-    samples = {}
+    eligible = []
     for row in rows:
+        if not isinstance(row, dict):
+            continue
         stamp = row.get('stamp_ns')
         if (row.get('id') != tag_id or row.get('frame_id') != contract.get('frame') or row.get('headers_disagree')
                 or not contract.get('publisher') or row.get('source_publisher') != contract['publisher']
                 or row.get('source_topic') != nav_cfg.get('topic') or type(stamp) is not int or stamp <= 0):
             continue
+        eligible.append(row)
+    samples = {}
+    for stamp, row in Observation_DistinctTagRows(eligible).items():
         try:
             pose = ground_pose(row, contract)
         except (KeyError, TypeError, ValueError):
@@ -719,13 +746,9 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
     result = {'geometry_valid': False, 'ready_for_forward': False, 'operation': None,
               'distance_m': None, 'lateral_error_m': None, 'heading_deg': None,
               'latest_stamp_ns': None}
-    positions, problem = _trial_position_rows(checkpoint, nav_cfg, 5)
-    if problem or len(positions) < 3:
-        return dict(result, reason=problem or 'Tag 5 requires at least three distinct ground poses')
-    try:
-        poses = [ground_pose(row, nav_cfg['pose_contract']) for row in positions.values()]
-    except (ValueError, KeyError, TypeError):
-        return dict(result, reason='Tag 5 ground-plane pose unavailable')
+    positions, poses, problem = _trial_ground_samples(checkpoint, nav_cfg, 5, minimum=3)
+    if problem:
+        return dict(result, reason=problem)
 
     depth_window = (settings.get('entering_depth_window_m', (-.24, .45)) if entering
                     else settings.get('passage_depth_window_m', (.075, .45)))

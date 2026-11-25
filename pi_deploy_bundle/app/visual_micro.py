@@ -304,10 +304,11 @@ class VisualMicro:
                        camera_healthy=window.get('camera_healthy'),contract_match=window.get('contract_match'))
         remaining=deadline-self.clock()
         if remaining<=0:self.stop('checkpoint time budget expired before magnetic verification')
-        rows=self.io.magnetic_samples(after,min(self.cfg['magnetic']['collect_s'],remaining),self.check)
+        samples=self.io.magnetic_samples(after,min(self.cfg['magnetic']['collect_s'],remaining),self.check)
         self.check()
         probe=MagneticReference(self.cfg['magnetic'])
-        result=probe.refresh(rows,0.,self.clock(),after,self.load,None)
+        rows=[]
+        result=probe.refresh(samples,0.,self.clock(),after,self.load,None,rows)
         magnetic=probe.anchor
         stream_healthy=self.io.motion_capture_verified
         healthy=bool(magnetic and magnetic.get('capture_verified') and stream_healthy)

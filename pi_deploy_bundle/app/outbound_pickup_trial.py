@@ -25,6 +25,7 @@ from pickup_controller import PickupObservationUnavailable, validate as validate
 from route_pose import RoutePose_TrialLateralHint
 from task_runner import NotReady, Robot
 from transfer_test import validate as validate_transfer
+from visual_micro import VisualCamera_Read, VisualCameraUnavailable
 
 
 _PICKUP_SIDE_ACTIONS = frozenset((*SIDE_ACTIONS.values(), *SMALL_SIDE_ACTIONS, *SMALL_SIDE_ACTIONS.values()))
@@ -343,6 +344,15 @@ def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
             'route_evidence': 'estimated_trial'}
 
 
+class _PickupCamera(BlockCamera):
+    def observe(self, after_monotonic, after_ros_ns, check, **options):
+        read=super().observe
+        try:
+            return VisualCamera_Read(lambda guard:read(after_monotonic, after_ros_ns, guard, **options), check)
+        except VisualCameraUnavailable as exc:
+            raise BlockFrameUnavailable(str(exc)) from exc
+
+
 class _OutboundPickupRobot(MissionRobot):
     def configure(self, plan):
         super().configure(plan)
@@ -378,10 +388,16 @@ class _OutboundPickupRobot(MissionRobot):
         return operations is not None and PAIR_REQUIRED_OPS.issubset(operations())
 
     def _open_block_camera(self,count_only):
+        try:
+            return self._create_pickup_camera(count_only)
+        except OSError as exc:
+            raise BlockFrameUnavailable('胸部相机暂时无法连接：'+str(exc)) from exc
+
+    def _create_pickup_camera(self,count_only):
         vision = self.mission.get('staged_vision')
         trial_alignment = not self.outbound_only and self.deliveries>0
         if vision is None or not (count_only or trial_alignment):
-            return super()._open_block_camera(count_only)
+            return _PickupCamera(self.mission['vision'],scope=self.scope())
         snapshot = self.ensure_navigation_io().io.preflight_health_snapshot()
         info = snapshot.get('camera_info', {})
         if (snapshot.get('camera_healthy') is not True or info.get('ready') is not True
@@ -395,10 +411,11 @@ class _OutboundPickupRobot(MissionRobot):
             config['roi'] = [min(left, .08), top, max(right, .92), bottom]
         if [info.get('width'), info.get('height')] != config['resolution']:
             raise BlockFrameUnavailable('方块识别图像尺寸与胸部相机不一致')
-        return BlockCamera(config, scope=self.scope(), staged_publisher=info['publisher'],
-                           trial_alignment=trial_alignment)
+        return _PickupCamera(config, scope=self.scope(), staged_publisher=info['publisher'],
+                             trial_alignment=trial_alignment)
 
     def finish_pickup(self):
+        self.last_block = None
         if self.camera is not None:
             self.camera.close()
             self.camera = None

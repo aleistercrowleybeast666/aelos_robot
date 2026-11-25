@@ -6,6 +6,7 @@ from entrance_trial import EntranceTrial_ObserveCheckpoint, EntranceTrialResult
 from nav_observation import summarize, wrap
 from route_pose import (RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
                         RoutePose_PartialCheckpointGeometry, RoutePoseDepartureResult)
+from visual_micro import VisualCamera_Read, VisualCameraUnavailable
 
 
 # Right and left are relative to the robot facing the transfer area. The
@@ -154,9 +155,8 @@ def ReturnTrial_TurnAtBase(robot, step):
 
 def _return_camera_snapshot(robot, snapshot, tag, after):
     try:
-        return snapshot(after, robot.check)
-    except OSError as exc:
-        robot.check()
+        return VisualCamera_Read(lambda check:snapshot(after,check), robot.check)
+    except VisualCameraUnavailable as exc:
         robot.events.append({'return_camera_read_error': {'tag_id': tag, 'reason': str(exc)}})
         return {}
 
@@ -197,9 +197,18 @@ def _empty_marker_geometry(robot, nav, leg):
             and floor < row['stamp_ns'] <= now and now - row['stamp_ns'] <= nav.cfg['max_age_s'] * 1e9]
     geometry = RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
     if (geometry and geometry['samples'] >= nav.cfg['min_frames'] and geometry['max_heading_deviation_deg'] <= 5.
-            and live(geometry['latest_stamp_ns'])):
+            and _empty_marker_current(robot, nav, tag, geometry['latest_stamp_ns'])):
         return geometry
     return None
+
+
+def _empty_marker_current(robot, nav, tag, stamp):
+    try:
+        return nav.io.visual_motion_ready(stamp)
+    except OSError as exc:
+        robot.check()
+        robot.events.append({'return_camera_read_error': {'tag_id': tag, 'reason': str(exc)}})
+        return False
 
 
 class _EmptyMarkerExpired(Exception):
@@ -250,7 +259,7 @@ def ReturnTrial_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
 
         def verify():
             robot.check()
-            if not nav.io.visual_motion_ready(stamp):
+            if not _empty_marker_current(robot, nav, tag, stamp):
                 raise _EmptyMarkerExpired()
 
         try:
@@ -287,8 +296,10 @@ def _return_travel(robot, nav, leg, actions):
             continue
         settled = robot.last_action_completed_ros_ns + int(nav.cfg['settle_s'] * 1e9)
         cached = _return_camera_snapshot(robot, snapshot, tag, settled)
+        floor, now = cached.get('after_ns'), cached.get('now_ns')
         if (cached.get('boundary_valid') is not True or cached.get('camera_healthy') is not True
-                or cached.get('contract_match') is not True):
+                or cached.get('contract_match') is not True or type(floor) is not int or type(now) is not int
+                or not settled <= floor < now):
             continue
         scan = summarize(cached, tag, nav.cfg, settled)
         candidate = {'expected_id': tag, 'camera_info': cached.get('camera_info') or {},

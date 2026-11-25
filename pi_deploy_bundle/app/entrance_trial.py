@@ -6,7 +6,8 @@ from math import isfinite, radians, sin
 from action_chains_v5 import COMMAND0_OUTBOUND
 from cmd0_motion import (COMMAND0_ENTRY_FORWARD_STEPS, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady)
-from nav_observation import summarize
+from nav_observation import Observation_DistinctTagRows, summarize
+from visual_micro import VisualCamera_Read, VisualCameraUnavailable
 from route_pose import (RoutePose_Load, RoutePose_Measure, RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanForwardCount, RoutePose_PlanTag1ForwardTrial, RoutePose_PlanTag2ForwardTrial,
                         TAG2_APPROACH_COUNTS)
@@ -92,11 +93,16 @@ def EntranceTrial_BoundaryCheckpoint(robot, nav, expected_id, action=None, repor
         return None
     scan = report.get('scan') or {}
     now = nav.io.ros_now_ns()
-    rows = [row for row in scan.get('observations',()) if row.get('id') == expected_id
+    restart = report.get('camera_restart_ns', 0)
+    if type(restart) is not int:
+        return None
+    after = max(after, restart)
+    rows = [row for row in scan.get('observations',()) if isinstance(row, dict) and row.get('id') == expected_id
             and type(row.get('stamp_ns')) is int and after < row['stamp_ns'] <= observed
             and 0 <= now-row['stamp_ns'] <= nav.cfg['max_age_s']*1e9]
+    rows = list(Observation_DistinctTagRows(rows).values())
     ready = getattr(nav.io,'visual_motion_ready',None)
-    if (scan.get('ids') != [expected_id] or len({row['stamp_ns'] for row in rows}) < nav.cfg['min_frames']
+    if (scan.get('ids') != [expected_id] or len(rows) < nav.cfg['min_frames']
             or ready is None or not ready(max(row['stamp_ns'] for row in rows))):
         return None
     return {'expected_id':expected_id,'detected':True,'observation_windows':0,'reused_boundary_frames':True,
@@ -205,8 +211,8 @@ def EntranceTrial_ObserveCheckpoint(robot, nav, result, report_wait, *, quick_id
             settled_at = floor + int(nav.cfg['settle_s'] * 1e9)
             if snapshot is not None and 0 < floor <= settled_at <= after:
                 try:
-                    cached = snapshot(settled_at, robot.check)
-                except OSError as exc:
+                    cached = VisualCamera_Read(lambda check: snapshot(settled_at, check), robot.check)
+                except VisualCameraUnavailable as exc:
                     robot.check()
                     result['camera_cache_error'] = str(exc)
                     cached = {}
@@ -222,8 +228,8 @@ def EntranceTrial_ObserveCheckpoint(robot, nav, result, report_wait, *, quick_id
                         after = settled_at
         if window is None:
             try:
-                window = observe(expected_id, after, nav.cfg['observe_s'], robot.check)
-            except OSError as exc:
+                window = VisualCamera_Read(lambda check: observe(expected_id, after, nav.cfg['observe_s'], check), robot.check)
+            except VisualCameraUnavailable as exc:
                 robot.check()
                 result.update(detected=False, scan=None, camera_info={}, camera_read_error=str(exc))
                 return EntranceTrialResult.CAMERA_UNAVAILABLE, f'Tag {expected_id} 当前扫码窗口读取失败：{exc}'
@@ -667,8 +673,9 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
                 # Heading preparation can outlive the original camera window.
                 # Reacquire once when a calibrated change would otherwise be usable.
                 try:
-                    fresh = nav.io.observe(start['tag'], nav.io.ros_now_ns(), nav.cfg['observe_s'], robot.check)
-                except OSError as exc:
+                    fresh = VisualCamera_Read(lambda check: nav.io.observe(
+                        start['tag'], nav.io.ros_now_ns(), nav.cfg['observe_s'], check), robot.check)
+                except VisualCameraUnavailable as exc:
                     robot.check()
                     result['camera_read_error'] = str(exc)
                     fresh, new_pose = {}, {}
