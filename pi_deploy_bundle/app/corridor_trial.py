@@ -2452,11 +2452,17 @@ def _trim_tag5_entry(robot, nav, profile, settings, checkpoint, delivery, *, res
 
 def _tag5_passage_plan(robot, nav, settings, checkpoint, *, approach_distance_m=.40):
     small_ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
+    completed = robot.last_action_completed_ros_ns
+    scan = checkpoint.get('scan') or {}
+    after = scan.get('after_ns')
+    if type(completed) is int and type(after) is int and after < completed:
+        settled = completed + int(nav.cfg['settle_s'] * 1e9)
+        checkpoint = dict(checkpoint, scan=dict(scan, after_ns=settled))
     plan = RoutePose_PlanTag5Passage(
         checkpoint, nav.cfg, settings, current_group_distance_m=approach_distance_m,
         small_ready=not getattr(robot, 'magnetic_route_only', False) and small_ready())
     ready = getattr(nav.io, 'visual_motion_ready', None)
-    if plan['geometry_valid'] and (ready is None or not ready(plan['latest_stamp_ns'])):
+    if plan['geometry_valid'] and (type(completed) is not int or ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(geometry_valid=False, ready_for_forward=False, operation=None,
                     reason='Tag 5 passage observation expired')
     return plan
@@ -2525,9 +2531,41 @@ def _tag5_wider_side_recovery(plan, settings, operation):
     return None
 
 
-def _tag5_retreat_clearance(plan, settings):
+def _tag5_small_strafe_feedback(before, after, operation):
+    """Check the measured inward shift and the worst edge of the planned straight."""
+    if (operation not in SMALL_SIDE_ACTIONS.values() or after.get('operation') != operation
+            or not before.get('lateral_bounds_m') or not after.get('lateral_bounds_m')
+            or not before.get('projected_lateral_bounds_m') or not after.get('projected_lateral_bounds_m')
+            or type(before.get('latest_stamp_ns')) is not int or type(after.get('latest_stamp_ns')) is not int
+            or after['latest_stamp_ns'] <= before['latest_stamp_ns']):
+        return None
+    direction = 1 if operation == SMALL_SIDE_ACTIONS['strafe_left_once'] else -1
+    before_inner, before_outer = sorted(direction * value for value in before['lateral_bounds_m'])
+    after_inner, after_outer = sorted(direction * value for value in after['lateral_bounds_m'])
+    inward_gap = before_inner - after_outer
+    before_edge = max(map(abs, before['projected_lateral_bounds_m']))
+    after_edge = max(map(abs, after['projected_lateral_bounds_m']))
+    edge_gain = before_edge - after_edge
+    yaw = after.get('heading_bounds_deg')
+    depth = after.get('depth_bounds_m')
+    if not yaw or not depth:
+        return None
+    travel = _TAG5_SMALL_SIDE_TRAVEL_UPPER_M
+    depth_loss = min(0., *(-direction * travel * sin(radians(angle)) for angle in yaw))
+    scatter = max(before_outer - before_inner, after_outer - after_inner)
+    # A small gait can move only a few millimetres. Use separated body positions
+    # and an independently improving projected edge, taking the window spread into account.
+    repeat = (after_inner >= travel / 2 and inward_gap > 0
+              and edge_gain >= max(.001, scatter)
+              and depth[0] + depth_loss >= _TAG5_TIGHT_SIDE_DEPTH_M)
+    return {'inward_gap_m': inward_gap, 'outer_edge_gain_m': edge_gain, 'window_spread_m': scatter,
+            'projected_min_depth_m': depth[0] + depth_loss, 'continue_small_strafe': repeat,
+            'before_stamp_ns': before['latest_stamp_ns'], 'after_stamp_ns': after['latest_stamp_ns']}
+
+
+def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False):
     """Check a single two-step retreat from the existing outside stance."""
-    if not plan['geometry_valid']:
+    if not plan['geometry_valid'] or plan.get('entering'):
         return False
     depth = plan.get('depth_bounds_m')
     lateral = plan.get('lateral_bounds_m')
@@ -2538,8 +2576,19 @@ def _tag5_retreat_clearance(plan, settings):
     heading_bounds = plan.get('heading_bounds_deg', (-yaw, yaw))
     # A backward step changes lateral position opposite to the body heading.
     shifts = [0., *(-_TAG5_RETREAT_TRAVEL_UPPER_M * sin(radians(angle)) for angle in heading_bounds)]
-    limit = settings.get('lateral_clearance_m', .075) - .005
-    return lateral[0] + min(shifts) >= -limit and lateral[1] + max(shifts) <= limit
+    limit = settings.get('lateral_clearance_m', .075)
+    swept = lateral[0] + min(shifts), lateral[1] + max(shifts)
+    if max(map(abs, swept)) <= limit - .005:
+        return True
+    # An almost parallel retreat at the lip can stay entirely on the inward side
+    # of the current outer edge. Verify both signs over the whole observed yaw range.
+    outward = ((lateral[0] > 0 and max(shifts) > 0) or (lateral[1] < 0 and min(shifts) < 0))
+    max_depth = settings.get('passage_depth_window_m', (.075, .45))[1]
+    return (stalled_small_step and plan.get('lateral_recovery_allowed') is True
+            and not outward and lateral[0] * lateral[1] > 0
+            and max(map(abs, shifts)) <= _TAG5_SIDE_PROGRESS_M
+            and max(map(abs, swept)) <= limit and depth[0] >= _TAG5_TIGHT_SIDE_DEPTH_M
+            and depth[1] + _TAG5_RETREAT_TRAVEL_UPPER_M <= max_depth)
 
 
 def _tag5_heading_clearance(robot, nav, plan, settings):
@@ -2616,10 +2665,19 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
         operation = clearance or plan['operation']
         recovery_from = None
         wider = _tag5_wider_side_recovery(plan, settings, operation) if clearance is None else None
+        stalled_small_step = False
         if operation is not None or wider is not None:
             error = abs(plan.get('alignment_error_m', plan['lateral_error_m']))
             if last_side is not None and error >= last_side[1] - _TAG5_SIDE_PROGRESS_M:
-                ineffective.add(last_side[0])
+                feedback = _tag5_small_strafe_feedback(last_side[2], plan, last_side[0])
+                if feedback is not None:
+                    plan['small_strafe_feedback'] = feedback
+                if feedback and feedback['continue_small_strafe']:
+                    ineffective.discard(last_side[0])
+                    plan['reason_zh'] = '小跨后各帧横偏均向门中心收敛，预计直行最外沿也已改善，继续小跨后扫码。'
+                else:
+                    ineffective.add(last_side[0])
+                    stalled_small_step = feedback is not None
             else:
                 ineffective.clear()
             if wider and wider not in ineffective and (operation is None or operation in ineffective
@@ -2628,6 +2686,12 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
             if operation in ineffective or (operation is None and wider in ineffective):
                 operation = None
                 plan['reason'] = 'last Tag 5 strafe did not reduce lateral error'
+                if plan.get('projected_lateral_bounds_m') and last_side is not None:
+                    previous_edge = last_side[2].get('projected_lateral_bounds_m')
+                    if previous_edge:
+                        edge = max(map(abs, plan['projected_lateral_bounds_m']))
+                        gain_mm = 1000 * (max(map(abs, previous_edge)) - edge)
+                        plan['reason_zh'] = f'上次侧跨后预计横偏外沿改善 {gain_mm:+.1f} mm，当前 {edge*100:.2f} cm，正在判断其他纠偏动作。'
             if operation is not None and robot.count + reserve + 1 > robot.cfg['max_body_macros_per_journey']:
                 operation = None
                 plan['reason'] = 'Tag 5 side adjustment budget exhausted'
@@ -2643,9 +2707,9 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
             alignment['completed_actions'].append(operation)
             if recovery_from is not None:
                 plan.update(side_recovery_from=recovery_from, side_recovery_operation=operation)
-            last_side = operation, error
+            last_side = operation, error, plan
             idle_windows = 0
-        elif ('entry_retreat' not in alignment and _tag5_retreat_clearance(plan,settings)
+        elif ('entry_retreat' not in alignment and _tag5_retreat_clearance(plan,settings,stalled_small_step=stalled_small_step)
               and robot.count + reserve + 2 <= robot.cfg['max_body_macros_per_journey']):
             retreat = {'operation':'cmd0_carry_backward2','completed_steps':0,
                        'reason_zh':'Tag 5 门前纠偏余量不足，先退两步拉开距离，再用新位姿对门。'}
@@ -2673,7 +2737,9 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
             if idle_windows >= _TAG5_IDLE_WINDOWS:
                 reason = plan['reason']
                 detail_zh = {
-                    'last Tag 5 strafe did not reduce lateral error': '上次侧跨未减小横偏，未找到有通行余量的替代动作',
+                    'last Tag 5 strafe did not reduce lateral error': (
+                        '上次小跨的改善不足以继续同向跨，当前位姿未确认其他纠偏余量'
+                        if plan.get('small_strafe_feedback') else '上次侧跨未减小横偏，当前位姿未确认其他纠偏余量'),
                     'Tag 5 side adjustment budget exhausted': '侧跨纠偏动作余量不足',
                     'Tag 5 projected path exceeds the lateral passage tolerance': '预计直行超出入口横向余量',
                     'Tag 5 heading outside the passage tolerance': '航向超出入口容差，未确认可执行的纠偏动作',
