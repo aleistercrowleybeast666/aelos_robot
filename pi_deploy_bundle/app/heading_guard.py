@@ -573,6 +573,9 @@ class HeadingGuard:
             self.fault('coarse turn observation rejected: '+','.join(reasons),report)
             return report
         error=wrap(self.cfg['magnetic']['heading_sign']*sample['raw_heading_deg']+anchor['offset_deg']-anchor['route_heading_deg'])
+        if math.isclose(error, -180., abs_tol=1e-6) and action == 'left_turn' and self.planned_turn_recovery_enabled(load):
+            # At the exact half-turn, keep the explicitly configured direction.
+            error = 180.
         if self._uses_route_feedback('planned_turn_intermediate',load) and action in self._unreliable_coarse_actions:
             return dict(use_original_macro=False,error_deg=error,prediction_only=True,
                         reason='previous coarse response was unexpected; enter bounded magnetic feedback')
@@ -725,7 +728,7 @@ class HeadingGuard:
 
     def planned_turn_recovery_enabled(self,load):
         anchor=self.reference.anchor or {}
-        return (getattr(self,'planned_turn_recovery_scope',False) is True and load=='single'
+        return (getattr(self,'planned_turn_recovery_scope',False) is True and self.carry_load_supported(load)
                 and anchor.get('planned_group_target') is True and self.c.get('execute') is True
                 and micro_trial.enabled(self.c) and micro_trial.adaptive(self.c)
                 and self.c.get('micro_trial',{}).get('bounded_route_mode') is True)

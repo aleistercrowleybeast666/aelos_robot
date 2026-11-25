@@ -17,17 +17,19 @@ from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_LoadRouteSteps, 
 from corridor_trial import (CorridorTrial_CheckLateralHeading, CorridorTrial_DefaultChain,
                             CorridorTrial_GroupStrafes, CorridorTrial_HeadingSnapshot,
                             CorridorTrial_MaxBodyMacros, CorridorTrial_MirroredPickupStrafes, CorridorTrial_Run)
-from entrance_trial import EntranceTrial_IsEntryAccepted, EntranceTrial_PlanForward, EntranceTrial_Run
+from entrance_trial import (EntranceTrial_IsEntryAccepted, EntranceTrial_ObserveCheckpoint,
+                            EntranceTrial_PlanForward, EntranceTrialResult, EntranceTrial_Run)
 from mission_v5 import MissionRobot, PAIR_MOTION_OPS, VISUAL_PICKUP_OPS, defaults, validate_chains
 from micro_trial import MEDIUM_OPS, OPS as MICRO_OPS
 from pickup_controller import validate as validate_pickup
+from route_pose import RoutePose_TrialLateralHint
 from task_runner import NotReady, Robot
 from transfer_test import validate as validate_transfer
 
 
 _PICKUP_SIDE_ACTIONS = frozenset((*SIDE_ACTIONS.values(), *SMALL_SIDE_ACTIONS, *SMALL_SIDE_ACTIONS.values()))
 _PICKUP_RECHECKS = 4
-_WALL_PICKUP_RECHECKS = 8
+_TAG1_PICKUP_RECHECKS = 8
 PAIR_ROUTE_OPS = {**PAIR_MOTION_OPS, **{name: 'double_'+name for name in (
     'cmd0_carry_backward2', *FORWARD_ACTIONS.values(), *SIDE_ACTIONS.values(),
     *SMALL_SIDE_ACTIONS.values(), *MICRO_OPS, *MEDIUM_OPS)}, PLACE_ACTION: 'place_double',
@@ -39,9 +41,9 @@ PAIR_REQUIRED_OPS = frozenset(physical for logical, physical in PAIR_ROUTE_OPS.i
                                                  PICKUP_BACKWARD8_ACTION)) | {'grab_double'}
 _PICKUP_ADJUSTMENTS = {'pickup_left': 'empty_strafe_left', 'pickup_right': 'empty_strafe_right',
                       'pickup_advance': 'empty_forward2'}
-_REVERSE_STATION_MOTION = {'empty_forward2': 'cmd0_carry_backward2', 'empty_strafe_left': 'strafe_right_once',
-                           'empty_strafe_right': 'strafe_left_once'}
-_BACK_TO_TAG1 = {'empty_forward2': 'carry_forward2', 'free_forward': FORWARD_ACTIONS[5]}
+_TAG1_PICKUP_RETRACE = {'empty_forward2': 'carry_forward2', 'empty_strafe_left': 'strafe_left_once',
+                        'empty_strafe_right': 'strafe_right_once'}
+_TAG1_RETURN_ENTRY_DEPTH_M = (.08, .32)
 
 
 def _pickup_side_groups(actions):
@@ -121,7 +123,7 @@ def _run_command1_retreat(robot, pending, report):
     return boundary
 
 
-def _run_pickup_exit(robot, nav, *, actions=None):
+def _run_pickup_exit(robot, nav, *, actions=None, check_tag1=None):
     steps = robot.cfg.get('route_steps', {})
     corridor = steps.get('corridor') or CorridorTrial_DefaultChain()
     ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
@@ -138,6 +140,9 @@ def _run_pickup_exit(robot, nav, *, actions=None):
     previous = (_run_command1_retreat(robot, pending, report)
                 if command == '1' else {})
     while pending:
+        if check_tag1 is not None and check_tag1():
+            report['skipped_after_tag1_recheck'] = list(pending)
+            break
         action = pending.popleft()
         residual, drift = previous.get('residual_deg'), previous.get('drift_deg')
         side_count = {'cmd0_strafe_left3':3,'cmd0_strafe_left4':4}.get(action)
@@ -167,19 +172,34 @@ def _run_pickup_exit(robot, nav, *, actions=None):
     return report
 
 
-def _station_adjustment_limits(steps):
+def _tag1_pickup_adjustment_limits(steps):
     return steps.get('wall_pickup_advance_steps',2)//2, steps.get('wall_pickup_side_limit',2)
 
 
-def _station_exit_actions(returned, adjustments):
-    # Reverse corrections in the stance used for picking up. The station
-    # offset was taken after turning around, so these sideways moves invert.
-    actions = [_REVERSE_STATION_MOTION[name] for name in reversed(adjustments)]
-    actions.extend(_REVERSE_STATION_MOTION[name] for name in reversed(returned['station_side_actions']))
-    # The initial transfer approach was before the 180° turn. The robot
-    # now faces Tag 1, and reversing that path means loaded forward steps.
-    actions.extend(_BACK_TO_TAG1[name] for name in reversed(returned['transfer_approach_actions']))
-    return _pickup_side_groups(actions)
+def _tag1_pickup_exit_actions(adjustments):
+    # After a 180° turn the same body-relative direction reverses each world move.
+    return _pickup_side_groups(_TAG1_PICKUP_RETRACE[name] for name in reversed(adjustments))
+
+
+def _tag1_retrace_recheck(robot, nav, turn_report):
+    observation = {'expected_id': 1, 'detected': False, 'observation_windows': 0}
+    observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, observation, lambda: None,
+        single_window=True, quick_id=True, reuse_settled_cache=True)
+    hint = RoutePose_TrialLateralHint(observation, nav.cfg, 1)
+    attempt = {'status': observed.value, 'reason': reason, 'pose': hint}
+    turn_report['entry_previews'].append(attempt)
+    if observed is EntranceTrialResult.CAMERA_UNAVAILABLE:
+        # A camera fault should be handled by the final entry scan without replaying the route.
+        return True
+    if hint is None:
+        return False
+    live = getattr(nav.io, 'visual_motion_ready', None)
+    ready = (observed is EntranceTrialResult.CHECKPOINT_DETECTED
+             and live is not None and live(hint['latest_stamp_ns'])
+             and max(map(abs, hint['lateral_bounds_m'])) <= .10
+             and _TAG1_RETURN_ENTRY_DEPTH_M[0] <= hint['distance_m'] <= _TAG1_RETURN_ENTRY_DEPTH_M[1])
+    attempt['close_enough_for_entry_scan'] = ready
+    return ready
 
 
 def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
@@ -249,17 +269,8 @@ def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
             return_chain = steps.get('return_chain') or ReturnTrial_DefaultChain()
             if any(abs(return_chain[name]['target_delta_deg']) != 180 for name in ('base_turn','transfer_turn')):
                 raise ValueError('循环返程需在大本营和中转区掉头 180°')
-            station_paths = {'transfer_approach': _BACK_TO_TAG1,
-                             'station_side': _REVERSE_STATION_MOTION.keys()-{'empty_forward2'}}
-            for name, allowed in station_paths.items():
-                if any(step['op'] not in allowed for step in return_chain[name]):
-                    raise ValueError('循环返程 transfer_approach 应为前进、station_side 应为横移')
-            station_moves = {name+'_actions': [step['op'] for step in return_chain[name]
-                                              for _ in range(step.get('repeat',1))]
-                             for name in station_paths}
-            max_adjustments = sum(_station_adjustment_limits(steps))
-            worst = max(worst, outbound_cost + _pickup_exit_macro_budget(_station_exit_actions(station_moves, ()))
-                        + 2*max_adjustments)
+            max_adjustments = sum(_tag1_pickup_adjustment_limits(steps))
+            worst = max(worst, outbound_cost + return_chain['transfer_turn']['repeat'] + 2*max_adjustments)
             if ReturnTrial_MaxBodyMacros(return_chain)+nav['max_extra_actions_per_journey']>cfg['max_body_macros_per_journey']:
                 raise NotReady('empty return exceeds journey macro budget BEFORE motion')
         else:
@@ -351,13 +362,14 @@ def _restart_leg_budget(robot):
     robot.last_action_completed_monotonic, robot.last_action_completed_ros_ns = completed
 
 
-def _acquire_from_wall(robot):
-    """Observe the wall corner and apply only reversible, visually confirmed moves."""
-    forward_limit, lateral_limit = _station_adjustment_limits(robot.cfg.get('route_steps', {}))
+def _acquire_near_tag1(robot):
+    """Locate the block or its floor row in the empty chest view from Tag 1."""
+    forward_limit, lateral_limit = _tag1_pickup_adjustment_limits(robot.cfg.get('route_steps', {}))
     moves = []
-    event = {'status': 'watching', 'adjustments': moves, 'approach_steps': 0, 'checks': 0}
-    robot.events.append({'wall_pickup_standby': event})
-    robot._record_progress('waiting_blocks', direction='return')
+    event = {'status': 'watching', 'anchor_tag': 1, 'adjustments': moves, 'approach_steps': 0, 'checks': 0,
+             'position_basis': 'normalized_image_floor_row'}
+    robot.events.append({'tag1_pickup_standby': event})
+    robot._record_progress('waiting_blocks', direction='return', reason_zh='正在 Tag 1 附近观察接驳方块。')
 
     def adjust(name,row):
         op = _PICKUP_ADJUSTMENTS[name]
@@ -365,7 +377,7 @@ def _acquire_from_wall(robot):
         lateral = len(moves)-forward
         if (op=='empty_forward2' and forward>=forward_limit) or (op!='empty_forward2' and lateral>=lateral_limit):
             return False
-        robot._record_progress('start_wall_pickup', direction='return')
+        robot._record_progress('start_wall_pickup', direction='return', reason_zh='已定位接驳方块，开始短步进近。')
         # Revalidate the same image at submission. After motion, pickup requires
         # fresh frames from the new stance before another step or a grab.
         robot.finite(op, observation=row, checkpoint_follows=True,
@@ -377,12 +389,12 @@ def _acquire_from_wall(robot):
     with robot._pause_route_timer():
         stalled = 0
         blocked_pair = None
-        for attempt in range(_WALL_PICKUP_RECHECKS):
+        for attempt in range(_TAG1_PICKUP_RECHECKS):
             robot.check()
             event['checks'] = attempt + 1
             live = not getattr(robot.backend,'is_simulation',False)
             if live and robot.backend.current(require_mcu=False).get('mission_v5_ready') is not True:
-                raise NotReady('墙角取物期间 MCU 的自动动作授权已过期，请重新启动任务。')
+                raise NotReady('Tag 1 附近取物期间 MCU 的自动动作授权已过期，请重新启动任务。')
             completed_moves = len(moves)
             try:
                 acquired = robot.pickup.acquire(adjust=adjust,allow_stacked=True)
@@ -400,11 +412,11 @@ def _acquire_from_wall(robot):
                 if acquired.get('reason_code') == 'double_load_capability_unavailable':
                     blocked_pair = acquired
             diagnosis = blocked_pair or acquired
-            if stalled >= _PICKUP_RECHECKS or attempt + 1 == _WALL_PICKUP_RECHECKS:
+            if stalled >= _PICKUP_RECHECKS or attempt + 1 == _TAG1_PICKUP_RECHECKS:
                 event.update(status='unconfirmed', reason=diagnosis['reason'])
-                reason = ('墙角观察区连续未看到方块，本轮已完成一次搬运。'
+                reason = ('Tag 1 附近连续未看到方块，本轮已完成一次搬运。'
                           if diagnosis.get('scene_empty') else
-                          '墙角多次观察仍未找到可抱取的方块，请检查相机和方块摆放。')
+                          'Tag 1 附近多次观察仍未找到可抱取的方块，请检查相机和方块摆放。')
                 return dict(diagnosis, reason_zh=diagnosis.get('reason_zh') or reason), moves
             robot._record_progress('waiting_blocks', direction='return', reason=diagnosis['reason'],
                                    reason_zh=diagnosis.get('reason_zh'))
@@ -442,12 +454,13 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             guard = robot.heading_guard
             pickup_heading = (dict(guard.reference.anchor or {}) if plan['mode']=='1' and guard else None)
             exit_actions = None
-            if result['completed_returns']:
-                acquired,moves = _acquire_from_wall(robot)
+            second_trip = result['completed_returns'] > 0
+            if second_trip:
+                acquired,moves = _acquire_near_tag1(robot)
                 if acquired['status']=='no_pickup':
                     result.update(status='pickup_unconfirmed', pickup=acquired, reason=acquired['reason_zh'])
                     break
-                exit_actions = _station_exit_actions(result['return_trial'],moves)
+                exit_actions = _tag1_pickup_exit_actions(moves)
             else:
                 robot._record_progress('pickup')
                 blocked_pair = None
@@ -486,7 +499,20 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             robot._record_progress('transfer_to_entry',observed_count=acquired['observed_count'],
                                    grip_count=acquired['grip_count'],planned_count=acquired['planned_count'],
                                    stacked_triple=acquired['stacked_triple'])
-            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions)
+            check_tag1 = None
+            if second_trip:
+                from return_trial import ReturnTrial_DefaultChain
+                turn = (steps.get('return_chain') or ReturnTrial_DefaultChain())['transfer_turn']
+                operation = 'right_turn' if turn['target_delta_deg'] > 0 else 'left_turn'
+                turn_report = {'target_delta_deg': turn['target_delta_deg'], 'operation': operation,
+                               'protocol_completed': False, 'entry_previews': []}
+                robot.events.append({'tag1_pickup_turn': turn_report})
+                result['tag1_pickup_turn'] = turn_report
+                robot.turn(turn['repeat'], operation, target_delta_deg=turn['target_delta_deg'],
+                           nominal_step_deg=abs(turn['target_delta_deg']) / turn['repeat'])
+                turn_report['protocol_completed'] = True
+                check_tag1 = lambda: _tag1_retrace_recheck(robot, nav, turn_report)
+            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions, check_tag1=check_tag1)
 
             for key in ('next_segment','corridor_trial','checkpoint'):
                 result.pop(key,None)

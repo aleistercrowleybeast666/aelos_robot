@@ -869,7 +869,10 @@ class Robot:
     def left(self,count=1):self.turn(count,'left_turn')
     def turn(self,count,name,*,target_delta_deg=None,nominal_step_deg=None):
         """完整转向宏按次数调用，不能把次数当作精确角度。"""
-        if self.load_kind!='single':raise NotReady('current finite turn requires expected single load')
+        paired = (self.load_kind == 'double' and getattr(self, 'pair_route_enabled', False)
+                  and name in ('left_turn', 'right_turn'))
+        if self.load_kind != 'single' and not paired:
+            raise NotReady('current finite turn requires an expected supported load')
         if type(count) is not int or not 1<=count<=20:raise ValueError('turn repeat must be integer 1..20')
         self.report_command0_phase('cmd0_turn')
         cfg=getattr(self,'navigation_bundle',None) or {}

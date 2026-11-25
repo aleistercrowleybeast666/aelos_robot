@@ -1,4 +1,4 @@
-"""Estimated empty-load return from the base to the transfer wall pickup station."""
+"""Estimated empty-load return from the base to the Tag 1 pickup area."""
 
 from enum import Enum
 
@@ -72,8 +72,10 @@ def ReturnTrial_ValidateChain(data):
 def ReturnTrial_MaxBodyMacros(chain=None):
     """Bound scheduled work separately from the shared navigation budget."""
     chain = ReturnTrial_DefaultChain() if chain is None else chain
-    return (sum(chain[section]['repeat'] for section in _TURN_SECTIONS)
-            + sum(step.get('repeat', 1) for section in _MOVE_SECTIONS for step in chain[section]))
+    approach = _actions(chain['transfer_approach'])
+    tag1_probe = len(approach) > 1 and approach[0] == 'empty_forward2'
+    return (chain['base_turn']['repeat'] + int(tag1_probe)
+            + sum(step.get('repeat', 1) for tag in _RETURN_TAGS for step in chain[f'tag{tag}']))
 
 
 def _actions(steps):
@@ -265,7 +267,7 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
 
 
 def ReturnTrial_Run(robot):
-    """Follow expected return markers to the wall-corner observation station."""
+    """Follow expected return markers, then hand off at confirmed Tag 1."""
     result = {'status': ReturnTrialResult.ROUTE_UNAVAILABLE.value, 'reason': '',
               'checkpoint': None, 'direction': 'return', 'station_reached': False,
               'position_confirmed': False, 'expected_load': robot.load_kind,
@@ -353,16 +355,10 @@ def ReturnTrial_Run(robot):
             return set_status(ReturnTrialResult.CAMERA_UNAVAILABLE, reason)
         result['checkpoint'] = tag
 
-    _report_progress(robot, 'cmd2_return_leg', expected_tag=None, last_passed_tag=1, return_step='transfer_advance')
-    _move(robot, nav, route_actions[-1], result['transfer_approach_actions'],
-          station_actions=result['station_actions'])
-    _report_progress(robot, 'cmd2_return_leg', expected_tag=None, last_passed_tag=1, return_step='transfer_turn')
-    _revalidate_heading(robot, nav)
-    _turn(robot, chain['transfer_turn'])
-    result['station_turn_completed'] = True
-    _report_progress(robot, 'cmd2_return_leg', expected_tag=None, last_passed_tag=1, return_step='station_side')
-    _move(robot, nav, _actions(chain['station_side']), result['station_side_actions'],
-          station_actions=result['station_actions'])
-    result['station_reached'] = True
-    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=1, return_step='waiting_for_blocks')
-    return set_status(ReturnTrialResult.STATION_REACHED, '已到中转区靠墙观察位，准备识别和取物。')
+    if result['checkpoint'] != 1:
+        return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED, '返程未确认 Tag 1，接驳区尚未定位。')
+    result.update(station_reached=True, pickup_anchor_tag=1)
+    reason = '返程已确认 Tag 1，开始识别附近的接驳方块。'
+    _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=1,
+                     return_step='waiting_for_blocks', reason_zh=reason)
+    return set_status(ReturnTrialResult.STATION_REACHED, reason)
