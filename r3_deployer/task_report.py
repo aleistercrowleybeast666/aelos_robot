@@ -635,13 +635,30 @@ def _route_notes(result):
                 lines.append(f"Tag 4 进近 · {distance} · 本组计划 {steps} 步")
         latest = tag4_approach[-1] if tag4_approach else {}
         partial = _as_dict(latest.get("partial_pose"))
-        if (not tag4_recovery and not disruption
+        samples = partial.get("samples")
+        if not tag4_recovery and not disruption and type(samples) is int and samples == 1:
+            state = "复扫时已过期" if partial.get("latest_fresh") is False else "未确认航向"
+            lines.append(f"Tag 4 进近 · 仅有 1 帧位姿，{state}")
+        elif (not tag4_recovery and not disruption
                 and latest.get("partial_advice") == "outside_heading_or_lateral_range"
                 and partial.get("consistent") is True and partial.get("latest_fresh") is True):
-            samples = partial.get("samples")
             frames = f"{samples} 帧位姿一致" if type(samples) is int and samples >= 2 else None
             parts = ("Tag 4 进近", frames, _distance_label(latest.get("distance_m")),
                      _angle_label("视觉航向", partial.get("heading_deg")), "位姿超出本组前进容差")
+            lines.append(" · ".join(part for part in parts if part))
+        fallback = leg.get("tag4_magnetic_fallback")
+        records = fallback if isinstance(fallback, list) else [fallback]
+        for record in records:
+            record = _as_dict(record)
+            if not record:
+                continue
+            completed, planned = record.get("completed_steps"), record.get("planned_steps")
+            progress = (f"直行已完成 {completed}/{planned} 步"
+                        if type(completed) is int and type(planned) is int and 0 <= completed <= planned else None)
+            steps = record.get("next_steps")
+            parts = ("Tag 4 磁航向续行", _angle_label("磁航向余差", record.get("heading_deg")),
+                     progress, f"下组计划 {steps} 步" if type(steps) is int and steps > 0 else None,
+                     TaskReport_Reason(record))
             lines.append(" · ".join(part for part in parts if part))
         if tag4_recovery:
             completed = tag4_recovery.get("completed_steps")

@@ -176,6 +176,22 @@ class TaskReportTests(unittest.TestCase):
             "Tag 4 实测航向仍偏，先纠偏重扫。 · 距码约 41.8 cm · 纠偏前 -17.11° · 已执行小右转 · 通道仍待确认",
         ))
 
+    def test_tag4_reports_expired_single_frame_and_magnetic_continuation(self):
+        leg = {"from_tag":3,"expected_id":4,"tag4_approach":[
+            {"partial_advice":"outside_heading_or_lateral_range",
+             "partial_pose":{"consistent":True,"latest_fresh":False,"samples":1,"heading_deg":-17.54}}]}
+        report = {"ok":False,"corridor_trial":{"legs":[leg]}}
+        partial = "Tag 4 进近 · 仅有 1 帧位姿，复扫时已过期"
+        self.assertEqual(task_report.TaskReport_Diagnostics(report), (partial,))
+        leg["tag4_magnetic_fallback"] = {"reason_zh":"按磁航向沿原路线继续。",
+            "heading_deg":-4.6,"completed_steps":4,"planned_steps":12,"next_steps":2}
+        fallback = "Tag 4 磁航向续行 · 磁航向余差 -4.60° · 直行已完成 4/12 步 · 下组计划 2 步 · 按磁航向沿原路线继续。"
+        self.assertEqual(task_report.TaskReport_Diagnostics(report), (partial, fallback))
+        leg["tag4_magnetic_fallback"] = [leg["tag4_magnetic_fallback"], {"reason_zh":"等待复测。"}]
+        self.assertEqual(task_report.TaskReport_Diagnostics(report), (
+            partial, fallback, "Tag 4 磁航向续行 · 等待复测。",
+        ))
+
     def test_command1_retreat_reports_native_group_and_yaw_before_and_after(self):
         result = {"ok": True, "pickup_exit": {"retreat": {
             "planned_steps": 4, "continuous": True, "heading_status": "corrected_once",

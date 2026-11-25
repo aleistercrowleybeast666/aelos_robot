@@ -728,10 +728,11 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
 
 def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previous_heading, *,
                                      side_heading_lost=False, reserved_actions=0, partial_far=False,
-                                     guarded_forward=False):
+                                     guarded_forward=False, magnetic_fallback=False):
     """Advance two steps, then check before committing the last two."""
     before = CorridorTrial_HeadingSnapshot(previous_heading, after=True, load=robot.load_kind)
-    reason = ('Tag 4 航向仍有偏差，经位姿投影确认后先走计划中的两步。' if guarded_forward else
+    reason = ('Tag 4 位姿暂不可用，沿路线先走两步，再检查航向和扫码。' if magnetic_fallback else
+              'Tag 4 航向仍有偏差，经位姿投影确认后先走计划中的两步。' if guarded_forward else
               'Tag 4 帧数不足但仍偏远，先走计划中的两步再重扫。' if partial_far else
               '侧跨后发生大偏航且航向暂不可用，Tag 4 进近先走两步再复查。' if side_heading_lost
               else '前一段直行有明显偏航，Tag 4 暂未确认，后四步拆成两步一查。')
@@ -743,6 +744,7 @@ def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previo
     last_event = robot.events[-1] if robot.events else None
     robot.action('carry_forward2')
     leg['completed_actions'].append('carry_forward2')
+    leg['completed_forward_steps'] = leg.get('completed_forward_steps',0) + 2
     disrupted = _tag4_forward_disruption(robot, last_event, previous_report, leg)
 
     report = getattr(robot, 'last_heading_report', None)
@@ -752,8 +754,13 @@ def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previo
     changed = wrap(initial[0] - before[0]) if (
         before and initial and before[2] == initial[2] and before[1] < initial[1]) else None
     deadband = nav.cfg['post_action_heading']['deadband_deg']
-    recheck = _tag4_position_plan(robot, nav, profile, settings, approach_steps=2, boundary_first=guarded_forward)
+    recheck = _tag4_position_plan(robot, nav, profile, settings, approach_steps=2,
+                                boundary_first=guarded_forward or magnetic_fallback)
     leg['tag4_approach'].append(recheck)
+    if magnetic_fallback and not disrupted:
+        disrupted = _tag4_observed_clearance_problem(recheck)
+        if disrupted:
+            leg['tag4_forward_disruption'] = disrupted
     split.update(heading_change_deg=changed, residual_deg=settled[0] if settled else None,
                  tag4_distance_verified=recheck['distance_verified'])
     if disrupted:
@@ -2043,6 +2050,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                     continue
                 count = steps[index]['steps']
                 if count in (2,4):
+                    magnetic_fallback = None
                     _revalidate_heading(robot, nav)
                     plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=count, boundary_first=True)
                     leg.setdefault('tag4_approach', []).append(plan)
@@ -2055,8 +2063,13 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                     if plan.get('camera_contract_fault'):
                         return set_status(CorridorTrialResult.CAMERA_UNAVAILABLE,
                                           'Tag 4 的扫码来源或相机配置异常。')
-                    if not tag4_disruption and plan.get('partial_advice') == 'near':
-                        leg['tag4_partial_approach'] = plan['partial_pose']
+                    partial = plan.get('partial_pose') or {}
+                    depth = partial.get('distance_bounds_m')
+                    close_glimpse = (partial.get('consistent') and partial.get('latest_fresh') and depth
+                                      and .02 <= depth[0] <= depth[1] <=
+                                      tag4_trial['target_distance_m']+tag4_trial['deadband_m'])
+                    if not tag4_disruption and (plan.get('partial_advice') == 'near' or close_glimpse):
+                        leg['tag4_partial_approach'] = partial
                         omit_tag4_forward = True
                         pending_actions -= len(actions)
                         continue
@@ -2082,8 +2095,18 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                     elif not plan['distance_verified'] and plan.get('partial_advice') in ambiguous:
                         guarded_forward = _tag4_guarded_forward_ready(nav,plan)
                         if not guarded_forward:
-                            return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                                              'Tag 4 重扫后仍没有一致且可用于前进的位姿。')
+                            heading = CorridorTrial_HeadingSnapshot(getattr(robot,'last_heading_report',None) or {},
+                                                                   after=True,load=robot.load_kind)
+                            magnetic_fallback = {
+                                'completed_steps':leg.get('completed_forward_steps',0),
+                                'planned_steps':sum(step['steps'] for step in steps if step['op']==_FORWARD_GROUP),
+                                'heading_deg':heading[0] if heading else None,
+                                'next_steps':count,
+                                'reason_zh':'Tag 4 位姿暂不可用，沿用已修正的磁航向和计划直行。' if heading else
+                                            'Tag 4 位姿暂不可用，沿计划前进到下一动作边界再检查。'}
+                            leg.setdefault('tag4_magnetic_fallback', []).append(magnetic_fallback)
+                            _report_progress(robot,'cmd0_corridor_leg',3,4,leg=leg,
+                                             reason_zh=magnetic_fallback['reason_zh'])
                     advance_steps = plan['steps'] if plan['distance_verified'] else count
                     range_confirmed = plan['distance_verified']
                     boundaries = leg.get('heading_correction_boundaries') or []
@@ -2125,8 +2148,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                         if (previous_heading.get('correction_actions', 0) > 0 and initial and deadband is not None
                                 and abs(initial[0]) > deadband
                                 and room_to_split):
+                            if magnetic_fallback is not None:
+                                magnetic_fallback['next_steps'] = 2
                             advance_steps = _tag4_recheck_after_short_advance(
                                 robot, nav, profile, tag4_trial, leg, previous_heading,
+                                magnetic_fallback=magnetic_fallback is not None,
                                 reserved_actions=pending_actions+after_leg)
                             range_confirmed = leg['tag4_approach_split']['tag4_distance_verified']
                     if advance_steps != count:
@@ -2217,6 +2243,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment):
                 if guarded_forward:
                     leg['tag4_partial_recovery']['completed_steps'] += Cmd0Motion_ForwardStepCount((action,))
                 if use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP:
+                    leg['completed_forward_steps'] = (leg.get('completed_forward_steps',0)
+                                                       + Cmd0Motion_ForwardStepCount((action,)))
                     tag4_disruption = _tag4_forward_disruption(robot, last_event, previous_report, leg)
                     if tag4_disruption and action_index + 1 < len(actions):
                         pending_actions -= len(actions) - action_index - 1
