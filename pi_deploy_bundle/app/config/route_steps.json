@@ -86,7 +86,13 @@
     "target_distance_m": 0.175,
     "deadband_m": 0.035,
     "two_step_distance_m": [0.04, 0.075],
-    "distance_window_m": [0.045, 0.55]
+    "distance_window_m": [0.045, 0.55],
+    "left_departure_reference": {
+      "distance_m": 0.139,
+      "distance_deadband_m": 0.040,
+      "lateral_m": 0.054,
+      "heading_deg": -7.74
+    }
   },
   "tag5_entry_lateral": {
     "enabled": true,
