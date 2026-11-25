@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+robot_source.json
+settings.json
+known_hosts
+task_reports/
+usb_backups/
+.env

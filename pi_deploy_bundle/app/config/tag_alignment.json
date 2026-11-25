@@ -1,0 +1,18 @@
+{
+  "schema": "r3.coarse-tag.v1",
+  "mode": "report_only",
+  "target_id": null,
+  "expected_load": "single",
+  "min_frames": 3,
+  "max_age_s": 1.0,
+  "max_actions": 3,
+  "stability_limits": {"x_m": null, "y_m": null, "z_m": null, "yaw_deg": null},
+  "deadband_deg": null,
+  "minimum_improvement_deg": null,
+  "calibration": {
+    "verified": false,
+    "minimum_yaw_change_deg": null,
+    "positive_error_action": null,
+    "negative_error_action": null
+  }
+}

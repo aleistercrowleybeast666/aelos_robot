@@ -1,0 +1,99 @@
+{
+  "transfer_forward_steps": 9,
+  "tag1_to_tag2_forward_steps": 10,
+  "micro_turn_filter": {"initial_deg": 10, "alpha": 0.15},
+  "command0_transfer": [
+    {"op": "free_forward", "steps": 5},
+    {"op": "wait", "seconds": 0.3},
+    {"op": "grab_single"},
+    {"op": "wait", "seconds": 0.5},
+    {"op": "carry_forward_group"},
+    {"op": "right_turn", "repeat": 3, "target_delta_deg": 90, "nominal_step_deg": 30},
+    {"op": "wait", "seconds": 0.5}
+  ],
+  "pickup_exit": [
+    "cmd0_carry_backward2",
+    "cmd0_carry_backward2",
+    "match_outbound_strafes"
+  ],
+  "command1_pickup_exit": [
+    "cmd0_carry_backward2",
+    "cmd0_carry_backward2",
+    "cmd0_carry_backward2",
+    "cmd0_strafe_left4",
+    "cmd0_strafe_left4",
+    "cmd0_strafe_left3",
+    "single_small_strafe_left"
+  ],
+  "command2_continue_return": true,
+  "corridor": {
+    "tag2_to_tag3": [
+      {"op": "strafe_right_once", "repeat": 5}
+    ],
+    "tag3_to_tag4": [
+      {"op": "strafe_right_once", "repeat": 5, "nominal_last_small": true, "left_bias_stride_m": 0.08},
+      {"op": "carry_forward_group", "steps": 4},
+      {"op": "carry_forward_group", "steps": 4},
+      {"op": "carry_forward_group", "steps": 4}
+    ],
+    "tag4_to_tag5": [
+      {"op": "strafe_left_once", "repeat": 3},
+      {"op": "strafe_left_once", "repeat": 2},
+      {"op": "strafe_left_once", "repeat": 3}
+    ],
+    "tag5_to_drop": [
+      {"op": "carry_forward_group", "steps": 4},
+      {"op": "carry_forward_group", "steps": 4},
+      {"op": "place_single"}
+    ]
+  },
+  "return_chain": {
+    "base_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
+    "tag5": [
+      {"op": "free_forward"}
+    ],
+    "tag6": [
+      {"op": "empty_forward2", "repeat": 2}
+    ],
+    "tag7": [
+      {"op": "empty_strafe_left", "repeat": 4},
+      {"op": "empty_forward2", "repeat": 3}
+    ],
+    "tag1": [
+      {"op": "empty_strafe_right", "repeat": 5},
+      {"op": "empty_forward2"}
+    ],
+    "transfer_approach": [
+      {"op": "empty_forward2", "repeat": 2}
+    ],
+    "transfer_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
+    "station_side": [
+      {"op": "empty_strafe_right", "repeat": 6}
+    ]
+  },
+  "wall_pickup_advance_steps": 4,
+  "wall_pickup_side_limit": 2,
+  "tag2_forward_trial": {
+    "enabled": true,
+    "target_distance_m": 0.12,
+    "deadband_m": 0.025,
+    "two_step_distance_m": [0.04, 0.075],
+    "approach_two_step_distance_m": [0.07, 0.125],
+    "distance_window_m": [0.08, 0.26]
+  },
+  "tag4_forward_trial": {
+    "enabled": true,
+    "target_distance_m": 0.175,
+    "deadband_m": 0.035,
+    "two_step_distance_m": [0.04, 0.075],
+    "distance_window_m": [0.045, 0.55]
+  },
+  "tag5_entry_lateral": {
+    "enabled": true,
+    "verify_passage": true,
+    "target_map_y_m": 0.0,
+    "deadband_m": 0.05,
+    "large_move_error_m": 0.10,
+    "forward_window_m": [0.14, 0.40]
+  }
+}

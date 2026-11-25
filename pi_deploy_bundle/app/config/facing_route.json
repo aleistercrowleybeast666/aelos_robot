@@ -1,0 +1,15 @@
+{
+  "schema":"r3.facing-route.plan.v1",
+  "field_path_confirmed":false,
+  "note":"PDF只能确定拓扑/朝向；null不是0步。保留原动作链，勿猜距离替换现有路线。",
+  "outbound":{
+    "to2_forward":null,
+    "to3_right":null,
+    "to4_right":null,
+    "to4_forward":null,
+    "to5_left":null,
+    "to5_forward":null
+  },
+  "return_ids":[5,6,7,1],
+  "return_path":"空载动作与实际反向路径待实现，禁止倒序套用去程"
+}

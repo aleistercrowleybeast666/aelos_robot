@@ -1,0 +1,195 @@
+{
+  "schema": "r3.single-small-strafe-source.v1",
+  "state": "offline_reference_only",
+  "source_project": "CRAIC2026-NF/silver/81",
+  "load": "single",
+  "leg_channels": [
+    4,
+    5,
+    6,
+    7,
+    8,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "wait_after_each_frame": true,
+  "displacement_m": null,
+  "current_mcu_export_verified": false,
+  "actions": {
+    "left": {
+      "source_action": "抱1个方块小步左移-2",
+      "source_path": "import/抱1个方块小步左移-2.js",
+      "sha256": "ef6f48ede11f2fadcbf622a0d37a8a690f5564be7d42bedf53c385047ba70c6b",
+      "source_start_leg_units": [
+        100,
+        96,
+        54,
+        130,
+        97,
+        99,
+        104,
+        147,
+        71,
+        103
+      ],
+      "source_leg_rigidity": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "leg_delta_frames": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          -5,
+          6,
+          8,
+          -6,
+          0,
+          9,
+          0,
+          -1,
+          -1,
+          -1
+        ],
+        [
+          -5,
+          3,
+          8,
+          -6,
+          0,
+          9,
+          0,
+          -1,
+          -1,
+          13
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "source_speed_units_by_frame": [
+        30,
+        20,
+        30,
+        30
+      ]
+    },
+    "right": {
+      "source_action": "1_box_Lit_RS",
+      "source_path": "action/1774072032354.js",
+      "sha256": "c22e9160fe01cc23aa1e8b0968a362a7d6f0c909e3e8d66785f8af73968900f8",
+      "source_speed_units_by_frame": [
+        20,
+        30,
+        50,
+        10
+      ],
+      "source_start_leg_units": [
+        100,
+        93,
+        55,
+        129,
+        100,
+        100,
+        107,
+        145,
+        71,
+        100
+      ],
+      "source_leg_rigidity": [
+        65,
+        85,
+        95,
+        85,
+        35,
+        65,
+        55,
+        55,
+        55,
+        35
+      ],
+      "leg_delta_frames": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          -10,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          -10,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          -10
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "evidence": "This numbered right variant is referenced by the competition project test.xml and is the final matching CustomAction definition."
+    }
+  },
+  "note": "Native leg offsets from each action’s own support pose. Preserve the R3 grip/head and validate R3 support, rigidity and displacement before export."
+}

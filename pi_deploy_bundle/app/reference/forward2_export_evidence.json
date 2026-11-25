@@ -1,0 +1,14 @@
+{
+  "source": "robot3/覆盖包/lua/craic_button_gaits.lua",
+  "source_sha256": "556d93db8cd377a6fb461bb561b41ece315444a9b454afda2b5cd16200362d41",
+  "selected_function": "craic_drive_forward_r1 (historical variant suffix, selected by current Robot3 gait_variant1)",
+  "new_macro": "carry_forward2",
+  "generated_to": "lua/craic_auto_bridge.lua",
+  "startup_frames": 7,
+  "advancing_half_phases": 2,
+  "full_B_landing_frames": 2,
+  "MOVE16_frames": 9,
+  "private_transforms": "exact source blocks; no other-robot poses/parameters",
+  "dynamic_Lua_evaluation": false,
+  "other_six_MCU_files_unchanged": true
+}

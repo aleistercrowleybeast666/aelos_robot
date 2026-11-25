@@ -1,0 +1,11 @@
+{
+  "contract": "r3.single_micro_turn.v1",
+  "installed": false,
+  "reload_confirmed": false,
+  "robot_id": 3,
+  "identity_sha256": "7e4b8c1ab846f4d8e883e8376f657d098d8cadc62e691de3c18e9ad41509f0d7",
+  "verified_boot_id": null,
+  "verified_files_sha256": {},
+  "note": "Only fill from actual MCU readback and reload on the current Pi boot. No online verification performed; no capability probe permitted before this.",
+  "policy_single_enabled": false
+}

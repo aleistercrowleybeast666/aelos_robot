@@ -1,0 +1,7 @@
+{
+  "installed": false,
+  "guard_version": "r3-grab-guard-20261106-v1",
+  "policy_single_enabled": false,
+  "verified_files_sha256": {},
+  "note": "Filled only after authorized installation, file readback and explicit reload. ABI v6/0x2800 cannot prove guard status. This is deployment evidence, not physical cooling acknowledgment."
+}

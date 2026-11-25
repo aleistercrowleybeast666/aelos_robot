@@ -1,0 +1,33 @@
+{
+  "evidence_type": "historical_read_only_record_not_new_device_check",
+  "record_directory": "r3_magnetic_live_20261104",
+  "identity_sha256": "7e4b8c1ab846f4d8e883e8376f657d098d8cadc62e691de3c18e9ad41509f0d7",
+  "schema": {
+    "slots": [
+      "io1_status",
+      "IO_1",
+      "io2_status",
+      "IO_2",
+      "mag",
+      "mag_x",
+      "mag_y",
+      "mag_z"
+    ],
+    "types": [
+      "string",
+      "uint16",
+      "string",
+      "uint16",
+      "uint16",
+      "int16",
+      "int16",
+      "int16"
+    ]
+  },
+  "schema_SHA256": "43c977d09607204852ff765c2ca1e92302192640e0ff195064e998a08ab98755",
+  "historical_arrival_hz": 3.306181535816209,
+  "heading_units": "integer degrees, old source may emit360 equivalent0",
+  "XYZ_units": "raw counts, not verified microtesla",
+  "capture_header_available": false,
+  "current_task_robot_connections": 0
+}

@@ -1,0 +1,47 @@
+{
+  "sources": [
+    {
+      "source_relative_to_desktop_aelos": "CRAIC2026-NF/CRAIC2026-NF/自动机器人包/银色机器人_国赛现场调试版本/botec_code_NF.py",
+      "sha256": "44a7ab6b057de02d9578f8e4b0abecf51ae6f5b60302b51d5ca69dca18815e03",
+      "relevant_lines": [
+        {
+          "line": 11,
+          "text": "from image_Tag_converter import TagConverter"
+        },
+        {
+          "line": 1083,
+          "text": "marker = Tag.get_nearest_marker()"
+        },
+        {
+          "line": 1168,
+          "text": "tag_yaw = marker[3] + 90 # artag 正方向与机器人正方向对齐"
+        }
+      ]
+    },
+    {
+      "source_relative_to_desktop_aelos": "自动机器人_重构V2/references/image_Tag_converter.py",
+      "sha256": "62ad7e60d83349f063e8d13925c744303d318a61a401e0f2d2ca5d225a6b9e0f",
+      "relevant_lines": [
+        {
+          "line": 36,
+          "text": "class TagConverter():"
+        },
+        {
+          "line": 38,
+          "text": "self.sub = rospy.Subscriber('/chest/ar_pose_marker', AlvarMarkers, self.sub_cb)"
+        },
+        {
+          "line": 58,
+          "text": "markers_load.append([marker.id, pos.x, pos.y, rpy_arc[2], time_sec])  # (id,x,y,z,  )"
+        },
+        {
+          "line": 66,
+          "text": "def get_nearest_marker(self):"
+        }
+      ]
+    }
+  ],
+  "on_robot_scan_verified": false,
+  "onsite_single_file_missing_converter_dependency": true,
+  "reference_converter_not_claimed_identical_to_onsite_runtime": true
+}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# AELOS_R3_WARM_ENTRY - no ROS environment sourcing or daemon launch here.
+exec python3 -B /home/lemon/aelos_auto_r3_python/warm_client.py "$@"

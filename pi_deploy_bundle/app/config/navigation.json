@@ -1,0 +1,228 @@
+{
+  "schema": "r3.checkpoints.v1",
+  "enabled": true,
+  "topic": "/chest/ar_pose_marker",
+  "min_frames": 3,
+  "window_frames": 5,
+  "max_age_s": 1.2,
+  "observe_s": 2.0,
+  "settle_s": 0.7,
+  "checkpoint_timeout_s": 120.0,
+  "deadband_heading_deg": 20.0,
+  "deadband_x_m": 0.06,
+  "max_correctable_heading_deg": 60.0,
+  "max_correctable_x_m": 0.4,
+  "max_heading_mad_deg": 12.0,
+  "max_x_mad_m": 0.06,
+  "outlier_heading_floor_deg": 3.0,
+  "outlier_x_floor_m": 0.02,
+  "max_correction_actions": 2,
+  "max_extra_actions_per_journey": 12,
+  "minimum_improvement": 0.05,
+  "action_directions_confirmed": false,
+  "search_pattern": [
+    "right_turn",
+    "left_turn",
+    "left_turn",
+    "right_turn"
+  ],
+  "pose_contract": {
+    "frame": "/map",
+    "publisher": "/chest/ar_track_alvar",
+    "marker_size_cm": 4.4,
+    "body_right": "-y",
+    "body_forward": "+x",
+    "body_up": "+z",
+    "tag_forward": "+y",
+    "tag_up_sign": 1,
+    "max_ground_tilt_deg": 65.0,
+    "max_range_m": 3.0,
+    "axes_confirmed": false,
+    "capture_time_confirmed": false,
+    "scale_confirmed": false,
+    "note": "Axes, capture and scale unverified. Monitor-only by default. No angle/corner/reprojection quality is invented. Camera or AR stream faults stop before blind continuation."
+  },
+  "magnetic": {
+    "enabled": true,
+    "heading_sign": null,
+    "min_samples": 3,
+    "max_age_s": 1.1500000000000001,
+    "max_mad_deg": 8.0,
+    "max_norm_fraction_change": 0.35,
+    "max_offset_jump_deg": 25.0,
+    "collect_s": 2.0,
+    "capture_freshness_verified": false,
+    "capture_contract": {
+      "schema": "aelos.qmc.capture.v1",
+      "topic": "/aelos/magnetic_capture",
+      "publisher": "/sensor_service_node",
+      "producer_build_id": "ee2f831ec7b67b2af8a9a569db8d98cd242d5a2bdc551fe311672ead4203c51b",
+      "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+      "policy": {
+        "conversion_bound_s": 0.2,
+        "transaction_bound_s": 0.35,
+        "publication_bound_s": 0.4,
+        "transport_bound_s": 0.2
+      }
+    },
+    "field_capture_validation": {
+      "status": "pending_real_DRDY_sampling",
+      "sample_count": 0,
+      "report": null
+    }
+  },
+  "legs": {
+    "outbound": [
+      {
+        "id": 1,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 0.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 2,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 0.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 3,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 0.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 4,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 0.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 5,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 0.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      }
+    ],
+    "return": [
+      {
+        "id": 5,
+        "tag_heading_deg": 180.0,
+        "route_heading_deg": 180.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 6,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 180.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 7,
+        "tag_heading_deg": 0.0,
+        "route_heading_deg": 180.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      },
+      {
+        "id": 1,
+        "tag_heading_deg": 180.0,
+        "route_heading_deg": 180.0,
+        "lateral_m": 0.0,
+        "allow_turn": true,
+        "allow_strafe": true
+      }
+    ]
+  },
+  "search_enabled": false,
+  "pose_correction_enabled": false,
+  "post_action_heading": {
+    "enabled": true,
+    "execute": false,
+    "deadband_deg": 8.0,
+    "release_deg": 4.0,
+    "max_error_deg": 30.0,
+    "max_reference_age_s": 60.0,
+    "max_actions_per_journey": 1,
+    "minimum_improvement_deg": 1.0,
+    "max_step_deg": 8.0,
+    "cooldown_s": 2.0,
+    "settle_s": 0.7,
+    "directions_confirmed": false,
+    "gain_confirmed": false,
+    "safe_stop_confirmed": false,
+    "turn_delta_deg": {
+      "left_turn": null,
+      "right_turn": null
+    },
+    "strafe_gain_confirmed": false,
+    "micro_trial": {
+      "enabled": true,
+      "angle_evidence": "source_nominal",
+      "nominal_degrees": 5,
+      "measured_degrees": null,
+      "source_nominal_authorized": true,
+      "max_total_nominal_degrees": 5,
+      "direction_evidence": "unverified",
+      "heading_sign_evidence": "unverified",
+      "signed_nominal_delta_deg": {
+        "single_micro_left": null,
+        "single_micro_right": null
+      },
+      "source_contract": "reference/MICRO_CONTRACT.json",
+      "note": "User authorized nominal five-degree trial; this is not field validation. Post-action 8-degree check is not an in-flight physical limit."
+    }
+  },
+  "camera_health": {
+    "topic": "/usb_cam_chest/image_raw",
+    "topic_confirmed": true,
+    "max_age_s": 1.2
+  },
+  "visual_micro": {
+    "enabled": true,
+    "execute": false,
+    "target_id_confirmed": false,
+    "direction_evidence": "unverified",
+    "signed_nominal_delta_deg": {
+      "single_micro_left": null,
+      "single_micro_right": null
+    },
+    "search_policy": "stationary_new_frames_only",
+    "max_reobserve_windows": 2,
+    "deadband_deg": 8,
+    "release_deg": 4,
+    "max_error_deg": 30,
+    "max_observed_step_deg": 8,
+    "minimum_improvement_deg": 1,
+    "max_sensor_disagreement_deg": 3,
+    "camera_info": {
+      "topic": "/usb_cam_chest/camera_info",
+      "source_confirmed": false,
+      "publisher": null,
+      "frame_id": null,
+      "expected_fingerprint": null,
+      "static_camera_info_verified": false,
+      "max_age_s": 1.2,
+      "max_sync_skew_s": 0.2
+    },
+    "note": "Heading-only dedicated micro. x/y diagnostic only, no R3 lateral gain. ALVAR corners/reprojection/exposure unavailable. Total budget shared with magnetic: one action / nominal five degrees.",
+    "confirmed_target_id": null,
+    "max_heading_mad_deg": 2.0,
+    "max_magnetic_mad_deg": 2.0
+  }
+}

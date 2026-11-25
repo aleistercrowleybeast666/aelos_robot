@@ -1,0 +1,24 @@
+{
+  "schema": "r3.function-tasks.v1",
+  "robot_id": 3,
+  "request_timeout_s": 20,
+  "journey_timeout_s": 480,
+  "max_body_macros_per_journey": 84,
+  "empty_retry_s": 0.5,
+  "terminal_scan": {
+    "enabled": true,
+    "topic": "/chest/ar_pose_marker",
+    "settle_s": 0.7,
+    "timeout_s": 5.0,
+    "max_age_s": 1.0,
+    "min_fresh_frames": 1,
+    "expected_ids": []
+  },
+  "transfer_test": {
+    "enabled": true,
+    "stop_after": "terminal_scan",
+    "preflight_sensor_streams": true,
+    "pixel_diagnostic": true,
+    "target_id": null
+  }
+}

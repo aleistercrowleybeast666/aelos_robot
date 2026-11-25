@@ -1,0 +1,19 @@
+{
+  "schema":"r3.entry-align.v1", "enabled":true, "mode":"report_only",
+  "target_id":null, "expected_load":"single", "min_frames":3,
+  "window_timeout_s":5.0, "total_timeout_s":40.0, "max_age_s":1.0, "settle_s":0.7, "max_actions":3, "max_axis_switches":1,
+  "reference_path":null, "effects_path":null,
+  "deadband":{"x_m":null,"angle_deg":null}, "stability":{"x_m":null,"angle_deg":null},
+  "y_abort_m":null, "min_improvement":null, "working_angle_deg":null, "working_x_m":null,
+  "actions":["strafe_left_once","strafe_right_once","turn_left_once","turn_right_once"],
+  "planar":{
+    "frame":null, "right":{"axis":null,"sign":null}, "forward":{"axis":null,"sign":null}, "up":{"axis":null,"sign":null},
+    "axes_verified":false, "capture_time_verified":false, "tag_scale_verified":false
+  },
+  "camera":{
+    "image_topic":"/usb_cam_chest/image_raw", "info_topic":"/usb_cam_chest/camera_info", "image_kind":"raw",
+    "optical_frame":null, "max_sync_skew_ns":null, "static_camera_info_verified":false,
+    "optical_axes_verified":false, "camera_model_verified":false, "pose_capture_time_verified":false, "projection_overlay_verified":false,
+    "tag_normal_axis":null, "tag_normal_axis_verified":false
+  }
+}

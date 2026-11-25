@@ -1,0 +1,547 @@
+"""Standard-library transaction helper executed on the verified R3 Pi."""
+
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+DEFAULT_PATH = Path('/home/lemon/aelos_auto_r3_python')
+OWNER_DIR = Path('/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/CMDcontrol_node')
+OWNER_NAME = 'r3_auto_warm.py'
+OWNER_SUPPORT = ('r3_micro_gate.py', 'r3_auto_gate.py')
+OWNER_VERSION = 'r3-visual-pickup-20261109-v5'
+NODE = '/CMDcontrol_server_node'
+MARKER = '.r3-deployment.json'
+DEVICE_IDENTITY_SHA256 = '7e4b8c1ab846f4d8e883e8376f657d098d8cadc62e691de3c18e9ad41509f0d7'
+MCU_MANIFEST_PATH = 'app/reference/cmd0_mcu_manifest.json'
+_MCU_MANIFEST_SHA256 = 'ff778dc5494639832ebc50ee2bbc3e12324c6997c634c18293d25a9e1b9d6f2f'
+_MCU_TUNED_MICRO_SHA256 = '48931c9beea5ceb9122bfaa705457279c8a1591ebb4212d0c665b28b86244004'
+_MCU_MEDIUM_SHA256 = {
+    'lua/craic_auto_bridge.lua': '12e51ad9684904e88b8d36e4ee701cf37c14bb71c5c5adae9cff41f168c3710f',
+    'lua/craic_single_micro.lua': 'e8d3c542a0c4e7ba9f737952a09d5e761b4e0a1a41711c954a5c7ec50dee6121',
+}
+_MCU_RIGHT5_SHA256 = {
+    **_MCU_MEDIUM_SHA256,
+    'lua/craic_auto_bridge.lua': 'b921f01f9937ff22eb2f5f00184fcbcee2ba30c242f65540aaf45c29beb98426',
+}
+_MCU_PAIR_SHA256 = {
+    **_MCU_RIGHT5_SHA256,
+    'lua/craic_actions.lua': '7fa0daf3caae45c32379a668c6e0f2f8954607d119de9bd5ecba9a3fe424995d',
+    'lua/craic_auto_bridge.lua': '4cfeeb48b3c2a11d5f1bcd8c561cc280a7fb4595e64ccf9bd36ad8e17f0b1cc8',
+    'lua/craic_runtime.lua': '96328475f14389ba82c6136aa5b16ce74d3f35cbff0388b0aaa8360e12e7893f',
+    'lua/craic_single_micro.lua': 'b73f1a9d704612a5f4f7c99ad0853c1757318364c4da36c543ad2be09bc1cf56',
+}
+_MCU_PICKUP_BACKWARD4_SHA256 = {
+    **_MCU_PAIR_SHA256,
+    'lua/craic_auto_bridge.lua': '7d55f4a959f91dc3d35924dc2f35ad5a143867f709be2e325ab14359148193a4',
+}
+_MCU_PICKUP_BACKWARD6_SHA256 = {
+    **_MCU_PICKUP_BACKWARD4_SHA256,
+    'lua/craic_auto_bridge.lua': '0ea67743b8f03e55d40ee5c8e73cc8ca396e0eadbaeb7a99569e5cb0b6212594',
+}
+_MCU_PICKUP_BACKWARD8_SHA256 = {
+    **_MCU_PICKUP_BACKWARD6_SHA256,
+    'lua/craic_auto_bridge.lua': '14a4687b14c94f8160f056f6c0950ebc0dcca561a15d24685d5523c1e0c8c94d',
+}
+_MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256 = {
+    **_MCU_PICKUP_BACKWARD8_SHA256,
+    'lua/craic_single_micro.lua': '390935bd8ef1c073c0609d8bac7c171a572539d270330d3db8d630b8de0a751b',
+}
+_MCU_PRIOR_TUNED_MICRO_SHA256 = (
+    'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
+    'f0e52e82024132ec0c7be7d5aa556e756a7642fd2c489a1172920ea11be78bf1',
+)
+
+
+def _json(path):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f'Invalid JSON in {path}: {exc}') from exc
+
+
+def _digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _regular(path, optional=False):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError('Expected an ordinary file: '+str(path))
+    if not optional and not path.is_file():
+        raise RuntimeError('Missing file: '+str(path))
+    return path
+
+
+def _relative(name):
+    entry = PurePosixPath(name)
+    if (entry.is_absolute() or '..' in entry.parts or not entry.parts
+            or str(entry) != name or '\\' in name or any(ord(ch) < 32 for ch in name)):
+        raise ValueError('Invalid relative path in bundle')
+    return entry
+
+
+def _verified_local_identity():
+    serial = re.search(r'^Serial\s*:\s*(\S+)', Path('/proc/cpuinfo').read_text(), re.M)
+    machine = Path('/etc/machine-id').read_text().strip()
+    if not serial or hashlib.sha256((serial[1] + '\0' + machine).encode('utf-8')).hexdigest() != DEVICE_IDENTITY_SHA256:
+        raise RuntimeError('R3 CPU / machine / deployment identity mismatch.')
+    return serial[1], machine
+
+
+def _target(value):
+    path = Path(value)
+    home = Path.home().resolve()
+    if (not path.is_absolute() or path != path.resolve() or home not in path.parents
+            or not path.is_dir() or path.stat().st_uid != os.getuid()):
+        raise RuntimeError('Target must be an existing R3 application directory owned by the SSH account.')
+    serial, machine = _verified_local_identity()
+    record = _json(_regular(path/'deployment.json'))
+    if (record.get('robot_id') != 3 or record.get('cpu_serial') != serial
+            or record.get('machine_id') != machine):
+        raise RuntimeError('R3 CPU / machine / deployment identity mismatch.')
+    return path
+
+
+def _transaction(path, ticket):
+    if not re.fullmatch('[0-9a-f]{32}', ticket):
+        raise ValueError('Invalid deployment receipt')
+    return path.with_name('.'+path.name+'.r3-'+ticket)
+
+
+def _status(require_idle=False):
+    address = Path.home()/'.local/state/r3_simple/control.sock'
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(3)
+        conn.connect(str(address))
+        conn.sendall(b'{"protocol":"r3.warm.v1","op":"status"}\n')
+        with conn.makefile('rb') as reply:
+            row = json.loads(reply.readline(131072))
+    owner = row.get('owner', {})
+    if (row.get('protocol') != 'r3.warm.v1' or owner.get('robot_id') != 3
+            or owner.get('owner_version') != OWNER_VERSION or owner.get('expected_wire_abi') != 42):
+        raise RuntimeError('R3 warm owner / ABI mismatch.')
+    if require_idle and not (row.get('prepared') is True and row.get('task_active') is False
+                             and owner.get('mode') == 'manual' and owner.get('in_flight') is False):
+        raise RuntimeError('R3 owner must be ready, idle and in manual mode.')
+    return row
+
+
+def _ros(*args):
+    script = ('for setup in /opt/ros/noetic/setup.bash "$HOME/ros_catkin_ws/install_isolated/setup.bash" '
+              '"$HOME/catkin_ws/devel/setup.bash"; do '
+              'if test -r "$setup"; then . "$setup" >/dev/null; fi; done; exec rosnode "$@"')
+    return subprocess.run(['bash', '-c', script, 'r3-deploy', *args],
+                          text=True, capture_output=True, timeout=10, check=True).stdout
+
+
+def _node_pid():
+    info = _ros('info', NODE)
+    match = re.search(r'^\s*Pid:\s*(\d+)\s*$', info, re.M | re.I)
+    if not match:
+        raise RuntimeError('Cannot identify the running R3 ROS node.')
+    cmdline = (Path('/proc')/match[1]/'cmdline').read_bytes().split(b'\0')
+    if str(OWNER_DIR/'CMDcontrol_service.py').encode() not in cmdline:
+        raise RuntimeError('ROS node is not the expected local R3 owner script.')
+    return int(match[1])
+
+
+def _reload(session, require_new_helper):
+    _node_pid()
+    _ros('kill', NODE)
+    return _wait_owner(session, require_new_helper)
+
+
+def _wait_owner(session, require_new_helper):
+    deadline = time.monotonic()+35
+    while time.monotonic() < deadline:
+        try:
+            row = _status(require_idle=True)
+            if row['owner']['session'] != session and (not require_new_helper or 'mission_progress' in row):
+                return row
+        except (OSError, ValueError, RuntimeError):
+            pass
+        time.sleep(1)
+    raise RuntimeError('ROS owner did not return in manual idle state after reload.')
+
+
+def _reload_restored(session, require_new_helper):
+    try:
+        current = _status(require_idle=True)['owner']['session']
+    except (OSError, ValueError):
+        # The supervisor may already be respawning a node against the restored files.
+        return _wait_owner(session, require_new_helper)
+    return _reload(current, require_new_helper)
+
+
+def _exchange(left, right):
+    # Both directories must remain on the Pi filesystem beside the deployment target.
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(library, 'renameat2', None)
+    if rename is None:
+        raise RuntimeError('This Pi does not expose atomic directory exchange.')
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(left), -100, os.fsencode(right), 2):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(right))
+
+
+def _atomic_bytes(path, data):
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    fd, name = tempfile.mkstemp(prefix='.r3-deploy-', dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        temp.chmod(mode)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _write_json(path, value):
+    _atomic_bytes(path, (json.dumps(value, indent=2)+'\n').encode('utf-8'))
+
+
+def validate_mcu_readback(receipt, expected):
+    manifest_digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(',', ':')).encode('ascii')).hexdigest()
+    if manifest_digest != _MCU_MANIFEST_SHA256:
+        raise ValueError('The staged application lacks the approved continuous-route MCU manifest.')
+    # The medium-turn export requires the paired bridge and turn modules.
+    tuned = ({**expected, **_MCU_MEDIUM_SHA256}, {**expected, **_MCU_RIGHT5_SHA256}, {**expected, **_MCU_PAIR_SHA256},
+             {**expected, **_MCU_PICKUP_BACKWARD4_SHA256}, {**expected, **_MCU_PICKUP_BACKWARD6_SHA256},
+             {**expected, **_MCU_PICKUP_BACKWARD8_SHA256},
+             {**expected, **_MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256},
+             *({**expected, 'lua/craic_single_micro.lua': digest}
+               for digest in (_MCU_TUNED_MICRO_SHA256, *_MCU_PRIOR_TUNED_MICRO_SHA256)))
+    if (not isinstance(receipt, dict) or receipt.get('robot_id') != 3
+            or receipt.get('readback_all_match') is not True or receipt.get('reload_confirmed') is not False
+            or receipt.get('different_files') != [] or receipt.get('files') not in (expected, *tuned)):
+        raise ValueError('MCU 回执与受支持的动作包不符，请选择本次 U 盘核验或覆盖生成的回执。')
+    volume = receipt.get('volume')
+    drive = receipt.get('drive')
+    if (not isinstance(volume, dict) or not isinstance(drive, str) or not re.fullmatch(r'[A-Za-z]:[\\/]', drive)
+            or not isinstance(volume.get('serial'), str) or not re.fullmatch(r'[0-9A-F]{8}', volume['serial'])
+            or not isinstance(volume.get('profile_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', volume['profile_sha256'])
+            or not isinstance(volume.get('filesystem'), str) or not volume['filesystem']):
+        raise ValueError('USB receipt is missing verified R3 volume profile evidence.')
+    return {key: receipt[key] for key in ('robot_id', 'drive', 'files', 'different_files',
+                                          'readback_all_match', 'reload_confirmed')} | {
+        'volume': {key: volume[key] for key in ('serial', 'profile_sha256', 'filesystem')},
+    }
+
+
+def _boot_id():
+    value = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
+    try:
+        if str(uuid.UUID(value)) == value:
+            return value
+    except ValueError:
+        pass
+    raise RuntimeError('The current R3 Pi boot identifier could not be verified.')
+
+
+def _write_mcu_readback(app, owner, readback):
+    boot = _boot_id()
+    if owner.get('mcu_ready') is not True or owner.get('micro_trial', {}).get('boot_id') != boot:
+        raise RuntimeError('The current R3 owner must report a live MCU handshake and matching Pi boot.')
+    serial, machine = _verified_local_identity()
+    common = {'installed': True, 'robot_id': 3, 'cpu_serial': serial, 'machine_id': machine,
+              'policy_single_enabled': True, 'reload_confirmed': True, 'verified_boot_id': boot,
+              'installation_evidence_scope': 'persistent_mcu_files_until_next_deployment',
+              'reload_confirmation_source': 'operator_confirmed_after_usb_readback', 'usb_volume': readback['volume']}
+    micro_path = _regular(app/'config/micro_mcu_deployment.json')
+    guard_path = _regular(app/'config/mcu_guard_deployment.json')
+    micro = dict(_json(micro_path), **common, contract='r3.single_micro_turn.v1', mission_abi=1, wire_abi=42,
+                 single_grab_policy='repeat_after_success_empty_only', verified_files_sha256=readback['files'])
+    guard_files = {name: digest for name, digest in readback['files'].items() if name != 'lua/craic_single_micro.lua'}
+    guard = dict(_json(guard_path), **common, guard_version='r3-grab-guard-20261106-v1', verified_files_sha256=guard_files)
+    _write_json(micro_path, micro)
+    _write_json(guard_path, guard)
+    return boot
+
+
+def _bundle(slot):
+    manifest = _json(_regular(slot/'manifest.json'))
+    if manifest.get('schema') != 'r3.pi-deploy.v1' or manifest.get('owner_directory') != str(OWNER_DIR):
+        raise RuntimeError('Unexpected R3 bundle schema or owner directory.')
+    files = manifest['files']
+    if not {'app/run_auto.py', 'app/task_runner.py', 'owner/'+OWNER_NAME} <= files.keys():
+        raise RuntimeError('Application bundle is incomplete.')
+    found = {path.relative_to(slot).as_posix() for part in ('app', 'owner')
+             for path in (slot/part).rglob('*') if path.is_file() or path.is_symlink()}
+    if found != files.keys():
+        raise RuntimeError('Uploaded files do not match the bundle manifest.')
+    for name, sha in files.items():
+        if _digest(_regular(slot/_relative(name))) != sha:
+            raise RuntimeError('Upload checksum mismatch: '+name)
+    return manifest
+
+
+def _merge(defaults, live):
+    output = dict(defaults)
+    for k, value in live.items():
+        old = output.get(k)
+        if isinstance(old, dict) and isinstance(value, dict):
+            output[k] = _merge(old, value)
+        elif value is not None or old is None:
+            output[k] = value
+    return output
+
+
+def _copy_live(source, dest, name, *, unless_sha256=None):
+    rel = _relative(name)
+    path = _regular(source/rel, optional=True)
+    if path.exists():
+        if path.resolve() != path:
+            raise RuntimeError('Live configuration contains a symlink: '+name)
+        if unless_sha256 is not None and _digest(path) == unless_sha256:
+            return
+        copy = dest/rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, copy)
+
+
+def _apply_settings(root, app, manifest):
+    if (root/'config').is_symlink():
+        raise RuntimeError('Live configuration directory is a symlink.')
+    for name in manifest['required_live']:
+        _regular(root/_relative(name))
+    for name in manifest['preserve_exact']:
+        stock_routes = (manifest.get('replace_stock_routes_sha256')
+                        if name == 'routes.py' and (app/'routes.py').is_file() else None)
+        _copy_live(root, app, name, unless_sha256=stock_routes)
+    for name in manifest['merge_live_over_defaults']:
+        live = _regular(root/_relative(name), optional=True)
+        if live.exists():
+            defaults = _json(app/name)
+            if (name == 'config/mission_v5.json' and live.stat().st_size == 0
+                    and defaults.get('schema') == 'r3.mission-v5.v1' and defaults.get('enabled') is False):
+                # An empty file has no field settings to preserve. Keep the
+                # inactive staged default and retain the old file in the backup.
+                continue
+            merged = _merge(defaults, _json(live))
+            if name == 'config/runtime.json':
+                key = 'max_body_macros_per_journey'
+                merged[key] = max(defaults[key], merged[key])
+            _write_json(app/name, merged)
+    for path in (root/'config').glob('*.json'):
+        name = path.relative_to(root).as_posix()
+        if not (app/name).exists():
+            _copy_live(root, app, name)
+    for config in ('entry_alignment', 'tag_reporting'):
+        path = app/'config'/(config+'.json')
+        if path.is_file():
+            for key in ('reference_path', 'effects_path'):
+                value = _json(path).get(key)
+                if not value:
+                    continue
+                absolute = (root/value).resolve()
+                if root in absolute.parents:
+                    _copy_live(root, app, absolute.relative_to(root).as_posix())
+
+
+def _inspect(root):
+    report = {'robot_id': 3, 'path': str(root), 'activation': 'ros_owner_reload' if root == DEFAULT_PATH else 'files_only'}
+    if root == DEFAULT_PATH:
+        row = _status()
+        report.update(task_active=row.get('task_active'), owner_mode=row['owner'].get('mode'),
+                      mcu_ready=row['owner'].get('mcu_ready'))
+    if (root/MARKER).is_file():
+        report['deployment'] = _json(_regular(root/MARKER))
+    return report
+
+
+def _owner_backup(slot, name):
+    return slot/('owner.backup' if name == OWNER_NAME else name+'.backup')
+
+
+def _commit(root, ticket, mcu_readback=None):
+    slot = _transaction(root, ticket)
+    if slot.resolve() != slot or (slot/'receipt.json').exists():
+        raise RuntimeError('Invalid or previously used deployment staging directory.')
+    manifest = _bundle(slot)
+    if mcu_readback is not None:
+        if (root != DEFAULT_PATH or MCU_MANIFEST_PATH not in manifest['files']
+                or not all('owner/'+name in manifest['files'] for name in OWNER_SUPPORT)):
+            raise RuntimeError('USB readback registration requires the default R3 target and paired owner bundle.')
+        mcu_readback = validate_mcu_readback(mcu_readback, _json(_regular(slot/MCU_MANIFEST_PATH)))
+    app = slot/'app'
+    _apply_settings(root, app, manifest)
+    subprocess.run([sys.executable, '-B', 'run_auto.py', '0', '--check'],
+                   cwd=app, capture_output=True, timeout=15, check=True)
+    owners = []
+    session = None
+    verified_boot = None
+    if root == DEFAULT_PATH:
+        support = [name for name in OWNER_SUPPORT if 'owner/'+name in manifest['files']]
+        if support and len(support) != len(OWNER_SUPPORT):
+            raise RuntimeError('The ROS owner gate modules must be updated together.')
+        owners = [_regular(OWNER_DIR/name) for name in (*support, OWNER_NAME)]
+        if any(owner.resolve() != owner or owner.stat().st_uid != os.getuid() for owner in owners):
+            raise RuntimeError('Unexpected local ROS owner file.')
+        _node_pid()
+        owner_status = _status(require_idle=True)['owner']
+        session = owner_status['session']
+        if mcu_readback is not None:
+            verified_boot = _write_mcu_readback(app, owner_status, mcu_readback)
+        for owner in owners:
+            _atomic_bytes(_owner_backup(slot, owner.name), owner.read_bytes())
+    receipt = {'id': ticket, 'path': str(root), 'bundle_sha256': _digest(slot/'manifest.json')}
+    _write_json(app/MARKER, receipt)
+    installed = {file.relative_to(app): _digest(file) for file in app.rglob('*') if file.is_file()}
+    _write_json(slot/'receipt.json', receipt)
+    swapped = False
+    owners_changed = []
+    try:
+        if owners:
+            if _status(require_idle=True)['owner']['session'] != session:
+                raise RuntimeError('Owner changed during staging.')
+        _exchange(root, app)
+        swapped = True
+        for relative, digest in installed.items():
+            if _digest(_regular(root/relative)) != digest:
+                raise RuntimeError('Application readback mismatch: '+str(relative))
+        for owner in owners:
+            replacement = slot/'owner'/owner.name
+            owners_changed.append(owner)
+            _atomic_bytes(owner, replacement.read_bytes())
+            if _digest(owner) != _digest(replacement):
+                raise RuntimeError('Owner file readback mismatch: '+owner.name)
+        if owners:
+            activated = _reload(session, require_new_helper=True)
+            if verified_boot:
+                micro = activated.get('owner', {}).get('micro_trial', {})
+                if micro.get('cmd0_route_deployment_readback_ready') is not True:
+                    raise RuntimeError('The reloaded owner did not accept the registered continuous-route MCU record.')
+                bridge_hash = mcu_readback['files']['lua/craic_auto_bridge.lua']
+                if (bridge_hash in (_MCU_MEDIUM_SHA256['lua/craic_auto_bridge.lua'], _MCU_RIGHT5_SHA256['lua/craic_auto_bridge.lua'])
+                        and micro.get('medium_turn_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered medium-turn MCU record.')
+                if (bridge_hash == _MCU_RIGHT5_SHA256['lua/craic_auto_bridge.lua']
+                        and micro.get('cmd0_right5_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered five-stride MCU record.')
+                if (bridge_hash in (_MCU_PAIR_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PICKUP_BACKWARD4_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PICKUP_BACKWARD6_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'])
+                        and not all(micro.get(key) is True for key in (
+                            'pair_deployment_readback_ready', 'cmd0_right5_deployment_readback_ready',
+                            'medium_turn_deployment_readback_ready'))):
+                    raise RuntimeError('The reloaded owner did not accept the registered horizontal-pair MCU record.')
+                if (bridge_hash == _MCU_PICKUP_BACKWARD4_SHA256['lua/craic_auto_bridge.lua']
+                        and micro.get('pickup_backward4_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered four-step backward MCU record.')
+                if (bridge_hash == _MCU_PICKUP_BACKWARD6_SHA256['lua/craic_auto_bridge.lua']
+                        and micro.get('pickup_backward6_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered six-step backward MCU record.')
+                if (bridge_hash == _MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua']
+                        and micro.get('pickup_backward8_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered eight-step backward MCU record.')
+        if _json(_regular(root/MARKER)) != receipt:
+            raise RuntimeError('Deployment marker readback mismatch.')
+    except Exception as exc:
+        if owners_changed:
+            try:
+                live = _status()
+            except (OSError, ValueError, RuntimeError):
+                live = None
+            if live is not None and (live['task_active'] or live['owner']['in_flight']
+                                     or live['owner']['mode'] != 'manual'):
+                raise RuntimeError('New files are active but the owner is busy; backup kept at '+str(slot)) from exc
+        for owner in reversed(owners_changed):
+            _atomic_bytes(owner, _owner_backup(slot, owner.name).read_bytes())
+        if swapped:
+            _exchange(root, app)
+        if owners_changed:
+            try:
+                _reload_restored(session, require_new_helper=False)
+            except Exception:
+                raise RuntimeError('Original files restored; unable to verify owner reload. Backup: '+str(slot)) from exc
+        raise RuntimeError('Deployment did not activate; original files restored. Details: '+str(exc)) from exc
+    result = {'status': 'deployed', 'id': ticket, 'path': str(root), 'backup': str(app),
+              'owner_reloaded': bool(owners)}
+    if verified_boot:
+        result.update(mcu_readback_registered=True, mcu_record_boot_id=verified_boot, mcu_runtime_probe_sent=False)
+    return result
+
+
+def _rollback(root):
+    receipt = _json(_regular(root/MARKER))
+    slot = _transaction(root, receipt['id'])
+    if slot.resolve() != slot or _json(_regular(slot/'receipt.json')) != receipt or receipt['path'] != str(root):
+        raise RuntimeError('Active deployment does not match its backup record.')
+    backup = slot/'app'
+    _target(str(backup))
+    owners = {}
+    if root == DEFAULT_PATH:
+        for name in (*OWNER_SUPPORT, OWNER_NAME):
+            saved = _regular(_owner_backup(slot, name), optional=name != OWNER_NAME)
+            if saved.is_file():
+                owner = _regular(OWNER_DIR/name)
+                owners[owner] = (owner.read_bytes(), saved.read_bytes())
+    session = _status(require_idle=True)['owner']['session'] if owners else None
+    if owners:
+        _node_pid()
+        if _status(require_idle=True)['owner']['session'] != session:
+            raise RuntimeError('Owner changed before rollback.')
+    _exchange(root, backup)
+    try:
+        for owner, (_, old) in owners.items():
+            _atomic_bytes(owner, old)
+        if owners:
+            _reload(session, require_new_helper=False)
+    except Exception as exc:
+        _exchange(root, backup)
+        for owner, (current, _) in owners.items():
+            _atomic_bytes(owner, current)
+        try:
+            _reload_restored(session, require_new_helper=True)
+        except Exception:
+            raise RuntimeError('Rollback activation failed; the newer files were restored. Verify the owner service.') from exc
+        raise
+    return {'status': 'rolled_back', 'path': str(root), 'saved_newer_version': str(backup),
+            'owner_reloaded': bool(owners)}
+
+
+def execute(request):
+    root = _target(request['path'])
+    action = request['action']
+    if action == 'inspect':
+        return _inspect(root)
+    if action == 'stage':
+        ticket = uuid.uuid4().hex
+        slot = _transaction(root, ticket)
+        slot.mkdir(mode=0o700)
+        return {'id': ticket, 'stage': str(slot)}
+    if action not in ('commit', 'rollback'):
+        raise ValueError('Unknown deploy operation')
+    import fcntl
+
+    lock = Path.home()/'.r3-deploy.lock'
+    with os.fdopen(os.open(lock, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600), 'wb') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if action == 'commit':
+            return _commit(root, request['id'], request.get('mcu_readback'))
+        return _rollback(root)
+
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(execute(json.loads(sys.argv[1]))))
+    except Exception as exc:
+        print(json.dumps({'error': str(exc)}))
+        sys.exit(1)

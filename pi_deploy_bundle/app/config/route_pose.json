@@ -1,0 +1,130 @@
+{
+  "schema": "r3.route-pose.v1",
+  "note": "The taught entrance photo supplies rough image framing only. Tag 1 forward_adjustment changes the nominal count. Tag 2 forward_trim uses a same-load metric target and a positive distance range for each measured two-step forward or backward macro. Its whole move must fit inside forward_window_m. Optional per-tag departure_window requires verified forward_hard_m, lateral_fuse_m, lateral_hard_m, and heading_hard_deg. Return measurements require their own empty-load survey.",
+  "outbound": {
+    "1": {
+      "departure_axis": "forward",
+      "expected_load": "single",
+      "measurement_verified": false,
+      "camera_fingerprint": null,
+      "forward_window_m": null,
+      "lateral_deadband_m": null,
+      "lateral_uncertainty_m": null,
+      "departure_window": null,
+      "forward_adjustment": {
+        "verified": false,
+        "nominal_count": 10,
+        "target_forward_m": null,
+        "body_forward_step_m": null,
+        "min_count": null,
+        "max_count": null,
+        "minimum_improvement_m": null,
+        "max_landing_forward_error_m": null
+      },
+      "side_adjustment": null
+    },
+    "2": {
+      "departure_axis": "lateral",
+      "expected_load": "single",
+      "measurement_verified": false,
+      "camera_fingerprint": null,
+      "forward_window_m": null,
+      "lateral_deadband_m": null,
+      "lateral_uncertainty_m": null,
+      "departure_window": null,
+      "forward_trim": {
+        "verified": false,
+        "target_forward_m": null,
+        "forward_two_step_m": null,
+        "backward_two_step_m": null,
+        "deadband_m": null
+      },
+      "side_adjustment": {
+        "verified": false,
+        "operation": "strafe_right_once",
+        "nominal_count": 5,
+        "min_count": null,
+        "max_count": null,
+        "body_right_displacement_m": null,
+        "minimum_improvement_m": null,
+        "max_landing_x_error_m": null,
+        "small_step": {
+          "verified": false,
+          "operation": "single_small_strafe_right",
+          "body_right_displacement_m": null,
+          "allow_append": false,
+          "allow_replace": false,
+          "allow_departure": false
+        }
+      }
+    },
+    "3": {
+      "departure_axis": "lateral",
+      "expected_load": "single",
+      "measurement_verified": false,
+      "camera_fingerprint": null,
+      "forward_window_m": null,
+      "lateral_deadband_m": null,
+      "lateral_uncertainty_m": null,
+      "departure_window": null,
+      "side_adjustment": {
+        "verified": false,
+        "operation": "strafe_right_once",
+        "nominal_count": 3,
+        "min_count": null,
+        "max_count": null,
+        "body_right_displacement_m": null,
+        "minimum_improvement_m": null,
+        "max_landing_x_error_m": null,
+        "small_step": {
+          "verified": false,
+          "operation": "single_small_strafe_right",
+          "body_right_displacement_m": null,
+          "allow_append": false,
+          "allow_replace": false,
+          "allow_departure": false
+        }
+      }
+    },
+    "4": {
+      "departure_axis": "lateral",
+      "expected_load": "single",
+      "measurement_verified": false,
+      "camera_fingerprint": null,
+      "forward_window_m": null,
+      "lateral_deadband_m": null,
+      "lateral_uncertainty_m": null,
+      "departure_window": null,
+      "side_adjustment": {
+        "verified": false,
+        "operation": "strafe_left_once",
+        "nominal_count": 6,
+        "min_count": null,
+        "max_count": null,
+        "body_right_displacement_m": null,
+        "minimum_improvement_m": null,
+        "max_landing_x_error_m": null,
+        "small_step": {
+          "verified": false,
+          "operation": "single_small_strafe_left",
+          "body_right_displacement_m": null,
+          "allow_append": false,
+          "allow_replace": false,
+          "allow_departure": false
+        }
+      }
+    },
+    "5": {
+      "departure_axis": "forward",
+      "expected_load": "single",
+      "measurement_verified": false,
+      "camera_fingerprint": null,
+      "forward_window_m": null,
+      "lateral_deadband_m": null,
+      "lateral_uncertainty_m": null,
+      "departure_window": null,
+      "side_adjustment": null
+    }
+  },
+  "return": {}
+}

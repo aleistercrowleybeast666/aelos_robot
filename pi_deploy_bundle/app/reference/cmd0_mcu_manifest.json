@@ -1,0 +1,11 @@
+{
+  "dat/craic_grab_safety.lua": "046bff97199d2c0b1338cd0b7782fde4548f30a030001e6c1a74c17383bda181",
+  "lua/craic_actions.lua": "e1f76bf441711e9fa6ab791f24a1bb3844b63e191f2d6bba0bc27936e63abf8f",
+  "lua/craic_auto_bridge.lua": "fd499a6529f2d6d544f9bb6def0b22ebca049ca95c10f01f2934ab69d59dfbb9",
+  "lua/craic_button_gaits.lua": "d116e043026273e0d577dbe4af396cbf8fdab2c3299b66482a6f0edfa07b3a86",
+  "lua/craic_config.lua": "1e443a23e3c577c4c232dfc302276d99383b96123072d2373d2c0bf9114b9436",
+  "lua/craic_future_actions.lua": "612267f8e10c7135ca76861785f6b63a60cfa1a55402a6bca122b4848bc91da6",
+  "lua/craic_runtime.lua": "453560bf02f6f107025231ae4656e1c0372a50c4509d583f506a09a4d48efe70",
+  "lua/craic_single_micro.lua": "c7827f10bb33d3b51ce3ac4bae2d4e023301dfcee909d586d8f82ffb44a5d5df",
+  "lua/main.lua": "075dae0de6a3170bdac4a419161b757222d234b848d9c3e7bf59b856e79ecb58"
+}

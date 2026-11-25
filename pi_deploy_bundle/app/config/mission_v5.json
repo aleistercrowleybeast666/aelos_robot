@@ -1,0 +1,63 @@
+{
+  "schema": "r3.mission-v5.v1",
+  "enabled": false,
+  "field_calibration_verified": false,
+  "staged_block_count": {
+    "roi": [0.16, 0.31, 0.84, 0.99],
+    "hsv_ranges": {
+      "green": {"lower": [36, 120, 55], "upper": [76, 255, 255]},
+      "orange": {"lower": [7, 145, 70], "upper": [23, 255, 255]}
+    },
+    "min_area": 0.009,
+    "floor_pair_silhouettes": true
+  },
+  "vision": {
+    "calibration_verified": false,
+    "empty_scene_verified": false,
+    "topic_confirmed": false,
+    "floor_pair_silhouettes": true,
+    "topic": "/usb_cam_chest/image_raw",
+    "frame_id": "",
+    "resolution": [
+      640,
+      480
+    ],
+    "roi": [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "hsv_ranges": {},
+    "min_area": 0.002,
+    "max_area": 0.35,
+    "max_aspect": 1.8,
+    "min_fill": 0.55,
+    "edge_margin": 0.005,
+    "isolation_gap": 0.08,
+    "confirmation_frames": 3,
+    "stability": 0.04,
+    "max_age_s": 0.6,
+    "timeout_s": 3.0,
+    "settle_s": 0.3,
+    "min_brightness": 15.0,
+    "max_brightness": 245.0
+  },
+  "pickup": {
+    "max_adjustments": 8,
+    "confirmation_windows": 2,
+    "max_lost_windows": 2,
+    "target_x": 0.5,
+    "x_tolerance": 0.07,
+    "target_y_min": 0.65,
+    "target_y_max": 0.78,
+    "max_target_jump": 0.3,
+    "double_pickup_enabled": true
+  },
+  "note": "Trial distances and macro counts are estimates. Check the actual tag axes, camera, pickup band and clearance onsite.",
+  "checkpoint_profiles": {},
+  "checkpoint_forward_windows_m": {
+    "outbound": {"1": [-0.20, 0.02], "2": [-0.20, -0.04], "3": [-0.20, -0.06], "4": [-0.20, -0.04], "5": [-0.27, -0.04]},
+    "return": {"5": [0.04, 0.22], "6": [-0.18, -0.03], "7": [-0.17, -0.04], "1": [0.04, 0.23]}
+  }
+}

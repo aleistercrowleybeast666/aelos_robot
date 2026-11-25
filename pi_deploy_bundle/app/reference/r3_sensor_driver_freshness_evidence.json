@@ -1,0 +1,32 @@
+{
+  "evidence_date": "2026-11-04",
+  "historical_only": true,
+  "current_task_robot_connections": 0,
+  "robot_id": 3,
+  "identity_sha256": "7e4b8c1ab846f4d8e883e8376f657d098d8cadc62e691de3c18e9ad41509f0d7",
+  "provider_processes": [
+    {
+      "node": "/sensor_service_node",
+      "pid": 1236,
+      "script_paths": [
+        "/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/topic_node/sensor_service.py"
+      ]
+    }
+  ],
+  "source_sha256": {
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/topic_node/sensor_service.py": "67c8a06179a2091a26f53ae817728593e9f2b5a9b0f94685f23299fadbf53c23",
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/topic_node/sensor_magnet.py": "5ea7ca9798f63658374e4b3cd6bdfe69205f38174152fc802553233c0a369783",
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/topic_node/magnet_calibration.py": "3b3ca754899f8ea9c4a25b19f3f451e3ce6f863eee3072efbbc25680c269da23",
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/topic_node/py_qmc5883l/__init__.py": "96bcfb87bedd46fbfd66beabe5e10cd832404ef41ee0c4863822f17169fc4285",
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/msg/sensor_topic.msg": "a7e83a12d7634d017e08c9590c22a109e6b4d351e4ca9c0f3364c328c7d6eb41",
+    "/home/lemon/catkin_ws/src/aelos_smart_ros/leju/sensor_port.py": "504e2d42918bf2a2f2a5b10f06ce60bce4765e5bbfc416d462358d483ddf8900"
+  },
+  "source_behavior": [
+    "Pi QMC5883L/I2C sampling then ROS /sensor_info",
+    "get_magnet returns cached heading",
+    "YAML version 1 obtains heading separately from reported XYZ"
+  ],
+  "capture_freshness_proven": false,
+  "underlying_driver_readiness_contract_verified": false,
+  "required_next_step": "Re-read actual R3 sources plus py_qmc5883l and prove successful new acquisition/atomic sample bounds before implementing live correction adapter."
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "r3.entrance-pixel-reference.v1",
+  "operator_confirmed": true,
+  "diagnostic_only": true,
+  "target_id": 1,
+  "load": "single",
+  "target_x_m": 0,
+  "target_angle_deg": 0,
+  "tag_center_px": [325, 344],
+  "camera": {
+    "topic": "/usb_cam_chest/image_raw",
+    "frame": "chest_usb_cam",
+    "size_px": [640, 480],
+    "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252"
+  },
+  "evidence": {
+    "method": "manual center on a native chest frame at the operator-confirmed pose",
+    "detector_reported_ids": [],
+    "image": "20261123_000428_811977_r3_entrance_reference.jpg",
+    "image_sha256": "7b6ed5a59911b6f18427f385e675e80605fd41495e9b5225e23f4ae99e478ad2",
+    "scan_report": "20261123_000428_811977_r3_entrance_reference.json"
+  }
+}
