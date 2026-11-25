@@ -67,6 +67,7 @@ _TAG1_REOBSERVE_SCANS = ('no_tag', 'id_seen_pose_untrusted', 'unreliable')
 _TAG1_PROBE_DEFAULT_MAX_TRAVEL_M = .125
 _TAG1_UNCONFIRMED_REASON_ZH = '入口已完成找码与原地复核，仍未确认 Tag 1，请检查机器人位置和胸部相机。'
 _TAG1_POSE_UNCONFIRMED_REASON_ZH = '已识别 Tag 1，当前位姿未能验证，无法确认进场方向。'
+_TAG3_VISUAL_MICRO_TRIGGER_DEG = 7.
 
 def load(path):
     cfg=json.loads(Path(path).read_text(encoding='utf-8'))
@@ -361,6 +362,7 @@ class Robot:
     def Route_TurnFromTagHeading(self, tag_id, error, observed_at_ns, *, reserved_actions=0):
         """Submit one camera-guided micro turn without relying on a magnetic reference."""
         from micro_trial import OPS
+        from turn_estimator import MICRO_INITIAL_DEG
         paired_route = self.load_kind == 'double' and getattr(self,'pair_route_enabled',False)
         if (tag_id not in (1,2,3,4) or (self.load_kind!='single' and not paired_route)
                 or not self._allows_missing_magnetic()
@@ -373,13 +375,32 @@ class Robot:
         goal=next((point for point in cfg['legs']['outbound'] if point['id']==tag_id),{})
         if (visual.get('execute') is not True or visual.get('target_id_confirmed') is not True
                 or visual.get('direction_evidence')!='measured_r3_tag' or goal.get('allow_turn') is not True
-                or not visual['deadband_deg']<abs(error)<=visual['max_error_deg']):
+                or abs(error)>visual['max_error_deg']):
+            return None
+        trigger = _TAG3_VISUAL_MICRO_TRIGGER_DEG if tag_id == 3 else visual['deadband_deg']
+        if abs(error) <= trigger:
             return None
         gains=visual['signed_nominal_delta_deg']
         name=next((op for op in OPS if gains[op]*error<0),None)
         bound=visual['max_observed_step_deg']
         improvement=visual['minimum_improvement_deg']
-        if name is None or abs(abs(error)-bound)>abs(error)-improvement:
+        if name is None:
+            return None
+        selection_response = bound
+        if tag_id == 3:
+            # This departure makes one small correction, then reacquires Tag 3.
+            # Compare anticipated improvement, and keep the full response bound for the motion budget.
+            initial = self.cfg.get('route_steps', {}).get('micro_turn_filter', {}).get('initial_deg', MICRO_INITIAL_DEG)
+            selection_response = min(bound, initial)
+            estimator = getattr(self.heading_guard, 'turn_estimator', None)
+            anchor = nav.mag.anchor or {}
+            direction = 'left' if gains[name] < 0 else 'right'
+            measured = estimator.control_estimate(direction, 'micro', self.load_kind,
+                getattr(self.backend,'session',''), getattr(self.backend,'epoch',-1),
+                anchor.get('calibration_id',''), now_s=self.clock()) if estimator is not None else None
+            if measured is not None:
+                selection_response = abs(measured['degrees'])
+        if abs(abs(error)-selection_response)>abs(error)-improvement:
             return None
         timeout=self.cfg['request_timeout_s']
         if (self.count+reserved_actions+1>self.cfg['max_body_macros_per_journey']
@@ -389,7 +410,9 @@ class Robot:
         self.check()
         checker=getattr(self.backend,'check_micro',None)
         live=getattr(nav.io,'visual_motion_ready',None)
-        if checker is None or live is None or type(observed_at_ns) is not int:
+        if (checker is None or live is None or type(observed_at_ns) is not int
+                or (tag_id == 3 and type(self.last_action_completed_ros_ns) is int
+                    and observed_at_ns <= self.last_action_completed_ros_ns)):
             return None
         checker()
         if not live(observed_at_ns) or not self.micro_budget().reserve('visual',name,gains[name],conservative_bound=bound):
@@ -399,7 +422,10 @@ class Robot:
         self.last_heading_report=None
         self.events.append({'visual_micro_action':name,'tag_id':tag_id,'feedback_source':'tag_only',
                             'angle_evidence':'source_nominal','physical_success':'unobserved'})
-        return {'action':name,'before_error_deg':error}
+        turn = {'action':name,'before_error_deg':error}
+        if tag_id == 3:
+            turn['selected_response_deg'] = selection_response
+        return turn
 
     def Route_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns):
         """Keep a fresh expected Tag's yaw error in the magnetic target for this segment."""

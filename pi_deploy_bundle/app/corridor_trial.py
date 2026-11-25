@@ -27,6 +27,9 @@ _DEPARTURE_REOBSERVATIONS = 3
 _TAG2_DEPARTURE_WINDOWS = 2
 _TAG2_BOUNDARY_HINT_MAX_AGE_NS = 8_000_000_000
 _TAG4_APPROACH_GROUPS = 4
+_TAG4_STRAIGHT_LATERAL_M = .16
+_TAG4_CLEARANCE_YAW_DEG = 22.
+_TAG4_RECOVERY_CENTER_STRAFES = 2
 _TAG3_RIGHT_OFFSET_M = .075
 _TAG3_TRIAL_MAX_RIGHT_STRIDES = 7
 _TAG2_CARRIED_LATERAL_MARGIN_M = .02
@@ -623,8 +626,9 @@ def _tag4_partial_forward_clearance(robot, nav, observation, settings):
             'distance_m':(near+far)/2,'latest_stamp_ns':pose['latest_stamp_ns']}
 
 
-def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, boundary_first=False):
-    _, observation = _refresh_checkpoint_pose(robot, nav, profile, 4, reuse_settled_cache=True, quick_id=True,
+def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, boundary_first=False,
+                        reuse_settled_cache=True):
+    _, observation = _refresh_checkpoint_pose(robot, nav, profile, 4, reuse_settled_cache=reuse_settled_cache, quick_id=True,
                                               boundary_first=boundary_first)
     return _tag4_longitudinal_observation(robot, nav, observation, settings, approach_steps=approach_steps)
 
@@ -680,7 +684,7 @@ def _tag4_forward_disruption(robot, last_event, previous_report, leg):
 
 
 def _tag4_observed_clearance_problem(plan):
-    if (plan['distance_verified'] or 'distance_bounds_m' not in plan
+    if ('distance_bounds_m' not in plan or 'lateral_bounds_m' not in plan
             or plan.get('max_heading_deviation_deg', float('inf')) > 3.):
         return None
     near, far = plan['distance_bounds_m']
@@ -690,11 +694,12 @@ def _tag4_observed_clearance_problem(plan):
     if right-left > .025:
         return None
     heading = plan['heading_deg']
-    if right < -.16 or left > .16:
-        return {'reason_zh': 'Tag 4 实测横偏超出直行范围，复扫确认通道。'}
-    if abs(heading) > 15.:
-        return {'heading_error_deg': heading, 'evidence_distance_m': plan.get('distance_m'),
-                'reason_zh': 'Tag 4 已读到一致位姿，先按实测航向纠偏，再核对剩余直行。'}
+    evidence = {'heading_error_deg': heading, 'evidence_distance_m': plan.get('distance_m'),
+                'lateral_bounds_m': (left, right)}
+    if left < -_TAG4_STRAIGHT_LATERAL_M or right > _TAG4_STRAIGHT_LATERAL_M:
+        return dict(evidence, reason_zh='Tag 4 实测横偏超出直行范围，先恢复通道位姿。')
+    if abs(heading) > 15. and (not plan['distance_verified'] or plan.get('heading_to_correct_deg') is not None):
+        return dict(evidence, reason_zh='Tag 4 已读到一致位姿，先按实测航向纠偏，再核对剩余直行。')
     return None
 
 
@@ -704,33 +709,89 @@ def _tag4_guarded_forward_ready(nav, plan):
             and live is not None and live(plan['latest_stamp_ns']))
 
 
-def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *, approach_steps, reserved_actions):
-    """Allow another forward group only after new corridor evidence following a large yaw."""
+def _tag4_recovery_strafe(plan, recovery, settings):
+    """Choose a single turn-clearance stride or a measured move back toward the route."""
+    near, far = plan['distance_bounds_m']
+    left, right = plan['lateral_bounds_m']
+    yaw = plan['heading_deg']
+    if (near < settings.get('target_distance_m', .175) + settings.get('deadband_m', .035)
+            or far > settings.get('distance_window_m', (.045, .55))[1]
+            or plan.get('projection_bounds', (0.,))[0] < .75):
+        return None
+    if (_TAG4_CLEARANCE_YAW_DEG <= abs(yaw) <= 35. and 'clearance_strafe' not in recovery
+            and max(abs(left), abs(right)) <= .22):
+        return ('strafe_left_once' if yaw < 0 else 'strafe_right_once', 'clearance_strafe')
+    centers = recovery.get('centering_strafes', ())
+    if (abs(yaw) > 15. or len(centers) >= _TAG4_RECOVERY_CENTER_STRAFES
+            or max(abs(left), abs(right)) > .30):
+        return None
+    offset = median((left, right))
+    if centers and abs(offset) >= abs(centers[-1]['before_lateral_m']) - .01:
+        return None
+    if left < -_TAG4_STRAIGHT_LATERAL_M or right > _TAG4_STRAIGHT_LATERAL_M:
+        return ('strafe_right_once' if offset < 0 else 'strafe_left_once', 'centering_strafes')
+    return None
+
+
+def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *, leg, approach_steps, reserved_actions):
+    """Reframe, turn, and verify a fresh corridor pose before any further straight motion."""
     turn_from_tag = getattr(robot, 'Route_TurnFromTagHeading', None)
+    strafe = getattr(robot, 'corridor_side_action', None)
+    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     live = getattr(nav.io, 'visual_motion_ready', lambda _: False)
     attempts = recovery.setdefault('reobservations', [])
-    for _ in range(2):
-        if plan['distance_verified']:
+    turns = recovery.setdefault('visual_turns', [])
+    goal = next((point for point in nav.cfg['legs']['outbound'] if point['id'] == 4), {})
+    stationary = 0
+    while True:
+        robot.check()
+        issue = _tag4_observed_clearance_problem(plan)
+        if plan.get('camera_contract_fault') or (plan['distance_verified'] and issue is None):
             break
-        error = plan.get('heading_deg')
+        moved = False
         stamp = plan.get('latest_stamp_ns')
-        left, right = plan.get('lateral_bounds_m', (0.,float('inf')))
-        if (turn_from_tag is not None and 'visual_turn' not in recovery and stamp and live(stamp)
-                and error is not None and 15. < abs(error) <= 30.
-                and plan.get('max_heading_deviation_deg', float('inf')) <= 3.
-                and right-left <= .025 and max(abs(left),abs(right)) <= .16):
-            turn = turn_from_tag(4, error, stamp, reserved_actions=reserved_actions)
-            if turn is not None:
-                recovery['visual_turn'] = turn
-        plan = _tag4_position_plan(robot, nav, profile, settings, approach_steps=approach_steps,
-                                   boundary_first='visual_turn' in recovery and not attempts)
-        attempts.append(plan)
-        if 'visual_turn' in recovery and 'after_error_deg' not in recovery['visual_turn']:
-            recovery['visual_turn']['after_error_deg'] = plan.get('heading_deg')
-        if plan.get('camera_contract_fault'):
+        if issue is not None and stamp and live(stamp):
+            error = issue['heading_error_deg']
+            bounds = issue['lateral_bounds_m']
+            side = (_tag4_recovery_strafe(plan, recovery, settings)
+                    if strafe is not None and goal.get('allow_strafe') is True else None)
+            remaining = robot.cfg['max_body_macros_per_journey'] - robot.count - reserved_actions
+            if side is not None and remaining >= (2 if side[1] == 'clearance_strafe' else 1):
+                operation, purpose = side
+                label = '左跨' if operation == 'strafe_left_once' else '右跨'
+                reason = (f'Tag 4 航向 {error:+.1f}°，先{label}一步让位，再按新位姿纠偏。'
+                          if purpose == 'clearance_strafe' else f'Tag 4 横偏仍大，先{label}回通道再重扫。')
+                _report_progress(robot, 'cmd0_corridor_scan', 3, 4, leg=leg, reason_zh=reason)
+                if live(stamp):
+                    strafe(operation)
+                    leg['completed_actions'].append(operation)
+                    record = {'action': operation, 'before_error_deg': error,
+                              'before_lateral_m': median(bounds), 'reason_zh': reason}
+                    if purpose == 'clearance_strafe':
+                        recovery[purpose] = record
+                    else:
+                        recovery.setdefault(purpose, []).append(record)
+                    moved = True
+            elif (turn_from_tag is not None
+                    and 15. < abs(error) <= 35.
+                    and (max(map(abs, bounds)) <= _TAG4_STRAIGHT_LATERAL_M or 'clearance_strafe' in recovery)
+                    and (not turns or abs(error) <= abs(turns[-1]['before_error_deg']) - 1.)):
+                turn = turn_from_tag(4, error, stamp, reserved_actions=reserved_actions)
+                if turn is not None:
+                    turns.append(turn)
+                    recovery.setdefault('visual_turn', turn)
+                    moved = True
+        if not moved and stationary >= 2:
             break
+        plan = _tag4_position_plan(robot, nav, profile, settings, approach_steps=approach_steps,
+                                   boundary_first=moved, reuse_settled_cache=moved)
+        attempts.append(plan)
+        stationary = 0 if moved else stationary + 1
+        if turns and 'after_error_deg' not in turns[-1] and plan.get('heading_deg') is not None:
+            turns[-1]['after_error_deg'] = plan['heading_deg']
+    if plan['distance_verified'] and _tag4_observed_clearance_problem(plan) is not None:
+        plan = dict(plan, distance_verified=False)
     recovery['reacquired'] = plan['distance_verified']
-    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     if (recovery['reacquired'] and rebase is not None
             and plan.get('max_heading_deviation_deg', float('inf')) <= 3.
             and abs(plan['heading_deg']) <= 15.):
@@ -769,7 +830,7 @@ def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previo
     recheck = _tag4_position_plan(robot, nav, profile, settings, approach_steps=2,
                                 boundary_first=guarded_forward or magnetic_fallback)
     leg['tag4_approach'].append(recheck)
-    if magnetic_fallback and not disrupted:
+    if not disrupted:
         disrupted = _tag4_observed_clearance_problem(recheck)
         if disrupted:
             leg['tag4_forward_disruption'] = disrupted
@@ -777,7 +838,7 @@ def _tag4_recheck_after_short_advance(robot, nav, profile, settings, leg, previo
                  tag4_distance_verified=recheck['distance_verified'])
     if disrupted:
         recheck = _tag4_recover_forward_pose(robot, nav, profile, settings, recheck, disrupted,
-                                          approach_steps=2, reserved_actions=reserved_actions)
+                                          leg=leg, approach_steps=2, reserved_actions=reserved_actions)
         split['tag4_distance_verified'] = recheck['distance_verified']
     if recheck['distance_verified']:
         split.update(remaining_steps=recheck['steps'], recheck_reason_zh='已按 Tag 4 新位姿核对最后两步。')
@@ -834,6 +895,16 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
     advisory = plan.get('partial_advice')
     if plan.get('camera_contract_fault'):
         return pose, False
+    issue = _tag4_observed_clearance_problem(plan)
+    if issue is not None:
+        leg['tag4_forward_disruption'] = issue
+        plan = _tag4_recover_forward_pose(robot, nav, profile, settings, plan, issue,
+            leg=leg, approach_steps=None, reserved_actions=reserved_actions)
+        leg['tag4_forward_trim'] = plan
+        pose = {}
+        if not plan['distance_verified']:
+            return pose, False
+        advisory = plan.get('partial_advice')
     if advisory == 'near':
         partial = plan['partial_pose']
         lower = settings['target_distance_m'] - settings['deadband_m']
@@ -1482,23 +1553,37 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
     heading = leg['departure_heading'] = {'status':'prefer_verified_tag3',
                                           'visual_error_deg':hint['heading_deg'],'correction_actions':0}
     turn_from_tag = getattr(robot,'Route_TurnFromTagHeading',None)
-    deadband = nav.cfg['post_action_heading'].get('deadband_deg',8.)
     pose = refreshed = None
-    if turn_from_tag is not None and abs(hint['heading_deg']) > deadband:
+    if turn_from_tag is not None:
         turn = turn_from_tag(3,hint['heading_deg'],hint['latest_stamp_ns'],reserved_actions=reserved_actions)
         if turn is not None:
             heading.update(correction_actions=1,visual_turn=turn)
-            nav.mag.anchor = None
-            pose, refreshed = _refresh_checkpoint_pose(robot,nav,profile,3,quick_id=True,
-                                                       reuse_settled_cache=True,boundary_first=True)
-            hint = RoutePose_TrialLateralHint(refreshed,nav.cfg,3)
+            hint = None
+            stance = robot.last_action_completed_ros_ns
+            for attempt in range(2):
+                pose, refreshed = _refresh_checkpoint_pose(robot,nav,profile,3,quick_id=True,
+                    reuse_settled_cache=attempt == 0,boundary_first=attempt == 0)
+                floor = (refreshed.get('scan') or {}).get('after_ns')
+                if type(stance) is not int or type(floor) is not int or floor < stance:
+                    continue
+                candidate = RoutePose_TrialLateralHint(refreshed,nav.cfg,3)
+                if candidate is not None and candidate['latest_stamp_ns'] > stance and live(candidate['latest_stamp_ns']):
+                    hint = candidate
+                    break
+            if hint is None:
+                # The completed turn invalidates every pre-turn position estimate.
+                pose, refreshed = {}, {'detected':False,'expected_id':3,'scan':{}}
             turn['after_error_deg'] = hint['heading_deg'] if hint is not None else None
+            heading['post_turn_pose_confirmed'] = hint is not None
     if (hint is not None and hint['latest_stamp_ns'] > robot.last_action_completed_ros_ns
             and live(hint['latest_stamp_ns'])):
         heading.update(residual_deg=hint['heading_deg'],
             magnetic_reference=rebase(3,hint['heading_deg'],hint['latest_stamp_ns']).value)
     if heading['correction_actions'] and heading.get('magnetic_reference') != 'applied':
-        robot.prepare_heading_segment(fresh=True)
+        if nav.mag.anchor is not None:
+            heading['magnetic_reference'] = 'prior_route_reference_retained'
+        else:
+            robot.prepare_heading_segment(fresh=True)
     return pose, refreshed
 
 
@@ -2274,7 +2359,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                              reason_zh=tag4_disruption['reason_zh'])
                     if tag4_disruption:
                         plan = _tag4_recover_forward_pose(robot, nav, profile, tag4_trial, plan, tag4_disruption,
-                                                         approach_steps=count, reserved_actions=pending_actions + after_leg)
+                                                         leg=leg, approach_steps=count, reserved_actions=pending_actions + after_leg)
                         if plan.get('camera_contract_fault'):
                             return set_status(CorridorTrialResult.CAMERA_UNAVAILABLE,
                                               'Tag 4 的扫码来源或相机配置异常。')
@@ -2490,7 +2575,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         if tag4_disruption:
             plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=2)
             plan = _tag4_recover_forward_pose(robot, nav, profile, tag4_trial, plan, tag4_disruption,
-                                             approach_steps=2, reserved_actions=after_leg)
+                                             leg=leg, approach_steps=2, reserved_actions=after_leg)
             if not plan['distance_verified']:
                 return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
                                   'Tag 4 到点前明显偏航，已重扫仍无法确认左跨通道，保留持物。')
