@@ -387,9 +387,9 @@ class Robot:
         if name is None:
             return None
         selection_response = bound
-        if tag_id == 3:
-            # This departure makes one small correction, then reacquires Tag 3.
-            # Compare anticipated improvement, and keep the full response bound for the motion budget.
+        if tag_id in (2, 3, 4):
+            # Each corridor correction is followed by a new observation.
+            # Use the estimated turn for selection and the full bound for the motion budget.
             initial = self.cfg.get('route_steps', {}).get('micro_turn_filter', {}).get('initial_deg', MICRO_INITIAL_DEG)
             selection_response = min(bound, initial)
             estimator = getattr(self.heading_guard, 'turn_estimator', None)
@@ -411,7 +411,7 @@ class Robot:
         checker=getattr(self.backend,'check_micro',None)
         live=getattr(nav.io,'visual_motion_ready',None)
         if (checker is None or live is None or type(observed_at_ns) is not int
-                or (tag_id == 3 and type(self.last_action_completed_ros_ns) is int
+                or (tag_id in (2, 3, 4) and type(self.last_action_completed_ros_ns) is int
                     and observed_at_ns <= self.last_action_completed_ros_ns)):
             return None
         checker()
@@ -423,7 +423,7 @@ class Robot:
         self.events.append({'visual_micro_action':name,'tag_id':tag_id,'feedback_source':'tag_only',
                             'angle_evidence':'source_nominal','physical_success':'unobserved'})
         turn = {'action':name,'before_error_deg':error}
-        if tag_id == 3:
+        if tag_id in (2, 3, 4):
             turn['selected_response_deg'] = selection_response
         return turn
 
@@ -1205,9 +1205,16 @@ class Robot:
         self.heading_guard.observation_scope=(getattr(self.backend,'session',''),getattr(self.backend,'epoch',-1))
         defer_visual_prediction=(getattr(self,'boundary_recovery_command0',False) is True
             and self.cfg.get('transfer_test',{}).get('stop_after','terminal_scan')=='terminal_scan')
+        defer_heading_at_deg=None
+        if (tag_id==1 and not metric_departure and defer_visual_prediction and self._allows_missing_magnetic()
+                and cfg['visual_micro'].get('execute')
+                and (getattr(self,'transfer_mode',False) or getattr(self,'route_command',None) in ('1','2'))):
+            from entrance_trial import TAG1_CLEARANCE_YAW_DEG
+            defer_heading_at_deg=TAG1_CLEARANCE_YAW_DEG
         controller=VisualMicro(cfg,nav.io,nav.mag,self.micro_budget(),one,self.check,self.clock,self.load_kind,
                                motion_model=self.heading_guard,defer_predicted_overshoot=defer_visual_prediction,
-                               allow_missing_magnetic=self._allows_missing_magnetic(), allow_double=pair_route_enabled)
+                               allow_missing_magnetic=self._allows_missing_magnetic(), allow_double=pair_route_enabled,
+                               defer_heading_at_deg=defer_heading_at_deg)
         forward_search=(not metric_departure and defer_visual_prediction and self._tag1_prefers_forward_search(tag_id)
                         and cfg['visual_micro'].get('execute') and cfg['visual_micro'].get('confirmed_target_id')==tag_id)
         approach={'target_id':tag_id,'completed_actions':[],'observations':[]}
@@ -1246,7 +1253,12 @@ class Robot:
                         if turns:turns[-1]['after_error_deg']=error
                         improving=(not turns or isinstance(error,(int,float))
                                    and abs(error)<=abs(turns[-1]['before_error_deg'])-cfg['visual_micro']['minimum_improvement_deg'])
-                        if improving and not result.get('heading_aligned'):
+                        defer_turn=(defer_heading_at_deg is not None and type(error) in (int,float)
+                                    and abs(error)>=defer_heading_at_deg)
+                        if defer_turn:
+                            result.update(correction_deferred=True,route_clearance_required=True,
+                                          reason_zh='Tag 1 已确认有较大偏航，交由入口先判断让位余量。')
+                        elif improving and not result.get('heading_aligned'):
                             turn=self.Route_TurnFromTagHeading(tag_id,error,result.get('scan',{}).get('latest_stamp_ns'))
                             if turn is not None:
                                 turns.append(turn)

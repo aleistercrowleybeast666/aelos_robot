@@ -187,7 +187,8 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
 
 class VisualMicro:
     def __init__(self,cfg,io,reference,budget,action,check,clock,load='single',motion_model=None,*,
-                 defer_predicted_overshoot=False,allow_missing_magnetic=False,allow_double=False):
+                 defer_predicted_overshoot=False,allow_missing_magnetic=False,allow_double=False,
+                 defer_heading_at_deg=None):
         validate(cfg)
         self.cfg,self.v,self.io=cfg,cfg['visual_micro'],io
         self.reference,self.budget,self.action,self.check,self.clock=reference,budget,action,check,clock
@@ -196,6 +197,7 @@ class VisualMicro:
         self.defer_predicted_overshoot=defer_predicted_overshoot is True
         self.allow_missing_magnetic=allow_missing_magnetic is True
         self.allow_double=allow_double is True
+        self.defer_heading_at_deg=defer_heading_at_deg
         self.unreliable_turns=set()
 
     def predicted_overshoot(self,result,reason):
@@ -468,6 +470,11 @@ class VisualMicro:
                 result.update(reason='same-target visual/magnetic observations disagree; no new correction, continue original route',status='partial');return result
             error=fused['error_deg']
         result.update(error_deg=error,x_m=obs.get('x_m'),forward_m=obs.get('forward_m'),position_note='x/y diagnostics only; no R3 lateral gain, no center/y=.60H target assumed')
+        if self.defer_heading_at_deg is not None and abs(visual_before_error)>=self.defer_heading_at_deg:
+            result.update(correction_deferred=True, route_clearance_required=True,
+                          reason='large Tag heading deferred to route clearance',
+                          reason_zh='Tag 1 已确认有较大偏航，交由入口先判断让位余量。')
+            return result
         heading_errors=(error,visual_before_error,magnetic_before_error)
         aligned=all(abs(e)<=self.v['release_deg'] for e in heading_errors)
         if not aligned:

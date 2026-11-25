@@ -440,18 +440,29 @@ def RoutePose_PartialCheckpointGeometry(rows, nav_cfg, tag_id):
 
 def RoutePose_TrialLateralHint(checkpoint, nav_cfg, tag_id):
     """Read the body lateral interval for a one-stride trial adjustment."""
+    evidence = _trial_lateral_evidence(checkpoint, nav_cfg, tag_id, yaw_limit=12. if tag_id == 2 else 20.)
+    if evidence is None:
+        return None
+    return {'tag_id': tag_id, **{key: evidence[key] for key in (
+        'lateral_bounds_m', 'distance_m', 'heading_deg', 'latest_stamp_ns')}}
+
+
+def RoutePose_Tag3HeadingRecovery(checkpoint, nav_cfg):
+    """Keep a wider, coherent Tag 3 pose only for one clearance recovery."""
+    return _trial_lateral_evidence(checkpoint, nav_cfg, 3, yaw_limit=30.)
+
+
+def _trial_lateral_evidence(checkpoint, nav_cfg, tag_id, *, yaw_limit):
     evidence, problem = _trial_ground_depth(checkpoint, nav_cfg, tag_id)
     if problem:
         return None
     left, right = evidence['lateral_bounds_m']
     near, far = evidence['distance_bounds_m']
-    yaw_limit = 12. if tag_id==2 else 20.
     if (right-left>.025 or far-near>.025 or not _within((near,far),(.08,.40))
             or evidence['max_abs_yaw_deg']>yaw_limit or evidence['max_heading_deviation_deg']>3.
             or evidence['projection_bounds'][0]<=0):
         return None
-    return {'tag_id':tag_id,'lateral_bounds_m':(left,right),'distance_m':evidence['distance_m'],
-            'heading_deg':evidence['heading_deg'],'latest_stamp_ns':evidence['latest_stamp_ns']}
+    return evidence
 
 
 def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_counts, two_step_distance_m):
