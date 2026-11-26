@@ -17,7 +17,8 @@ from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_LoadRouteSteps, 
 from corridor_trial import (CorridorTrial_CheckLateralHeading, CorridorTrial_DefaultChain,
                             CorridorTrial_GroupStrafes, CorridorTrial_HeadingSnapshot,
                             CorridorTrial_MaxBodyMacros, CorridorTrial_MirroredPickupStrafes, CorridorTrial_Run)
-from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
+from checkpoint_alignment import Checkpoint_TrackEntryHeading
+from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, CheckpointScanResult
 from entrance_trial import EntranceTrial_IsEntryAccepted, EntranceTrial_PlanForward, EntranceTrial_Run
 from mission_v5 import MissionRobot, PAIR_MOTION_OPS, VISUAL_PICKUP_OPS, defaults, validate_chains
 from micro_trial import MEDIUM_OPS, OPS as MICRO_OPS
@@ -88,6 +89,80 @@ def _pickup_retreat_groups(backend, remaining, *, allow_native_six=True):
     return groups
 
 
+def _pickup_turns_since(robot, marker):
+    actions = []
+    for event in reversed(robot.events):
+        if event is marker:
+            break
+        action = event.get('magnetic_action') or event.get('visual_micro_action')
+        if action:
+            actions.append(action)
+    return list(reversed(actions))
+
+
+def _pickup_settled_heading(robot, heading):
+    """A completed turn invalidates its pre-turn sample, even when feedback drops out."""
+    last = (heading.get('correction_steps') or [heading])[-1]
+    if last.get('correction_actions') and ('after_error_deg' not in last or not last.get('verification')):
+        return None
+    settled = CorridorTrial_HeadingSnapshot(heading,after=True,load=robot.load_kind)
+    if settled and last.get('correction_actions'):
+        before = CorridorTrial_HeadingSnapshot(last,after=False,load=robot.load_kind)
+        if not before or settled[2]!=before[2] or settled[1]<=before[1]:
+            return None
+    completed = getattr(robot,'last_action_completed_monotonic',None)
+    if settled and type(completed) in (int,float) and settled[1] <= completed:
+        return None
+    return settled
+
+
+def _pickup_recover_magnetic_residual(robot, boundary, boundary_name='pickup_retreat_complete'):
+    marker = robot.events[-1] if robot.events else None
+    robot.corridor_recover_heading(boundary=boundary_name)
+    report = robot.last_heading_report or {}
+    settled = _pickup_settled_heading(robot,report)
+    boundary['correction_actions'] += report.get('correction_actions',0)
+    boundary['heading_status'] = report.get('status','heading_unavailable')
+    if settled:
+        boundary['residual_deg'] = settled[0]
+    elif report.get('correction_actions') or _pickup_turns_since(robot,marker):
+        boundary['residual_deg'] = None
+
+
+def _pickup_use_retreat_tag(robot, nav, boundary, view, reserved):
+    yaw, stamp = view['heading_deg'], view['latest_stamp_ns']
+    deadband = nav.cfg['post_action_heading']['deadband_deg']
+    if stamp <= robot.last_action_completed_ros_ns or not VisualCamera_IsFresh(nav.io.visual_motion_ready,stamp):
+        # The guard yielded without moving for this observation. A camera
+        # restart or expired frame must give that decision back to the magnet.
+        before = boundary['residual_deg']
+        if before is not None and abs(before)>deadband:
+            _pickup_recover_magnetic_residual(robot,boundary)
+        return
+    applied = robot.Route_RebaseTagHeading(1,yaw,stamp).value
+    boundary.update(heading_source='tag1', heading_before_correction_deg=yaw, residual_deg=yaw,
+                    heading_status='tag1_verified', tag1_reference=applied)
+    if abs(yaw)<=deadband:
+        return
+    if applied=='applied':
+        _pickup_recover_magnetic_residual(robot,boundary)
+        return
+    turn = robot.Route_TurnFromTagHeading(1,yaw,stamp,reserved_actions=reserved)
+    if not turn:
+        return
+    boundary['correction_actions'] += 1
+    boundary['residual_deg'] = None
+    fresh = {'expected_id':1,'detected':False,'observation_windows':0}
+    status,_ = Checkpoint_Observe(robot,nav,fresh,lambda:None,single_window=True,quick_id=True)
+    if status is CheckpointScanResult.CHECKPOINT_DETECTED:
+        after = RoutePose_TrialLateralHint(fresh,nav.cfg,1)
+        if (after and after['latest_stamp_ns'] > max(stamp,robot.last_action_completed_ros_ns)
+                and VisualCamera_IsFresh(nav.io.visual_motion_ready,after['latest_stamp_ns'])
+                and max(map(abs,after['lateral_bounds_m'])) <= .10):
+            boundary['residual_deg'] = after['heading_deg']
+            boundary['tag1_reference'] = robot.Route_RebaseTagHeading(1,after['heading_deg'],after['latest_stamp_ns']).value
+
+
 def _run_startup_retreat(robot, nav, pending, report):
     """Complete the shared first-pickup retreat, then realign before the first strafe."""
     retreat_count = sum(1 for _ in takewhile(lambda op: op == 'cmd0_carry_backward2', pending))
@@ -121,32 +196,57 @@ def _run_startup_retreat(robot, nav, pending, report):
         boundary['completed_actions'].append(operation)
         report['completed_actions'].append(operation)
 
-    robot.corridor_recover_heading(boundary='pickup_retreat_complete')
+    read_tag = getattr(robot,'Pickup_ReadRetreatHeading',None)
+    event_start = robot.events[-1] if robot.events else None
+    anchor = getattr(getattr(nav,'mag',None),'anchor',None) or {}
+    if read_tag is not None:
+        # The guard reads the settled camera buffer during magnetic sampling,
+        # before a turn can invalidate either observation.
+        robot.corridor_recover_heading(1,boundary='pickup_retreat_complete')
+    else:
+        robot.corridor_recover_heading(boundary='pickup_retreat_complete')
     heading = robot.last_heading_report or {}
     measured = CorridorTrial_HeadingSnapshot(heading, after=False, load=robot.load_kind)
-    settled = CorridorTrial_HeadingSnapshot(heading, after=True, load=robot.load_kind)
+    settled = _pickup_settled_heading(robot,heading)
     boundary.update(heading_status=heading.get('status', 'heading_unavailable'),
+                    heading_source=('pickup_approach' if anchor.get('pickup_approach_heading')
+                                    else 'loaded_reference') if measured else 'unavailable',
                     heading_before_correction_deg=measured[0] if measured else None,
                     residual_deg=settled[0] if settled else None,
                     correction_actions=heading.get('correction_actions', 0))
+    view = heading.get('entry_followup') or {}
+    first_turns = _pickup_turns_since(robot,event_start)
+    if not measured and read_tag is not None and not boundary['correction_actions'] and not first_turns:
+        view = read_tag(nav) or {}
+    if view.get('fresh_tag') == 1:
+        _pickup_use_retreat_tag(robot,nav,boundary,view,len(pending))
     severe_heading = max(25., 3 * nav.cfg['post_action_heading']['deadband_deg'])
-    last_verified = settled if settled is not None else measured
-    if last_verified is not None and abs(last_verified[0]) >= severe_heading:
-        boundary['residual_deg'] = last_verified[0]
+    if boundary['residual_deg'] is not None and abs(boundary['residual_deg']) >= severe_heading:
         _recover_startup_side_heading(robot, nav, boundary, severe_heading)
+    boundary['heading_actions'] = _pickup_turns_since(robot,event_start)
+    if boundary['heading_actions']:
+        boundary['correction_actions'] = len(boundary['heading_actions'])
+    if boundary['correction_actions'] and boundary['residual_deg'] is None:
+        boundary['heading_status'] = 'post_turn_unverified'
+    if boundary['residual_deg'] is None and (boundary['correction_actions']
+            or getattr(robot.backend,'is_simulation',None) is False):
+        boundary['next_group_max'] = 2
     return boundary
 
 
-def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
-    """Recover once more from a verified large residual before taking the first side stride."""
-    robot.corridor_recover_heading(boundary='pickup_retreat_complete')
+def _recover_startup_side_heading(robot, nav, boundary, severe_heading, *, side_group=False):
+    """Recover once more from a verified large residual before taking another side stride."""
+    event_start = robot.events[-1] if robot.events else None
+    robot.corridor_recover_heading(boundary='pickup_side_boundary' if side_group else 'pickup_retreat_complete')
     heading = robot.last_heading_report or {}
-    residual = CorridorTrial_HeadingSnapshot(heading, after=True, load=robot.load_kind)
+    residual = _pickup_settled_heading(robot,heading)
     check = {'heading_status': heading.get('status','heading_unavailable'),
              'residual_deg': residual[0] if residual else None,
-             'correction_actions': heading.get('correction_actions', 0)}
+             'correction_actions': max(heading.get('correction_actions', 0),len(_pickup_turns_since(robot,event_start)))}
     boundary['heading_recheck'] = check
     boundary['correction_actions'] += check['correction_actions']
+    if check['correction_actions'] and residual is None:
+        boundary['residual_deg'] = None
     if residual is not None:
         boundary['residual_deg'] = residual[0]
         if abs(residual[0]) < severe_heading:
@@ -170,8 +270,70 @@ def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
     if robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True:
         boundary.update(side_start_estimated=True, reason_zh='侧跨前已纠偏，余差留给下一组侧跨和 Tag 1。')
         return
+    residual = boundary.get('residual_deg')
+    detail = f"航向余差 {residual:+.1f}°" if residual is not None else '转后航向待测'
     boundary.update(side_start_authorized=False,
-        reason_zh=f"侧跨前航向余差 {boundary['residual_deg']:+.1f}°，再次纠偏和扫码后仍未确认下一跨方向。")
+        reason_zh=f"侧跨前{detail}，再次纠偏和扫码后仍未确认下一跨方向。")
+
+
+def _pickup_side_tag1(robot, nav):
+    cached = getattr(robot, 'boundary_visual_observation', None)
+    view = None
+    if cached is not None:
+        sample = cached('pickup_side_boundary', expected_tag=1)
+        if sample:
+            view = Checkpoint_FromBoundary(robot, nav, 1, report=sample)
+    if view is None:
+        view = {'expected_id':1, 'detected':False, 'observation_windows':0}
+        observed, _ = Checkpoint_Observe(robot, nav, view, lambda: None,
+            single_window=True, quick_id=True, reuse_settled_cache=True)
+        if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
+            return None
+    hint = RoutePose_TrialLateralHint(view, nav.cfg, 1)
+    if (hint and .10 <= hint['distance_m'] <= .35 and max(map(abs,hint['lateral_bounds_m'])) <= .12
+            and VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
+        return hint
+    return None
+
+
+def _pickup_side_restore_heading(robot, nav, saved_anchor, check, remaining):
+    """Try one Tag measurement or restore the same loaded compass reference at this stance."""
+    turn = getattr(robot, 'Route_TurnFromTagHeading', None)
+    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+    camera = callable(getattr(nav.io, 'visual_motion_ready', None))
+    hint = _pickup_side_tag1(robot, nav) if camera else None
+    if hint is not None:
+        observed = check['tag1_heading'] = {'before_deg':hint['heading_deg']}
+        deadband = nav.cfg['post_action_heading']['deadband_deg']
+        if turn and abs(hint['heading_deg']) > deadband:
+            action = turn(1, hint['heading_deg'], hint['latest_stamp_ns'], reserved_actions=remaining)
+            if action and action.get('action'):
+                check['correction_actions'] += 1
+                check['residual_deg'] = None
+                observed['turn'] = action['action']
+                old_stamp = hint['latest_stamp_ns']
+                hint = _pickup_side_tag1(robot, nav)
+                if hint and hint['latest_stamp_ns'] <= max(old_stamp, robot.last_action_completed_ros_ns):
+                    hint = None
+        if hint is not None:
+            observed['residual_deg'] = hint['heading_deg']
+            check.update(residual_deg=hint['heading_deg'], heading_status='pickup_side_tag1')
+            if rebase is not None:
+                observed['magnetic_reference'] = rebase(1,hint['heading_deg'],hint['latest_stamp_ns']).value
+                if ('turn' not in observed and observed['magnetic_reference'] == 'applied'
+                        and abs(hint['heading_deg']) > deadband):
+                    _pickup_recover_magnetic_residual(robot, check, 'pickup_side_boundary')
+            return
+    if (saved_anchor and robot.magnetic_route_only and
+            Checkpoint_TrackEntryHeading(robot, nav, saved_anchor).value == 'applied'):
+        robot.corridor_recover_heading(boundary='pickup_side_boundary')
+        recovered = robot.last_heading_report or {}
+        estimate = _pickup_settled_heading(robot, recovered)
+        check['correction_actions'] += recovered.get('correction_actions', 0)
+        if estimate:
+            check.update(residual_deg=estimate[0], heading_status='pickup_side_magnetic_restored')
+            return
+    check['next_group_max'] = 2
 
 
 def _run_pickup_exit(robot, nav, *, actions=None):
@@ -189,6 +351,9 @@ def _run_pickup_exit(robot, nav, *, actions=None):
     pending = deque(actions)
     deadband = nav.cfg['post_action_heading']['deadband_deg']
     startup = command in ('1', '2')
+    live_pickup = (startup and getattr(robot, 'deliveries', 0) == 0 and getattr(nav, 'io', None) is not None
+                   and nav.cfg['post_action_heading'].get('execute') and not getattr(robot.backend,'is_simulation',False))
+    saved_anchor = dict(getattr(getattr(nav, 'mag', None), 'anchor', None) or {}) if live_pickup else {}
     previous = _run_startup_retreat(robot, nav, pending, report) if startup else {}
     if previous.get('side_start_authorized') is False:
         report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
@@ -203,12 +368,16 @@ def _run_pickup_exit(robot, nav, *, actions=None):
         action = pending.popleft()
         residual, drift = previous.get('residual_deg'), previous.get('drift_deg')
         side_count = {'cmd0_strafe_left3':3,'cmd0_strafe_left4':4}.get(action)
-        # Keep the final three startup strides together through ordinary residuals.
+        # A small accepted residual with no worsening trend does not need an extra restart.
         limit = 2*deadband if startup and side_count==3 else deadband
-        if (side_count is not None and residual is not None
+        if (live_pickup and previous.get('heading_status') == 'corridor_heading_followup'
+                and previous.get('correction_actions') == 0
+                and (drift is None or residual is not None and drift*residual <= 0)):
+            limit = max(limit,min(1.5*deadband,12.))
+        if (side_count is not None and (previous.get('next_group_max') == 2 or residual is not None
                 and (abs(residual) > limit
-                     or (previous['correction_actions'] == 0 and drift is not None
-                         and abs(drift) > limit and drift * residual > 0))):
+                     or (previous.get('correction_actions') == 0 and drift is not None
+                         and abs(drift) > limit and drift * residual > 0)))):
             previous['next_group_split'] = {'action': action, 'groups': [2,side_count-2]}
             pending.appendleft('cmd0_strafe_left2' if side_count==4 else 'strafe_left_once')
             action = 'cmd0_strafe_left2'
@@ -220,23 +389,50 @@ def _run_pickup_exit(robot, nav, *, actions=None):
             report['completed_actions'].append(action)
             previous = {}
             continue
+        check_startup = live_pickup and 'left' in action
+        if check_startup and not robot.magnetic_route_only and getattr(getattr(nav,'mag',None),'anchor',None):
+            saved_anchor = dict(nav.mag.anchor)
         before = CorridorTrial_HeadingSnapshot(robot.last_heading_report or {}, after=True, load=robot.load_kind)
         robot.corridor_side_action(action)
         report['completed_actions'].append(action)
+        event_start = robot.events[-1] if robot.events else None
         CorridorTrial_CheckLateralHeading(robot, nav, action, before, robot.last_heading_report or {},
-            report, len(pending), expected_tag=None if pending else 1, allow_clearance_translation=False)
+            report, len(pending), expected_tag=None if pending else 1, allow_clearance_translation=False,
+            reuse_side_sample=bool(check_startup))
         previous = report['lateral_heading_checks'][-1]
+        if check_startup:
+            # A receipt can precede a failed post-turn sample or a deactivated heading guard.
+            turns = _pickup_turns_since(robot,event_start)
+            if turns or previous['correction_actions']:
+                heading = robot.last_heading_report or {}
+                settled = _pickup_settled_heading(robot,heading) if heading.get('correction_actions') else None
+                previous.update(residual_deg=settled[0] if settled else None,
+                                correction_actions=max(len(turns),previous['correction_actions']))
+        if check_startup and pending:
+            left = previous.get('residual_deg')
+            drift = previous.get('drift_deg')
+            if (left is None or (not previous['correction_actions'] and abs(left) > deadband
+                                 and drift is not None and abs(drift) >= 3. and left*drift > 0)):
+                _pickup_side_restore_heading(robot, nav, saved_anchor, previous, len(pending))
         if startup and pending:
             residual = previous.get('residual_deg')
-            if residual is None:
+            if residual is None and not previous['correction_actions']:
                 residual = previous.get('error_after_strafe_deg')
             severe_heading = max(25., 3 * deadband)
             if residual is not None and abs(residual) >= severe_heading:
                 previous['residual_deg'] = residual
-                _recover_startup_side_heading(robot, nav, previous, severe_heading)
-                if previous.get('side_start_authorized') is False:
-                    report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
-                    return report
+                _recover_startup_side_heading(robot, nav, previous, severe_heading, side_group=check_startup)
+        if check_startup:
+            previous['heading_actions'] = _pickup_turns_since(robot, event_start)
+            previous['correction_actions'] = max(previous['correction_actions'],len(previous['heading_actions']))
+            previous['heading_check_pending'] = False
+            if previous['residual_deg'] is None:
+                previous['heading_feedback'] = 'turn_heading_unverified' if previous['correction_actions'] else 'unavailable'
+            else:
+                previous['heading_feedback'] = 'turn_completed' if previous['correction_actions'] else 'measured_only'
+        if previous.get('side_start_authorized') is False:
+            report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
+            return report
     return report
 
 

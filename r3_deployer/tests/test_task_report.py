@@ -300,6 +300,26 @@ class TaskReportTests(unittest.TestCase):
         self.assertIn("连续后退 4 步 · 纠偏前 +16.00° · 余差 +5.00°",
                       task_report.TaskReport_Diagnostics(result))
 
+    def test_pickup_shows_actual_turns_and_missing_heading_for_each_group(self):
+        result = {"events": [{"pickup_exit": {
+            "retreat": {"planned_steps": 8, "continuous": True, "completed_actions": ["cmd1_carry_backward8"],
+                        "heading_before_correction_deg": 10., "residual_deg": 10., "correction_actions": 0},
+            "lateral_heading_checks": [
+                {"error_after_strafe_deg": 10., "heading_actions": ["double_single_micro_left"],
+                 "correction_actions": 1, "residual_deg": -2.},
+                {"error_after_strafe_deg": None, "residual_deg": None, "correction_actions": 0},
+                {"error_after_strafe_deg": -11., "residual_deg": 1., "correction_actions": 1},
+                {"error_after_strafe_deg": 15., "residual_deg": 15., "correction_actions": 0,
+                 "heading_check_pending": True},
+            ],
+        }}]}
+        lines = task_report.TaskReport_Diagnostics(result)
+        self.assertIn("连续后退 8 步 · 纠偏前 +10.00° · 未发转向 · 余差 +10.00°", lines)
+        self.assertIn("中转区左跨第 1 组 · 跨后偏航 +10.00° · 已执行小左转 · 余差 -2.00°", lines)
+        self.assertIn("中转区左跨第 2 组 · 未发转向 · 本组结束时航向未确认", lines)
+        self.assertIn("中转区左跨第 3 组 · 跨后偏航 -11.00° · 已执行 1 次转向 · 余差 +1.00°", lines)
+        self.assertIn("中转区左跨第 4 组 · 跨后偏航 +15.00° · 本次航向检查未完成 · 本组结束时航向未确认", lines)
+
     def test_tag5_report_displays_ground_pose_passage_and_completed_trim(self):
         result = {"ok": False, "events": [{"corridor_trial": {"legs": [{
             "from_tag": 4, "expected_id": 5, "tag5_midpoint": {

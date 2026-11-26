@@ -427,7 +427,7 @@ def _tag2_can_finish_three(robot, nav, leg):
 
 def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, pending_actions,
                                      expected_tag=None, *, allow_turn=True, allow_clearance_translation=True,
-                                     small_strafe_follows=False, tag3_probe_handled=False):
+                                     small_strafe_follows=False, tag3_probe_handled=False, reuse_side_sample=False):
     """At a completed lateral boundary, check drift and recover heading where allowed."""
     load = robot.load_kind
     initial = CorridorTrial_HeadingSnapshot(report, after=False, load=load)
@@ -437,6 +437,8 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
     check = {'action': action, 'error_before_deg': before[0] if before else None,
              'error_after_strafe_deg': initial[0] if initial else None, 'drift_deg': drift,
              'residual_deg': initial[0] if initial else None, 'correction_actions': 0}
+    if reuse_side_sample:
+        check['heading_check_pending'] = True
     leg.setdefault('lateral_heading_checks', []).append(check)
     if leg.get('tag3_side_turn_deferred'):
         check['compensation_status'] = 'tag3_recent_turn_would_worsen_residual'
@@ -520,9 +522,16 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
         return CorridorLateralHeadingResult.PROCEED
     recover_heading = (getattr(robot, 'corridor_recover_tag2_heading', robot.corridor_recover_heading)
                        if tag2_to_tag3 else robot.corridor_recover_heading)
-    recover_heading(expected_tag)
+    if reuse_side_sample:
+        recover_heading(expected_tag, boundary='pickup_side_boundary', reuse_side_sample=initial is not None)
+    else:
+        recover_heading(expected_tag)
     recovery = robot.last_heading_report or {}
     settled = CorridorTrial_HeadingSnapshot(recovery, after=True, load=load)
+    if reuse_side_sample and recovery.get('correction_actions'):
+        last = (recovery.get('correction_steps') or [recovery])[-1]
+        if last.get('correction_actions') and 'after_error_deg' not in last:
+            settled = None
     check.update(residual_deg=settled[0] if settled else None,
                  correction_actions=recovery.get('correction_actions', 0),
                  heading_status=recovery.get('status'))

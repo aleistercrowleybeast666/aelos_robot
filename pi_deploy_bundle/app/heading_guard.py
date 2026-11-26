@@ -9,7 +9,8 @@ from nav_observation import MAGNETIC_INSUFFICIENT_SAMPLES, MagneticReference, wr
 
 CARRY_HEADING_ACTIONS = frozenset(('carry_forward','carry_forward2','carry_forward4',
                                   'carry_forward7','carry_forward9',*CMD0_FORWARD_ACTIONS.values()))
-CORRIDOR_HEADING_ACTIONS = frozenset(('corridor_departure', 'corridor_side_boundary', 'pickup_retreat_complete'))
+PICKUP_HEADING_ACTIONS = frozenset(('pickup_retreat_complete','pickup_side_boundary'))
+CORRIDOR_HEADING_ACTIONS = frozenset(('corridor_departure','corridor_side_boundary')) | PICKUP_HEADING_ACTIONS
 _ENTRY_STRAIGHT_LIMIT_DEG = 15.
 _STATIONARY_HEADING_SPREAD_DEG = 3.
 _CORRIDOR_MEDIUM_LEFT_TRIGGER_DEG = 15.
@@ -1087,6 +1088,10 @@ class HeadingGuard:
                 raise
             reports.append(report)
             if report.get('correction_actions',0)!=1:break
+            if (report.get('motion_prediction') or {}).get('pickup_retreat_trial'):
+                # The actual post-turn reading is available. Do not repeat or
+                # reverse this marginal turn in the same pickup stance.
+                break
             if tag2_clearance_on_worsening:
                 handoff=self._tag2_clearance_handoff(reports,load)
                 if handoff is not None:
@@ -1321,6 +1326,8 @@ class HeadingGuard:
                 nominal_delta_deg=d,max_step_deg=self.c['max_step_deg'],
                 bootstrap_upper_deg=micro_trial.response_limit(self.c) if micro_trial.response_limit(self.c)>8 else abs(d),
                 adaptive_feedback=micro_trial.adaptive(self.c),bounded_crossing_feedback=recovery,
+                pickup_retreat_trial=(name in PICKUP_HEADING_ACTIONS and route_feedback and residual_driven
+                    and (bool(anchor.get('pickup_approach_heading')) or (anchor.get('tag_departure') or {}).get('tag_id')==1)),
                 stop_on_possible_overshoot=self.c.get('stop_on_possible_overshoot',False))
                 for n,d in gains.items() if excluded_turns is None or n not in excluded_turns}
             # Medium corrections use stationary magnetic feedback at a configured carry

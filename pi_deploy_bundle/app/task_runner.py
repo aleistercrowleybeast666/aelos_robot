@@ -438,22 +438,46 @@ class Robot:
         self.check_magnetic_before_motion(configured=True)
         self._complete_body_action(name, self.cfg['request_timeout_s'])
 
+    def Pickup_ReadRetreatHeading(self, nav):
+        """Read only settled Tag 1 frames from the newly completed retreat stance."""
+        from route_pose import RoutePose_TrialLateralHint
+        if not callable(getattr(getattr(nav,'io',None),'boundary_visual_snapshot',None)):
+            return None
+        report = self.boundary_visual_observation('pickup_retreat_complete', expected_tag=1)
+        if not report:
+            return None
+        try:
+            checkpoint = VisualCamera_Read(lambda _:Checkpoint_FromBoundary(self,nav,1,report=report),self.check)
+        except VisualCameraUnavailable:
+            self.check()
+            return None
+        hint = RoutePose_TrialLateralHint(checkpoint,nav.cfg,1) if checkpoint else None
+        if hint is None or max(map(abs,hint['lateral_bounds_m'])) > .10:
+            return None
+        return {'next_action':'align_pickup_retreat', 'fresh_tag':1,
+                'heading_deg':hint['heading_deg'], 'latest_stamp_ns':hint['latest_stamp_ns'],
+                'reason_zh':'退步已完成，采用同站姿 Tag 1 的航向校准。'}
+
     def corridor_recover_tag2_heading(self,expected_tag=None):
         self.corridor_recover_heading(expected_tag,tag2_clearance_on_worsening=True)
 
     def corridor_recover_heading(self,expected_tag=None,*,boundary='corridor_side_boundary',
-                                 tag2_clearance_on_worsening=False, checked_visual_stance=None):
+                                 tag2_clearance_on_worsening=False, checked_visual_stance=None, reuse_side_sample=False):
         """Sample after the last completed motion and correct toward the saved target."""
         self._route_end_expected_tag=expected_tag
         monitored = getattr(self,'last_heading_report',None) or {}
         self.last_heading_report=None
         try:
             options={'tag2_clearance_on_worsening':True} if tag2_clearance_on_worsening else {}
-            if expected_tag == 4 and type(checked_visual_stance) is int:
+            tag4_stance = expected_tag == 4 and type(checked_visual_stance) is int
+            if tag4_stance:
                 options['checked_visual_stance'] = checked_visual_stance
-                if (checked_visual_stance == self.last_action_completed_ros_ns and monitored.get('action') == boundary
-                        and monitored.get('correction_actions') == 0):
-                    options['completed_observation'] = monitored.get('sample')
+            pickup_sample = (reuse_side_sample and boundary == 'pickup_side_boundary'
+                             and monitored.get('action') == 'corridor_side_boundary')
+            tag4_sample = (tag4_stance and checked_visual_stance == self.last_action_completed_ros_ns
+                           and monitored.get('action') == boundary)
+            if (pickup_sample or tag4_sample) and monitored.get('correction_actions') == 0:
+                options['completed_observation'] = monitored.get('sample')
             self.monitor_heading(boundary,**options)
         except Exception:
             self.record_fall_diagnostic(boundary)
@@ -763,7 +787,9 @@ class Robot:
                         name,entry_context[0],nav,trial)
             else:
                 expected_tag=getattr(self,'_route_end_expected_tag',None)
-                if expected_tag is not None:
+                if expected_tag==1 and name=='pickup_retreat_complete' and allow_correction:
+                    sample_options['prefer_visual_followup']=lambda:self.Pickup_ReadRetreatHeading(nav)
+                elif expected_tag is not None:
                     sample_options['entry_followup']=lambda:{'next_action':'scan_checkpoint',
                         'expected_tag':expected_tag,'position_confirmed':False}
                     tag4_settings=self.cfg.get('route_steps',{}).get('tag4_forward_trial') or {}

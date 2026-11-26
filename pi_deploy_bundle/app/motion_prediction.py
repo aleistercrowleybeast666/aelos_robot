@@ -125,6 +125,7 @@ def select_turn(*, error_deg, captured_at_s, now_s, candidates, estimator,
             rejected[name]='possible_overshoot';continue
         adaptive_interval_verified=False
         worst_residual=None
+        pickup_trial=False
         # Only observed, opt-in adaptive intervals may reach/cross the target.
         # A nominal/bootstrap bound is not enough evidence to relax this gate.
         if c.get('bounded_crossing_feedback') is True:
@@ -132,7 +133,14 @@ def select_turn(*, error_deg, captured_at_s, now_s, candidates, estimator,
                 rejected[name]='invalid_bounded_interval';continue
             worst_residual=max(abs(abs(error)-lower),abs(abs(error)-upper))
             if worst_residual>abs(error)-min_improvement_deg:
-                rejected[name]='insufficient_worst_case_improvement';continue
+                # At pickup we have a fixed approach target and can measure the
+                # outcome before the first lateral gait. A nominally beneficial
+                # small turn may tie at the endpoint of its prediction interval.
+                pickup_trial=(kind=='micro' and c.get('pickup_retreat_trial') is True
+                              and abs(error+delta)<=preferred_residual_band_deg
+                              and worst_residual<=abs(error)+1e-9)
+                if not pickup_trial:
+                    rejected[name]='insufficient_worst_case_improvement';continue
             adaptive_interval_verified=original_prediction is None
         elif (c.get('adaptive_feedback') is True and estimate is not None
               and estimate.get('source') not in ('adaptive_micro_prior','adaptive_medium_prior')):
@@ -159,6 +167,8 @@ def select_turn(*, error_deg, captured_at_s, now_s, candidates, estimator,
         if original_prediction is not None:
             candidate.update(evidence='adaptive_micro_nominal_retry',sample_count=0,nominal_retry=True,
                              original_prediction=original_prediction)
+        if pickup_trial:
+            candidate['pickup_retreat_trial']=True
         accepted.append(candidate)
     if not accepted:return dict(status='no_safe_candidate',action=None,rejected=rejected)
     def score(item):

@@ -484,6 +484,23 @@ def _tag_heading_reference_notes(events):
             for tag_id in sorted(latest)]
 
 
+def _pickup_turn_note(check):
+    if check.get("heading_check_pending"):
+        return "本次航向检查未完成"
+    actions = check.get("heading_actions")
+    if isinstance(actions, list) and actions:
+        names = [TaskReport_Message(name.removeprefix("double_")) for name in actions if isinstance(name, str)]
+        if names:
+            return "已执行" + "、".join(names)
+    count = check.get("correction_actions")
+    if type(count) is int:
+        if count > 0:
+            return f"已执行 {count} 次转向"
+        if count == 0:
+            return "未发转向"
+    return None
+
+
 def _route_notes(result):
     events = [_as_dict(event) for event in _receipt_events(result)]
     corridor = _as_dict(result.get("corridor_trial"))
@@ -514,10 +531,22 @@ def _route_notes(result):
             motion += "（" + "＋".join(str(group) for group in groups) + "）"
         before = _angle_label("纠偏前",retreat.get("heading_before_correction_deg"))
         after = _angle_label("余差",retreat.get("residual_deg"))
-        details = (motion, before, after or "未取得可用航向")
+        details = (motion, before, _pickup_turn_note(retreat), after or "未取得可用航向")
         lines.append(" · ".join(part for part in details if part))
     if retreat.get("native_six_unavailable") is True:
         lines.append("MCU 未注册连续后退六步 · 已改用两步动作分组后退")
+    for group, item in enumerate(pickup_exit.get("lateral_heading_checks") or (), start=1):
+        check = _as_dict(item)
+        if not check:
+            continue
+        measured = _angle_label("跨后偏航", check.get("error_after_strafe_deg"))
+        residual = _angle_label("余差", check.get("residual_deg")) if not check.get("heading_check_pending") else None
+        updated = check.get("residual_deg") != check.get("error_after_strafe_deg")
+        parts = (f"中转区左跨第 {group} 组", measured, _pickup_turn_note(check),
+                 residual if updated or check.get("correction_actions") else None)
+        if not residual:
+            parts += ("本组结束时航向未确认",)
+        lines.append(" · ".join(part for part in parts if part))
     entry_check = next((_as_dict(event["pickup_exit_entry"]) for event in reversed(events)
                         if "pickup_exit_entry" in event), {})
     if entry_check.get("confirmed_for_forward") is True:
