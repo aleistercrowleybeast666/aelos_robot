@@ -38,7 +38,7 @@
       {"op": "strafe_right_once", "repeat": 5}
     ],
     "tag3_to_tag4": [
-      {"op": "strafe_right_once", "repeat": 4, "nominal_last_small": true, "left_bias_stride_m": 0.08},
+      {"op": "strafe_right_once", "repeat": 4, "nominal_last_small": false, "left_bias_stride_m": 0.08},
       {"op": "carry_forward_group", "steps": 8},
       {"op": "carry_forward_group", "steps": 4}
     ],
@@ -57,24 +57,28 @@
     "base_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
     "tag5": [],
     "tag6": [
-      {"op": "free_forward", "repeat": 2}
+      {"op": "empty_forward2", "repeat": 4}
     ],
     "tag7": [
       {"op": "empty_strafe_left", "repeat": 6},
-      {"op": "free_forward", "repeat": 2}
+      {"op": "empty_forward2", "repeat": 4}
     ],
     "tag1": [
       {"op": "empty_strafe_right", "repeat": 9}
     ],
     "transfer_approach": [
-      {"op": "empty_forward2"},
-      {"op": "free_forward", "repeat": 2}
+      {"op": "empty_forward2", "repeat": 4}
     ],
     "transfer_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
     "station_side": [
-      {"op": "empty_strafe_left", "repeat": 4},
+      {"op": "empty_strafe_right", "repeat": 4},
       {"op": "empty_forward2", "repeat": 2}
     ]
+  },
+  "command2_handoff_reference": {
+    "source_report": "20261127_002342_889868_cmdscan_7c93f5a0.json",
+    "lateral_m": 0.48555, "depth_m": 0.07559, "heading_deg": -10.77,
+    "lateral_tolerance_m": 0.055, "depth_tolerance_m": 0.045, "heading_tolerance_deg": 12
   },
   "wall_pickup_advance_steps": 4,
   "wall_pickup_side_limit": 2,

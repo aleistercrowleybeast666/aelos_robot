@@ -9,6 +9,16 @@ from r3_deployer.control_api import RobotControlUncertainError
 
 
 class TaskReportTests(unittest.TestCase):
+    def test_four_large_baseline_and_taught_station_report_only_confirmed_observations(self):
+        side = {"status":"field_baseline", "nominal_count":4, "count":4, "large_count":4,
+                "operation":"strafe_right_once", "trial_lateral_hint":{"tag_id":2}}
+        result = {"corridor_trial":{"legs":[{"from_tag":3, "expected_id":4, "side_plan":side}]},
+                  "return_trial":{"handoff_station":{"status":"taught_position"}}}
+        lines = task_report.TaskReport_Diagnostics(result)
+        self.assertIn("Tag 3 → 4 · 按基线路线右大跨 4 步", lines)
+        self.assertIn("返程接驳站 · Tag 1 与示教站位相符，已结束进近", lines)
+        self.assertFalse(any("减少一步" in line for line in lines))
+
     def test_reverse_gate_logs_actual_shift_and_new_position(self):
         leg = {"expected_id":5, "empty_departure_correction":{
             "observations":[{"body_lateral_m":[-.125,-.122]}, {"body_lateral_m":[-.041,-.039]}],

@@ -22,6 +22,7 @@ SMALL_SIDE_ACTIONS = {'strafe_left_once': 'single_small_strafe_left',
 LEGACY_SMALL_STRAFE_LIMIT_M = .035
 INTERMEDIATE_SMALL_STRAFE_LIMIT_M = .060
 TRANSFER_SMALL_STRAFE_LIMIT_M = .070
+PLACEMENT_SMALL_STRAFE_LIMIT_M = .080
 PLACE_ACTION = 'cmd0_place_single'
 PICKUP_BACKWARD4_ACTION = 'cmd1_carry_backward4'
 PICKUP_BACKWARD6_ACTION = 'cmd1_carry_backward6'
@@ -44,7 +45,9 @@ def Cmd0Motion_SmallStrafeProfile(backend):
         return profile, LEGACY_SMALL_STRAFE_LIMIT_M
     if profile == 'intermediate_v2':
         return profile, INTERMEDIATE_SMALL_STRAFE_LIMIT_M
-    return ('transfer_v3' if profile == 'transfer_v3' else None), TRANSFER_SMALL_STRAFE_LIMIT_M
+    if profile == 'transfer_v3':
+        return profile, TRANSFER_SMALL_STRAFE_LIMIT_M
+    return ('placement_v4' if profile == 'placement_v4' else None), PLACEMENT_SMALL_STRAFE_LIMIT_M
 
 
 def _validate_transfer_chain(chain):
@@ -95,7 +98,7 @@ def Cmd0Motion_LoadRouteSteps(project):
         raise ValueError('无法读取路线步数配置 route_steps.json') from exc
     optional = {'command0_transfer', 'pickup_exit', 'command1_pickup_exit', 'corridor', 'return_chain', 'wall_pickup_advance_steps',
                 'micro_turn_filter', 'tag5_entry_lateral', 'tag2_forward_trial', 'command2_continue_return',
-                'continue_estimated_route', 'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps',
+                'continue_estimated_route', 'command2_handoff_reference', 'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps',
                 'command2_empty_departure'}
     if not isinstance(steps, dict) or not defaults.keys() <= steps.keys() or steps.keys()-defaults.keys()-optional:
         raise ValueError('路线步数配置需要 transfer_forward_steps 和 tag1_to_tag2_forward_steps 两项')
@@ -136,6 +139,14 @@ def Cmd0Motion_LoadRouteSteps(project):
     if 'return_chain' in steps:
         from return_trial import ReturnTrial_ValidateChain
         steps['return_chain'] = ReturnTrial_ValidateChain(steps['return_chain'])
+    if 'command2_handoff_reference' in steps:
+        ref = steps['command2_handoff_reference']
+        ranges = {'lateral_m':(0,1), 'depth_m':(0,.5), 'heading_deg':(-90,90),
+                  'lateral_tolerance_m':(.005,.12), 'depth_tolerance_m':(.005,.12), 'heading_tolerance_deg':(1,25)}
+        if (not isinstance(ref,dict) or set(ref) != {*ranges,'source_report'}
+                or not isinstance(ref['source_report'],str) or not ref['source_report']
+                or any(type(ref[k]) not in (float,int) or not lo <= ref[k] <= hi for k,(lo,hi) in ranges.items())):
+            raise ValueError('Tag 1 接驳示教需要有效的地面码坐标、朝向和容差')
     if 'wall_pickup_advance_steps' in steps:
         approach = steps['wall_pickup_advance_steps']
         if type(approach) is not int or approach not in (0, 2, 4):

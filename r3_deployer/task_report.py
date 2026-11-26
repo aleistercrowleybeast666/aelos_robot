@@ -542,7 +542,8 @@ def _route_notes(result):
         measured = _angle_label("跨后偏航", check.get("error_after_strafe_deg"))
         residual = _angle_label("余差", check.get("residual_deg")) if not check.get("heading_check_pending") else None
         updated = check.get("residual_deg") != check.get("error_after_strafe_deg")
-        parts = (f"中转区左跨第 {group} 组", measured, _pickup_turn_note(check),
+        direction = "右跨" if "right" in str(check.get("action", "")) else "左跨"
+        parts = (f"中转区{direction}第 {group} 组", measured, _pickup_turn_note(check),
                  residual if updated or check.get("correction_actions") else None)
         if not residual:
             parts += ("本组结束时航向未确认",)
@@ -614,6 +615,11 @@ def _route_notes(result):
         lines.append("返程已确认 Tag 1")
     elif returned.get("estimated_pickup_anchor_tag") == 1:
         lines.append("返程 Tag 1 未确认 · 已按预设路线前往接驳点")
+    station = _as_dict(returned.get("handoff_station"))
+    if station.get("status") == "taught_position":
+        lines.append("返程接驳站 · Tag 1 与示教站位相符，已结束进近")
+    elif station.get("status") == "nominal_endpoint":
+        lines.append("返程接驳站 · 已走完接驳动作，Tag 1 示教站位待确认")
     nominal, planned = entrance.get("nominal_target_steps"), entrance.get("planned_steps")
     initial = entrance.get("initial_estimated_steps",planned)
     if type(nominal) is int and type(initial) is int and nominal != initial:
@@ -910,7 +916,10 @@ def _route_notes(result):
                         else f"每 {size} 跨复查航向")
             lines.append(" · ".join(filter(None, (f"Tag 2 → 3 {grouping}", observed))))
         hint = _as_dict(side.get("trial_lateral_hint"))
-        if start == 3 and end == 4 and hint.get("tag_id") in (2,3) and side.get("status") not in ("tag3_left_bias_fused", "tag3_right_bias_fused"):
+        actual, nominal = side.get("large_count"), side.get("nominal_count")
+        if (start == 3 and end == 4 and hint.get("tag_id") in (2,3)
+                and side.get("status") == "configured_unverified_pose"
+                and type(actual) is int and type(nominal) is int and actual < nominal):
             lines.append(f"Tag 3 → 4 · 根据 Tag {hint['tag_id']} 的可信横向读数减少一步大右跨")
         if side.get("status") in ("tag3_left_bias_fused", "tag3_right_bias_fused",
                                    "tag3_unverified_extra_omitted", "tag3_midpoint_full_right_group"):
@@ -920,6 +929,8 @@ def _route_notes(result):
             if direction:
                 if side.get("small_operation") and type(side.get("large_count")) is int:
                     lines.append(f"Tag {start} → {end} · 按试跑路线{direction}大跨 {side['large_count']} 步，再小跨 1 步")
+                elif side.get("status") == "field_baseline" and side.get("large_count") == side["count"]:
+                    lines.append(f"Tag {start} → {end} · 按基线路线{direction}大跨 {side['count']} 步")
                 else:
                     lines.append(f"Tag {start} → {end} · 位姿未确认，按试跑距离{direction}跨 {side['count']} 步")
         if disruption:

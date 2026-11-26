@@ -151,11 +151,12 @@ class PickupController:
                 counted={'status':'no_pickup','reason':str(exc)}
             if counted['status']!='no_pickup' or counted.get('reason_code')=='double_load_capability_unavailable':
                 return dict(counted, handoff_alignment_reason=alignment_reason, pickup_basis='fresh_count_at_handoff')
-            count_reason=counted['reason']
-        else:
-            count_reason=alignment_reason
-        acquired=self.Pickup_AcquireDefaultPair('tag1_handoff',count_reason)
-        return dict(acquired, handoff_alignment_reason=alignment_reason)
+            if counted['reason'] == 'staged block count changed':
+                # Both fresh windows saw material; the number disagreed.
+                acquired=self.Pickup_AcquireDefaultPair('tag1_handoff',counted['reason'])
+                return dict(acquired, handoff_alignment_reason=alignment_reason)
+            return dict(counted,handoff_alignment_reason=alignment_reason)
+        return observation
 
     def acquire(self, *, adjust=None, allow_stacked=False):
         r=self.robot; c=self.cfg

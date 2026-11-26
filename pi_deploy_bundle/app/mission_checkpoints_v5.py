@@ -262,8 +262,11 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
         if chosen is None:
             return False
         empty_fine = chosen.startswith('empty_micro_')
-        marker_scope=(scope,anchor['tag_id'],anchor['tag_departure'].get('observed_at_ns'))
-        if empty_fine and getattr(robot,'ineffective_empty_return_turn',None)==(marker_scope,chosen):
+        marker_scope=(scope,anchor['tag_id'],chosen)
+        previous = getattr(robot,'ineffective_empty_return_turn',None) or {}
+        same_turn = empty_fine and previous.get('scope') == marker_scope
+        if same_turn and (previous['attempts'] >= 2 or previous['reverse_response']
+                          or robot.last_action_completed_monotonic <= previous['completed_at']):
             sweep.update(blocked=True,status='empty_fine_previously_ineffective')
             return False
     if sweep['origin'] is None:
@@ -364,7 +367,11 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
     elif empty_fine and actual is not None and (direction*actual < _SEARCH_MIN_TURN_DEG
             or abs(wrap(error+actual)) >= abs(error)):
         sweep['blocked']=True
-        robot.ineffective_empty_return_turn=(marker_scope,native)
+        robot.ineffective_empty_return_turn = {
+            'scope':marker_scope, 'attempts':previous['attempts'] + 1 if same_turn else 1,
+            'completed_at':robot.last_action_completed_monotonic, 'reverse_response':direction*actual < -3.}
+    elif empty_fine and actual is not None and same_turn:
+        robot.ineffective_empty_return_turn = None
     elif actual is None:
         sweep['blocked']=True
         if measured:

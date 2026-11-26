@@ -125,7 +125,7 @@ def _split_floor_silhouette(mask, contour, bounds):
     return boxes
 
 
-def _staged_silhouette_count(hsv, cfg, roi):
+def _staged_silhouette_count(hsv, cfg, roi, *, orange_hue_cap=21):
     """Count staged blocks by their combined outline, independent of color placement."""
     import cv2
     import numpy as np
@@ -138,7 +138,7 @@ def _staged_silhouette_count(hsv, cfg, roi):
         upper = list(limits['upper'])
         if color == 'orange':
             # The yellow wall bleeds into the ordinary orange mask under the chest lighting.
-            upper[0] = min(upper[0], 21)
+            upper[0] = min(upper[0], orange_hue_cap)
             upper[0] = max(upper[0], limits['lower'][0])
         mask |= cv2.inRange(crop, np.array(limits['lower'], np.uint8), np.array(upper, np.uint8))
     # Close narrow seams between touching colors and discard thin shadows/noise.
@@ -289,6 +289,27 @@ class BlockDetector:
             group = _staged_silhouette_count(hsv, self.cfg, (x0, y0, x1, y1))
             if group is not None:
                 return group
+        def handoff_layout(original):
+            # Only a failed upright handoff classification can try the tighter
+            # orange/yellow boundary. Require a complete floor pair silhouette.
+            if (not self.trial_alignment or not self.staged_trial or self.cfg.get('tag1_handoff') is not True
+                    or not self.cfg.get('floor_pair_silhouettes')
+                    or not self.cfg['min_brightness'] <= brightness <= self.cfg['max_brightness']
+                    or original['status'] == 'empty' or original.get('grip_count')
+                    or count_only and original['status'] == 'target'):
+                return original
+            group = _staged_silhouette_count(hsv,self.cfg,(x0,y0,x1,y1),orange_hue_cap=20)
+            if not group or group['count'] not in (2,3):
+                return original
+            if count_only:
+                return group
+            bx,by,bw,bh = group['silhouette_bbox_px']
+            # For a stack the grasp target is the lower row, below the upper block.
+            target = {'x':(bx+.5*bw)/w, 'y':(by+(.77 if group['count']==3 else .5)*bh)/h,
+                      'color':'floor_pair'}
+            return dict(group, target=target, pickup_target=target, candidates=[target], grip_count=2,
+                        reason='handoff floor-row silhouette')
+
         candidates=[]
         for color,limits in self.cfg['hsv_ranges'].items():
             mask=cv2.inRange(hsv,np.array(limits['lower'],np.uint8),np.array(limits['upper'],np.uint8))
@@ -307,10 +328,10 @@ class BlockDetector:
                         continue
                     hull_area=cv2.contourArea(cv2.convexHull(contour))
                     if hull_area and area/hull_area<.9:
-                        return unknown('concave merged block layout without a clear bottom pair')
+                        return handoff_layout(unknown('concave merged block layout without a clear bottom pair'))
                 candidates.append({'bbox':[x/float(w),y/float(h),bw/float(w),bh/float(h)],
                                    'area':area/(w*h),'color':color})
-        return self.classify(candidates,w,h,brightness,count_only=count_only)
+        return handoff_layout(self.classify(candidates,w,h,brightness,count_only=count_only))
 
 
 class ConfirmedWindow:

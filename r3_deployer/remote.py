@@ -91,6 +91,11 @@ _MCU_RELAXED_CARRY_HIP_SHA256 = {
     'lua/craic_single_micro.lua': '053c6c9413104e02f0fabce52cf69fb916e704c7295a6217dd0151b792dbd69e',
     'lua/craic_runtime.lua': '32ef7f457609175edf2b5f53629422dfd5aef09a07a7ea1131b3a2cb5b800352',
 }
+_MCU_PLACEMENT_STRAFE_SHA256 = {
+    **_MCU_RELAXED_CARRY_HIP_SHA256,
+    'lua/craic_auto_bridge.lua': 'f45520484bf762612ac30422d43e07dc345319a674c0409684489544c00558cf',
+    'lua/craic_button_gaits.lua': '8e88a582008615204d14b28230ae071dcc597f4a60e6f47a3789ff12261d22ea',
+}
 _MCU_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
     'f0e52e82024132ec0c7be7d5aa556e756a7642fd2c489a1172920ea11be78bf1',
@@ -278,7 +283,7 @@ def validate_mcu_readback(receipt, expected):
              {**expected, **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256},
              {**expected, **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256}, {**expected, **_MCU_EMPTY_RECOVERY_SHA256},
              {**expected, **_MCU_INTERMEDIATE_STRAFE_SHA256}, {**expected, **_MCU_TRANSFER_STRAFE_SHA256},
-             {**expected, **_MCU_LEVEL_BACKWARD8_SHA256}, {**expected, **_MCU_RELAXED_CARRY_HIP_SHA256},
+             {**expected, **_MCU_LEVEL_BACKWARD8_SHA256}, {**expected, **_MCU_RELAXED_CARRY_HIP_SHA256}, {**expected, **_MCU_PLACEMENT_STRAFE_SHA256},
              *({**expected, 'lua/craic_single_micro.lua': digest}
                for digest in (_MCU_TUNED_MICRO_SHA256, *_MCU_PRIOR_TUNED_MICRO_SHA256)))
     if (not isinstance(receipt, dict) or receipt.get('robot_id') != 3
@@ -552,7 +557,8 @@ def _commit(root, ticket, mcu_readback=None):
                                     _MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_TRANSFER_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
-                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'])
+                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PLACEMENT_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
                         and not all(micro.get(key) is True for key in (
                             'pair_deployment_readback_ready', 'cmd0_right5_deployment_readback_ready',
                             'medium_turn_deployment_readback_ready'))):
@@ -566,14 +572,16 @@ def _commit(root, ticket, mcu_readback=None):
                 if (bridge_hash in (_MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_TRANSFER_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
-                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'])
+                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PLACEMENT_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
                         and micro.get('empty_recovery_deployment_readback_ready') is not True):
                     raise RuntimeError('The reloaded owner did not accept the registered empty-return MCU record.')
                 if (bridge_hash in (_MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_TRANSFER_STRAFE_SHA256['lua/craic_auto_bridge.lua'],
-                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'])
+                                    _MCU_LEVEL_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_PLACEMENT_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
                         and micro.get('pickup_backward8_deployment_readback_ready') is not True):
                     raise RuntimeError('The reloaded owner did not accept the registered eight-step backward MCU record.')
         if _json(_regular(root/MARKER)) != receipt:

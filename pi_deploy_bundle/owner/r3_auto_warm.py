@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-from r3_micro_gate import (LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
+from r3_micro_gate import (PLACEMENT_PROFILE_PROBE, LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
                            PICKUP_BACKWARD6_OPS, PROBE_OPS, RIGHT5_ROUTE_PROBE, SMALL_PROFILE_PROBE, SMALL_STRAFE_PROBE)
 
 PROTOCOL='r3.warm.v1'
@@ -166,7 +166,7 @@ class GateBackend:
                 self.current()
                 if op in EMPTY_PROBES:
                     raise EmptyRecoveryUnavailable('MCU 未提供空载回程微调能力')
-                if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE,LEVEL_BACKWARD8_PROBE):
+                if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE,PLACEMENT_PROFILE_PROBE,LEVEL_BACKWARD8_PROBE):
                     return  # Ordered decline; keep the previously confirmed capabilities.
                 raise PairProbeUnavailable('MCU 未确认双抱能力')
             raise RuntimeError('operation {} failed; reason={}; last_result={}; last_rejection={}; in_flight={}'.format(op,detail.get('reason'),detail.get('last_result'),detail.get('last_rejection'),detail.get('in_flight')))
@@ -209,6 +209,8 @@ class GateBackend:
             self.call(SMALL_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
             if micro.get('correction_profile_probe_supported') and self.small_strafe_profile()=='intermediate_v2':
                 self.call(CORRECTION_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
+            if micro.get('placement_profile_probe_supported') and self.small_strafe_profile()=='transfer_v3':
+                self.call(PLACEMENT_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
 
     def verify_mission_v5(self,timeout):
         self.verify_micro(timeout)
@@ -275,6 +277,13 @@ class GateBackend:
     def empty_recovery_ready(self):
         state = self.current(require_mcu=False)
         return state['mode'] == 'auto' and state.get('micro_trial', {}).get('empty_recovery_ready') is True
+
+    def empty_forward4_ready(self):
+        state=self.current(require_mcu=False)
+        return state['mode']=='auto' and state.get('micro_trial',{}).get('empty_forward4_ready') is True
+
+    def ensure_empty_forward4(self, timeout=None):
+        return self.empty_forward4_ready()
 
     def empty_strafe_group_ready(self):
         state=self.current(require_mcu=False)

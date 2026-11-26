@@ -442,7 +442,7 @@ def _tag1_pickup_adjustment_limits(steps):
 
 def _tag1_pickup_exit_actions(approach):
     # The turn precedes pickup. Undo the actual walk in the same body frame, in reverse order.
-    reverse = {'empty_forward2': ('back', 2), 'free_forward': ('back', 5),
+    reverse = {'empty_forward2': ('back', 2), 'empty_forward4': ('back', 4), 'free_forward': ('back', 5),
                'empty_strafe_left': ('strafe_right_once', 1), 'empty_strafe_right': ('strafe_left_once', 1)}
     for count in (2, 3):
         reverse[f'empty_strafe_left{count}'] = ('strafe_right_once', count)
@@ -614,6 +614,7 @@ class _OutboundPickupRobot(MissionRobot):
             # The corner target may enter the sides of the chest camera view.
             # Keep the staged vertical crop and use the same confirmed grasp band.
             config['roi'] = [min(left, .08), top, max(right, .92), bottom]
+            config['tag1_handoff'] = True
         if [info.get('width'), info.get('height')] != config['resolution']:
             raise BlockFrameUnavailable('方块识别图像尺寸与胸部相机不一致')
         return _PickupCamera(config, scope=self.scope(), staged_publisher=info['publisher'],
@@ -648,7 +649,7 @@ def _acquire_near_tag1(robot):
     forward_limit, lateral_limit = _tag1_pickup_adjustment_limits(robot.cfg.get('route_steps', {}))
     moves = []
     event = {'status': 'watching', 'anchor_tag': 1, 'adjustments': moves, 'approach_steps': 0, 'checks': 0,
-             'position_basis': 'normalized_image_floor_row'}
+             'position_basis': 'normalized_image_floor_row', 'block_presence_required': True}
     robot.events.append({'tag1_pickup_standby': event})
     robot._record_progress('waiting_blocks', direction='return', reason_zh='正在 Tag 1 附近观察接驳方块。')
 
@@ -688,6 +689,7 @@ def _acquire_near_tag1(robot):
                     acquired = {'status':'no_pickup','reason':str(exc),'vision_unresolved':True}
                 if (robot.cfg.get('route_steps',{}).get('continue_estimated_route') is True
                         and acquired['status']=='no_pickup'
+                        and acquired.get('reason') in ('target_changed','too_close','outside_handoff_adjustment_range','adjustment_budget')
                         and acquired.get('reason_code')!='double_load_capability_unavailable'):
                     unresolved_checks = unresolved_checks + 1 if len(moves)==completed_moves else 0
                     if (unresolved_checks>=3 or attempt+1==_TAG1_PICKUP_RECHECKS
@@ -699,7 +701,8 @@ def _acquire_near_tag1(robot):
             event.update(status=acquired['status'],reason=acquired.get('reason'))
             if acquired['status']!='no_pickup':
                 return acquired,moves
-            if acquired.get('scene_empty') or len(moves) > completed_moves:
+            if (acquired.get('scene_empty') or acquired.get('reason') == 'empty scene visibility not validated'
+                    or len(moves) > completed_moves):
                 stalled = 0
                 blocked_pair = None
             else:

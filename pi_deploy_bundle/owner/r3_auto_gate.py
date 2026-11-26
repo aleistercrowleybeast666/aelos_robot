@@ -10,7 +10,7 @@ import time
 import uuid
 import re
 from r3_recovery_gate import RecoveryGate
-from r3_micro_gate import LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_OPS, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
+from r3_micro_gate import PLACEMENT_PROFILE_PROBE, LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_OPS, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
 
 WIRE_BASE=0x2A00
 CANCELLED_BOUNDARY=WIRE_BASE+0xFE
@@ -35,7 +35,11 @@ CORRECTION_V3_HASHES = {
     for op in (*INTERMEDIATE_STRAFE_HASHES, 'single_micro_left','single_micro_right',
                'double_single_micro_left','double_single_micro_right','empty_micro_left','empty_micro_right')
 }
-OWNED=frozenset(HASHES.values()) | frozenset(INTERMEDIATE_STRAFE_HASHES.values()) | frozenset(CORRECTION_V3_HASHES.values())
+PLACEMENT_STRAFE_HASHES = {
+    op: 'leju_' + hashlib.md5(('r3_stride_v4_' + op).encode()).hexdigest()
+    for op in INTERMEDIATE_STRAFE_HASHES
+}
+OWNED=frozenset(PLACEMENT_STRAFE_HASHES.values()) | frozenset(HASHES.values()) | frozenset(INTERMEDIATE_STRAFE_HASHES.values()) | frozenset(CORRECTION_V3_HASHES.values())
 _ACQUIRE_LOAD=frozenset(('grab_single','grab_double','begin_align'))
 _RELEASE_LOAD=frozenset(('stand','place_single','cmd0_place_single','place_double'))
 _RESET_REQUIRED='previous automatic task may still hold a block; explicitly restore empty stand before starting again'
@@ -250,7 +254,7 @@ class Gate:
             if self.queue:return reject('existing_queue_not_empty')
             if type(timeout) not in (float,int) or not 1<=timeout<=120:return reject('invalid_timeout')
             if op=='begin' and self._may_hold_load:return reject('previous_load_requires_explicit_empty_reset')
-            if op in EMPTY_PROBES or op in EMPTY_RECOVERY_OPS or op in EMPTY_GROUP_OPS:
+            if op in EMPTY_PROBES or op in EMPTY_RECOVERY_OPS or op in EMPTY_GROUP_OPS or op=='empty_forward4':
                 if self.mode != 'auto' or self._may_hold_load:
                     return reject('empty_automatic_return_required')
             elif op in PROBE_OPS:
@@ -266,9 +270,12 @@ class Gate:
             self.operation_seq+=1
             if nonce is not None:self._accepted_nonces.add(nonce)
             native = HASHES[op]
-            if op in CORRECTION_V3_HASHES and self.micro.small_strafe_profile(self.epoch) == 'transfer_v3':
+            profile=self.micro.small_strafe_profile(self.epoch)
+            if op in PLACEMENT_STRAFE_HASHES and profile=='placement_v4':
+                native=PLACEMENT_STRAFE_HASHES[op]
+            elif op in CORRECTION_V3_HASHES and profile in ('transfer_v3','placement_v4'):
                 native = CORRECTION_V3_HASHES[op]
-            elif op in INTERMEDIATE_STRAFE_HASHES and self.micro.small_strafe_profile(self.epoch) == 'intermediate_v2':
+            elif op in INTERMEDIATE_STRAFE_HASHES and profile == 'intermediate_v2':
                 native = INTERMEDIATE_STRAFE_HASHES[op]
             c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':native,'epoch':self.epoch,'op':op,'dispatched':False,
                 'started':False,'complete':False,'cancelled':False,'drained':False,
@@ -290,8 +297,8 @@ class Gate:
                     self.micro.level_backward8_receipt = None
                 elif op == EMPTY_GROUP_PROBE:
                     self.micro.empty_group_receipt = None
-                elif op == CORRECTION_PROFILE_PROBE:
-                    pass  # Keep the earlier independent v2 receipt.
+                elif op in (CORRECTION_PROFILE_PROBE,PLACEMENT_PROFILE_PROBE):
+                    pass  # Keep the previously confirmed gait revision.
                 elif op == SMALL_PROFILE_PROBE:
                     self.micro.small_profile_receipt = dict(session=self.session,epoch=self.epoch,
                         boot_id=self.micro.boot_id, profile='legacy_v1')

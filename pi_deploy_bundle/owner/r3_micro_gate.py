@@ -17,6 +17,9 @@ RIGHT5_ROUTE_PROBE = 'cmd0_right5_capability'
 RIGHT5_ROUTE_OP = 'cmd0_strafe_right5'
 SMALL_PROFILE_PROBE = 'intermediate_strafe_capability'
 CORRECTION_PROFILE_PROBE = 'correction_profile_capability'
+PLACEMENT_PROFILE_PROBE = 'placement_strafe_capability'
+STRAFE_PROFILES = {SMALL_PROFILE_PROBE:'intermediate_v2', CORRECTION_PROFILE_PROBE:'transfer_v3',
+                   PLACEMENT_PROFILE_PROBE:'placement_v4'}
 EMPTY_GROUP_PROBE = 'empty_strafe_group_capability'
 EMPTY_GROUP_OPS = frozenset('empty_strafe_'+direction+str(count)
                             for direction in ('left','right') for count in (2,3))
@@ -25,7 +28,7 @@ EMPTY_PROBES = frozenset((EMPTY_RECOVERY_PROBE, EMPTY_GROUP_PROBE))
 EMPTY_RECOVERY_OPS = frozenset(('empty_micro_left', 'empty_micro_right', 'empty_backward2'))
 PAIR_PROBE = 'horizontal_pair_capability'
 LEVEL_BACKWARD8_PROBE = 'pickup_level_backward8_capability'
-OPTIONAL_PROBES = frozenset((PAIR_PROBE, SMALL_PROFILE_PROBE, CORRECTION_PROFILE_PROBE, LEVEL_BACKWARD8_PROBE)) | EMPTY_PROBES
+OPTIONAL_PROBES = frozenset((PAIR_PROBE, *STRAFE_PROFILES, LEVEL_BACKWARD8_PROBE)) | EMPTY_PROBES
 PICKUP_BACKWARD4_PROBE = 'pickup_backward4_capability'
 PICKUP_BACKWARD4_OP = 'cmd1_carry_backward4'
 PICKUP_BACKWARD4_PAIR_OP = 'double_cmd1_carry_backward4'
@@ -49,6 +52,8 @@ PAIR_BODY_OPS = frozenset(('grab_double', 'place_double')) | frozenset(
 PROBE_OPS = frozenset(('capability', SMALL_STRAFE_PROBE, CMD0_ROUTE_PROBE, MEDIUM_TURN_PROBE, RIGHT5_ROUTE_PROBE, *OPTIONAL_PROBES, *_PAIR_PROBES))
 NAMES[LEVEL_BACKWARD8_PROBE] = 'r3_pickup_level_v1_backward8_capability'
 NAMES[CORRECTION_PROFILE_PROBE] = 'r3_correction_v3_capability'
+NAMES[PLACEMENT_PROFILE_PROBE] = 'r3_stride_v4_capability'
+NAMES['empty_forward4'] = 'r3_stride_v4_empty_forward4'
 NAMES[EMPTY_GROUP_PROBE] = 'r3_empty_group_v1_capability'
 NAMES.update({op: 'r3_empty_group_v1_' + op for op in EMPTY_GROUP_OPS})
 NAMES[SMALL_PROFILE_PROBE] = 'r3_lateral_v2_capability'
@@ -71,7 +76,7 @@ NAMES.update({op: 'r3_pair_v1_' + op for op in PAIR_BODY_OPS})
 NAMES.update({op: 'r3_micro_strafe_v1_' + op for op in SMALL_STRAFE_OPS})
 NAMES.update(_CMD0_ROUTE_NAMES)
 NAMES.update({op: 'r3_medium_v1_' + op for op in MEDIUM_TURN_OPS})
-MOTION_OPS = (frozenset(('single_micro_left', 'single_micro_right', RIGHT5_ROUTE_OP))
+MOTION_OPS = (frozenset(('single_micro_left', 'single_micro_right', RIGHT5_ROUTE_OP,'empty_forward4'))
               | SMALL_STRAFE_OPS | CMD0_ROUTE_OPS | MEDIUM_TURN_OPS | PAIR_BODY_OPS
               | PICKUP_BACKWARD4_OPS | PICKUP_BACKWARD6_OPS | PICKUP_BACKWARD8_OPS | EMPTY_RECOVERY_OPS | EMPTY_GROUP_OPS)
 REQUIRED_CODE_SHA256 = {'lua/craic_actions.lua': 'e1f76bf441711e9fa6ab791f24a1bb3844b63e191f2d6bba0bc27936e63abf8f', 'lua/craic_auto_bridge.lua': '573ef6182a6b78ac4deaf0fa04d1fd12153a477d35a3ab723532cdd48d41ee8d', 'lua/craic_button_gaits.lua': 'd116e043026273e0d577dbe4af396cbf8fdab2c3299b66482a6f0edfa07b3a86', 'lua/craic_config.lua': '1e443a23e3c577c4c232dfc302276d99383b96123072d2373d2c0bf9114b9436', 'lua/craic_future_actions.lua': '612267f8e10c7135ca76861785f6b63a60cfa1a55402a6bca122b4848bc91da6', 'lua/craic_runtime.lua': '453560bf02f6f107025231ae4656e1c0372a50c4509d583f506a09a4d48efe70', 'lua/craic_single_micro.lua': 'c7827f10bb33d3b51ce3ac4bae2d4e023301dfcee909d586d8f82ffb44a5d5df', 'lua/main.lua': '075dae0de6a3170bdac4a419161b757222d234b848d9c3e7bf59b856e79ecb58'}
@@ -137,11 +142,15 @@ SOFT_PAIR_RETREAT_CODE_SHA256 = dict(LEVEL_BACKWARD8_CODE_SHA256, **{
 RELAXED_CARRY_HIP_CODE_SHA256 = dict(SOFT_PAIR_RETREAT_CODE_SHA256, **{
     'lua/craic_runtime.lua': '32ef7f457609175edf2b5f53629422dfd5aef09a07a7ea1131b3a2cb5b800352',
 })
+PLACEMENT_STRAFE_CODE_SHA256 = dict(RELAXED_CARRY_HIP_CODE_SHA256, **{
+    'lua/craic_auto_bridge.lua': 'f45520484bf762612ac30422d43e07dc345319a674c0409684489544c00558cf',
+    'lua/craic_button_gaits.lua': '8e88a582008615204d14b28230ae071dcc597f4a60e6f47a3789ff12261d22ea',
+})
 _PICKUP_BACKWARD_CODE_VARIANTS = (PICKUP_BACKWARD4_CODE_SHA256, PICKUP_BACKWARD6_CODE_SHA256,
                                   PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256,
                                   PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256, PICKUP_LEVEL_BACKWARD6_CODE_SHA256,
                                   EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256,
-                                  LEVEL_BACKWARD8_CODE_SHA256, RELAXED_CARRY_HIP_CODE_SHA256)
+                                  LEVEL_BACKWARD8_CODE_SHA256, RELAXED_CARRY_HIP_CODE_SHA256, PLACEMENT_STRAFE_CODE_SHA256)
 _PAIR_ROUTE_CODE_VARIANTS = (PAIR_ROUTE_CODE_SHA256, *_PICKUP_BACKWARD_CODE_VARIANTS)
 _CMD0_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
@@ -333,6 +342,9 @@ class MicroGate:
     def empty_recovery_ready(self, epoch, recovery_ready):
         return self._motion_receipt_ready(self.empty_recovery_receipt, epoch, recovery_ready)
 
+    def empty_forward4_ready(self, epoch, recovery_ready):
+        return self.mission_ready(epoch,recovery_ready) and self.small_strafe_profile(epoch)=='placement_v4'
+
     def empty_strafe_group_ready(self, epoch, recovery_ready):
         return self._motion_receipt_ready(self.empty_group_receipt, epoch, recovery_ready)
 
@@ -405,12 +417,14 @@ class MicroGate:
             return 'micro_nonce_missing_or_replayed'
         if not self.deployment_ready():
             return 'micro_MCU_verified_installation_and_initial_reload_required'
-        if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE) and not self.small_strafe_ready(epoch, recovery_ready):
+        if op in STRAFE_PROFILES and not self.small_strafe_ready(epoch, recovery_ready):
             return 'small_strafe_profile_requires_current_small_strafe_capability'
         if op == LEVEL_BACKWARD8_PROBE and not self.cmd0_route_ready(epoch,recovery_ready):
             return 'level_eight_probe_requires_current_route'
         if op in EMPTY_PROBES and not self.mission_ready(epoch, recovery_ready):
             return 'empty_recovery_probe_requires_current_mission'
+        if op == 'empty_forward4' and not self.empty_forward4_ready(epoch,recovery_ready):
+            return 'continuous_empty_forward4_current_capability_required'
         if op in EMPTY_GROUP_OPS and not self.empty_strafe_group_ready(epoch, recovery_ready):
             return 'empty_strafe_group_current_capability_required'
         if op in EMPTY_RECOVERY_OPS and not self.empty_recovery_ready(epoch, recovery_ready):
@@ -469,7 +483,7 @@ class MicroGate:
                 self.level_backward8_receipt = None
             elif op == EMPTY_GROUP_PROBE:
                 self.empty_group_receipt = None
-            elif op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
+            elif op in STRAFE_PROFILES:
                 self.small_profile_receipt = None
             else:
                 self.capability = None
@@ -485,8 +499,8 @@ class MicroGate:
             self.level_backward8_receipt = receipt
         elif op == EMPTY_GROUP_PROBE:
             self.empty_group_receipt = receipt
-        elif op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
-            self.small_profile_receipt = dict(receipt,profile='transfer_v3' if op==CORRECTION_PROFILE_PROBE else 'intermediate_v2')
+        elif op in STRAFE_PROFILES:
+            self.small_profile_receipt = dict(receipt,profile=STRAFE_PROFILES[op])
         else:
             self.capability = receipt
 
@@ -496,9 +510,10 @@ class MicroGate:
                     empty_recovery_deployment_readback_ready=(self.deployment_ready()
                         and any(_matches_readback(self.deployment['verified_files_sha256'], code)
                                 for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256,
-                                             LEVEL_BACKWARD8_CODE_SHA256,RELAXED_CARRY_HIP_CODE_SHA256))),
+                                             LEVEL_BACKWARD8_CODE_SHA256,RELAXED_CARRY_HIP_CODE_SHA256,PLACEMENT_STRAFE_CODE_SHA256))),
                     empty_strafe_group_ready=self.empty_strafe_group_ready(epoch,recovery_ready),
-                    correction_profile_probe_supported=True,
+                    empty_forward4_ready=self.empty_forward4_ready(epoch,recovery_ready),
+                    correction_profile_probe_supported=True, placement_profile_probe_supported=True,
                     empty_recovery_ready=self.empty_recovery_ready(epoch,recovery_ready),
                     deployment_readback_ready=self.deployment_ready(),
                     small_strafe_deployment_readback_ready=self.small_strafe_deployment_ready(),

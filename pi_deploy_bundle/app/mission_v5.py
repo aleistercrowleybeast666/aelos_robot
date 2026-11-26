@@ -23,7 +23,7 @@ from nav_observation import MagneticReference, wrap
 
 VERSION='r3-visual-pickup-20261109-v5'
 OPS={
-    'free_forward':('empty','empty'), 'empty_forward2':('empty','empty'),
+    'free_forward':('empty','empty'), 'empty_forward2':('empty','empty'), 'empty_forward4':('empty','empty'),
     'empty_left_turn':('empty','empty'), 'empty_right_turn':('empty','empty'),
     'empty_micro_left':('empty','empty'), 'empty_micro_right':('empty','empty'),
     'empty_backward2':('empty','empty'),
@@ -46,7 +46,7 @@ _TURN_OPS=('left_turn','right_turn','empty_left_turn','empty_right_turn','empty_
 _CARRY_FORWARD_OPS=('carry_forward','carry_forward2','carry_forward4','carry_forward7','carry_forward9')
 _EMPTY_STRAFE_GROUPS=('empty_strafe_left2','empty_strafe_left3','empty_strafe_right2','empty_strafe_right3')
 _TRANSLATION_OPS=_CARRY_FORWARD_OPS+(
-    'strafe_left_once','strafe_right_once','free_forward','empty_forward2','empty_backward2','empty_strafe_left','empty_strafe_right',
+    'strafe_left_once','strafe_right_once','free_forward','empty_forward2','empty_forward4','empty_backward2','empty_strafe_left','empty_strafe_right',
 )+_EMPTY_STRAFE_GROUPS
 _GRAB_OPS=('grab_single','grab_double')
 VISUAL_PICKUP_OPS=frozenset((*_GRAB_OPS,'free_forward','empty_forward2','empty_strafe_left','empty_strafe_right'))
@@ -374,6 +374,8 @@ class MissionRobot(Robot):
             ready = getattr(self.backend, 'empty_recovery_ready', None)
             if not callable(ready) or not ready():
                 raise NotReady('当前 MCU 会话未确认空载回程微调动作')
+        if op == 'empty_forward4' and getattr(self.backend,'empty_forward4_ready',lambda:False)() is not True:
+            raise NotReady('当前 MCU 会话未确认空载连续前进四步')
         if op in _EMPTY_STRAFE_GROUPS and not getattr(self.backend,'empty_strafe_group_ready',lambda:False)():
             raise NotReady('当前 MCU 会话未确认空载连续侧跨动作')
         if required_load=='double' or next_load=='double':

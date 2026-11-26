@@ -438,7 +438,7 @@ class DeploymentTransactionTests(unittest.TestCase):
     def test_current_empty_return_overlay_registers_the_exact_manifest_and_owner_gate(self):
         baseline = self._mcu_receipt()
         files = self._private_mcu_manifest(settings.DEFAULT_MCU_OVERLAY)
-        self.assertEqual(files, {**baseline['files'], **remote._MCU_RELAXED_CARRY_HIP_SHA256})
+        self.assertEqual(files, {**baseline['files'], **remote._MCU_PLACEMENT_STRAFE_SHA256})
         readback = dict(baseline, files=files)
         self.assertEqual(remote.validate_mcu_readback(readback,baseline['files']),readback)
         boot = 'ae8ca915-435e-4481-a85d-b097ed2a2f14'
@@ -458,7 +458,7 @@ class DeploymentTransactionTests(unittest.TestCase):
                         remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256, remote._MCU_PICKUP_LEVEL_BACKWARD6_SHA256,
                         remote._MCU_EMPTY_RECOVERY_SHA256, remote._MCU_INTERMEDIATE_STRAFE_SHA256,
                         remote._MCU_TRANSFER_STRAFE_SHA256, remote._MCU_LEVEL_BACKWARD8_SHA256,
-                        remote._MCU_RELAXED_CARRY_HIP_SHA256):
+                        remote._MCU_RELAXED_CARRY_HIP_SHA256, remote._MCU_PLACEMENT_STRAFE_SHA256):
             with self.subTest(actions=variant['lua/craic_actions.lua']):
                 receipt = dict(baseline, files={**expected, **variant})
                 self.assertEqual(remote.validate_mcu_readback(receipt, expected), receipt)

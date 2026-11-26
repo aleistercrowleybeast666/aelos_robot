@@ -270,11 +270,11 @@ class _EmptyMarkerExpired(Exception):
     pass
 
 
-def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
+def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return', local_handoff=None):
     """Correct the heading of the upright, empty body using the expected floor-marker orientation."""
     tag = leg['expected_id']
     goal = next((goal for goal in nav.cfg['legs'].get(direction, ()) if goal['id'] == tag), {})
-    goal_yaw = goal.get('tag_heading_deg')
+    goal_yaw = goal.get('tag_heading_deg') if local_handoff is None else local_handoff['heading_deg']
     if goal_yaw is None:
         return
     heading = {'direction': direction, 'expected_yaw_deg': goal_yaw, 'observations': [], 'actions': []}
@@ -293,7 +293,10 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
             heading['status'] = 'orientation_inconsistent'
             return
         rebase = getattr(robot, 'Route_RebaseTagHeading', None)
-        if rebase is not None:
+        if local_handoff and abs(error) <= local_handoff['heading_tolerance_deg']:
+            heading['status'] = 'within_empty_turn_resolution'
+            return
+        if rebase is not None and local_handoff is None:
             reading['magnetic_reference'] = rebase(tag, error, stamp, direction=direction).value
         turn = Checkpoint_EmptyTurnAction(robot, nav, error, reading['spread_deg'])
         if turn is None:
@@ -360,9 +363,12 @@ def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
     else:
         near, far = config['side_departure_depth_m']
         if depth_lo > far:
+            if tag == 1:
+                return None, 0., reading, 'depth_to_be_covered_by_transfer'
             return 'empty_forward2', depth_lo - far, reading, 'far_before_side_travel'
         if depth_hi < near:
-            return 'empty_backward2', near - depth_hi, reading, 'near_before_side_travel'
+            reason = 'near_before_transfer' if tag == 1 else 'near_before_side_travel'
+            return 'empty_backward2', near - depth_hi, reading, reason
     return None, 0., reading, 'within_departure_band'
 
 
@@ -370,7 +376,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
     """Close the cross-track error at the reverse gate or depth error before a side leg."""
     tag = leg['expected_id']
     config = robot.cfg.get('route_steps', {}).get('command2_empty_departure')
-    if tag not in (5, 6, 7) or not config or robot.load_kind != 'empty':
+    if tag not in (1, 5, 6, 7) or not config or robot.load_kind != 'empty':
         return
     goal = next((item for item in nav.cfg['legs']['return'] if item['id'] == tag), {})
     goal_yaw = goal.get('tag_heading_deg')
@@ -404,7 +410,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
         if previous_action and (action != previous_action or gap >= previous_gap - .01):
             report['status'] = 'retain_latest_pose_after_limited_progress'
             return
-        if len(report['actions']) >= 2 or robot.count >= robot.cfg['max_body_macros_per_journey']:
+        if len(report['actions']) >= (1 if tag == 1 else 2) or robot.count >= robot.cfg['max_body_macros_per_journey']:
             report['status'] = 'continue_from_latest_pose'
             return
         if (action == 'empty_backward2'

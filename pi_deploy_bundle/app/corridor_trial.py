@@ -3216,8 +3216,9 @@ def _tag3_left_bias_count(step, hint):
     if upper >= -stride:
         return None
     extra = int(-upper / stride + .5)
-    if step.get('nominal_last_small'):
-        return min(_TAG3_TRIAL_MAX_RIGHT_STRIDES, step['repeat'] - 1 + extra)
+    if 'nominal_last_small' in step:
+        baseline_large = step['repeat'] - int(step['nominal_last_small'])
+        return min(_TAG3_TRIAL_MAX_RIGHT_STRIDES, baseline_large + extra)
     return min(_TAG3_TRIAL_MAX_RIGHT_STRIDES, 1 + step['repeat'] + extra)
 
 
@@ -3225,21 +3226,22 @@ def _tag3_trial_side_plan(step, hint, *, small_available):
     """Use the field-tested geometry when the current lateral offset is unknown."""
     nominal = step['repeat']
     operation = step['op']
-    count = nominal - 1
-    small = SMALL_SIDE_ACTIONS[operation] if small_available else None
+    last_small = step.get('nominal_last_small', True)
+    count = nominal - int(last_small)
+    small = SMALL_SIDE_ACTIONS[operation] if last_small and small_available else None
     plan = {'status': 'field_baseline', 'tag_id': 3, 'operation': operation, 'nominal_count': nominal,
             'reason_zh': 'Tag 3 横向位姿未确认，沿用实测基线右跨。'}
     if hint is not None and (hint.get('basis') == 'tag2_short_approach_projection'
-                             or (hint['tag_id'] == 2 and small and hint['lateral_bounds_m'][1] < 0)):
+                             or (hint['tag_id'] == 2 and hint['lateral_bounds_m'][1] < 0)):
         stride = step.get('left_bias_stride_m')
         plan['trial_lateral_hint'] = hint
-        if stride is not None and hint['lateral_bounds_m'][1] < -stride:
+        if last_small and stride is not None and hint['lateral_bounds_m'][1] < -stride:
             count, small = nominal, None
             offset_cm = -100 * median(hint['lateral_bounds_m'])
             plan.update(status='tag3_left_bias_fused',
                         reason_zh=f'未扫到 Tag 3，由 Tag 2 推算仍偏左约 {offset_cm:.1f} cm，最后一小跨换成大跨，共 {count} 大跨。')
         else:
-            plan['reason_zh'] = 'Tag 2 的横偏估计不足以调整右跨，沿用基线距离。'
+            plan['reason_zh'] = f'Tag 3 未确认，沿用 {nominal} 步基线，Tag 2 的估计仅供参考。'
     elif hint is not None:
         left_count = _tag3_left_bias_count(step, hint)
         if left_count is not None and left_count >= count:
@@ -3248,7 +3250,7 @@ def _tag3_trial_side_plan(step, hint, *, small_available):
             plan.update(status='tag3_left_bias_fused', trial_lateral_hint=hint,
                         reason_zh=f'Tag 3 偏左约 {offset_cm:.1f} cm，合入右跨计划，共 {count} 大跨。')
         elif hint['lateral_bounds_m'][0] > _TAG3_RIGHT_OFFSET_M and count > 1:
-            if hint['tag_id'] == 2 or not small_available:
+            if hint['tag_id'] == 2 or not small:
                 count -= 1
             if hint['tag_id'] == 3:
                 small = None
@@ -4374,7 +4376,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             if tag3_needs_new_view and op == 'strafe_right_once':
                 monitor_every = min(monitor_every or 2, 2)
                 leg['tag3_recheck_after_yaw']['max_strafe_group'] = monitor_every
-            if previous_id == 3 and step.get('nominal_last_small') and not calibrated and count == nominal and not small:
+            if previous_id == 3 and 'nominal_last_small' in step and not calibrated and count == nominal and not small:
                 deadband = nav.cfg['post_action_heading'].get('deadband_deg')
                 previous_leg = result['legs'][-2]
                 departure_turned = bool((leg.get('departure_heading') or {}).get('correction_actions'))

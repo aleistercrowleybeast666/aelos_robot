@@ -1,6 +1,7 @@
 """Estimated empty-load return from the base to the Tag 1 pickup area."""
 
 from enum import Enum
+from itertools import groupby
 import math
 
 from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_AlignEmptyMarker,
@@ -33,12 +34,12 @@ def ReturnTrial_DefaultChain():
     return {
         'base_turn': dict(turn),
         'tag5': [],
-        'tag6': [{'op': 'free_forward', 'repeat': 2}],
-        'tag7': [{'op': 'empty_strafe_left', 'repeat': 6}, {'op': 'free_forward', 'repeat': 2}],
+        'tag6': [{'op': 'empty_forward2', 'repeat': 4}],
+        'tag7': [{'op': 'empty_strafe_left', 'repeat': 6}, {'op': 'empty_forward2', 'repeat': 4}],
         'tag1': [{'op': 'empty_strafe_right', 'repeat': 9}],
-        'transfer_approach': [{'op': 'empty_forward2'}, {'op': 'free_forward', 'repeat': 2}],
+        'transfer_approach': [{'op': 'empty_forward2', 'repeat': 4}],
         'transfer_turn': dict(turn),
-        'station_side': [{'op': 'empty_strafe_left', 'repeat': 4}, {'op': 'empty_forward2', 'repeat': 2}],
+        'station_side': [{'op': 'empty_strafe_right', 'repeat': 4}, {'op': 'empty_forward2', 'repeat': 2}],
     }
 
 
@@ -158,6 +159,22 @@ def _return_strafe_group(robot, actions, uncertain):
     return (action + str(group) if group > 1 else action), group
 
 
+def _return_motion_group(robot, actions, residual, uncertain, *, group_forward=True):
+    if (group_forward and not uncertain and len(actions) >= 2
+            and actions[0] == actions[1] == 'empty_forward2'
+            and getattr(robot.backend, 'empty_forward4_ready', lambda: False)() is True):
+        return 'empty_forward4', 2
+    # A fresh measured 15–20° residual after a side step can use a pair.
+    # Missing feedback or a larger deviation still gets a single stride.
+    report = getattr(robot, 'last_heading_report', None) or {}
+    if (uncertain and residual is not None and 15 < abs(residual) <= 20
+            and report.get('return_motion_residual_deg') == residual
+            and not getattr(robot, 'magnetic_route_only', False)
+            and actions[0] in ('empty_strafe_left', 'empty_strafe_right')):
+        return _return_strafe_group(robot, actions[:2], False)
+    return _return_strafe_group(robot, actions, uncertain)
+
+
 def _prepare_return_group(robot, nav):
     robot.check()
     if robot.load_kind != 'empty':
@@ -174,8 +191,8 @@ def _prepare_return_group(robot, nav):
 def _move(robot, nav, actions, completed, *, scan_follows=False, station_actions=None):
     index = 0
     while index < len(actions):
-        _, uncertain = _prepare_return_group(robot, nav)
-        action, count = _return_strafe_group(robot, actions[index:], uncertain)
+        residual, uncertain = _prepare_return_group(robot, nav)
+        action, count = _return_motion_group(robot, actions[index:], residual, uncertain)
         index += count
         robot.finite(action, configured=True, checkpoint_follows=scan_follows and index == len(actions))
         completed.append(action)
@@ -251,7 +268,7 @@ def _return_travel(robot, nav, leg, actions):
             leg.setdefault('motion_adaptations', []).append({'reason':'heading_uncertain',
                 'residual_deg':residual,'forward_steps':10,'group_steps':2})
         action = pending[0]
-        native, consumed = _return_strafe_group(robot, pending, uncertain)
+        native, consumed = _return_motion_group(robot, pending, residual, uncertain)
         del pending[:consumed]
         robot.finite(native, configured=True, checkpoint_follows=not pending)
         leg['completed_actions'].append(native)
@@ -299,11 +316,27 @@ def _return_travel(robot, nav, leg, actions):
 
 def _align_return_departure(robot, nav, leg):
     ReturnTrial_AlignEmptyMarker(robot, nav, leg)
-    if leg['expected_id'] in (5, 6, 7):
+    if leg['expected_id'] in _RETURN_TAGS:
         Checkpoint_AlignEmptyDeparture(robot, nav, leg)
         recovery = leg.get('backward_search')
         if recovery and (leg.get('empty_departure_correction') or {}).get('actions'):
             recovery['resolution'] = 'use_corrected_departure_stance'
+
+    # Releasing an ineffective-turn mark requires feedback from the adjusted
+    # stance. Reading a marker or queuing an adjustment for later is insufficient.
+    heading = leg.get('empty_heading') or {}
+    translation = leg.get('empty_departure_correction') or {}
+    corrected = heading.get('actions') and heading.get('status') == 'within_empty_turn_resolution'
+    if translation.get('actions'):
+        corrected = translation.get('status') == 'within_departure_band'
+    if corrected and leg.get('detected'):
+        current = _empty_marker_geometry(robot, nav, leg)
+        target = heading.get('expected_yaw_deg')
+        if (current is not None and target is not None
+                and abs(wrap(current['heading_deg'] - target)) <= nav.cfg['post_action_heading']['deadband_deg']):
+            robot.ineffective_empty_return_turn = None
+            leg['correction_confirmed'] = {'after_ns':current['latest_stamp_ns'],
+                                           'heading_deg':wrap(current['heading_deg'] - target)}
 
 
 def _return_recovery_decision(robot, nav, leg, miss, boundary, *, forward_reserved):
@@ -526,8 +559,85 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
         report_wait()
 
 
+def _handoff_measure(robot, nav, view, reference):
+    if view.get('expected_id') != 1:
+        return None
+    pose = _empty_marker_geometry(robot, nav, view)
+    if not pose:
+        return None
+    lo_x, hi_x = pose['lateral_bounds_m']
+    near, far = pose['distance_bounds_m']
+    yaw = wrap(pose['heading_deg']-reference['heading_deg'])
+    if (hi_x-lo_x > .035 or far-near > .035 or pose['body_forward_bounds_m'][0] <= 0
+            or abs(yaw) + pose['max_heading_deviation_deg'] > 38.
+            or abs((lo_x+hi_x)/2-reference['lateral_m']) > .22
+            or abs((near+far)/2-reference['depth_m']) > .17):
+        return None
+    return {'lateral_m':(lo_x+hi_x)/2, 'depth_m':(near+far)/2, 'heading_deg':pose['heading_deg'],
+            'heading_error_deg':yaw, 'samples':pose['samples'], 'latest_stamp_ns':pose['latest_stamp_ns'],
+            'side_reached':lo_x >= reference['lateral_m']-reference['lateral_tolerance_m'],
+            'depth_reached':far <= reference['depth_m']+reference['depth_tolerance_m'],
+            'within_position':(max(abs(x-reference['lateral_m']) for x in (lo_x,hi_x)) <= reference['lateral_tolerance_m']
+                               and max(abs(x-reference['depth_m']) for x in (near,far)) <= reference['depth_tolerance_m'])}
+
+
+def _reach_handoff(robot, nav, actions, result, reference, initial=None):
+    station = result['handoff_station'] = {'status':'nominal_endpoint','tag_id':1,
+        'source_report':reference['source_report'],'observations':[],'omitted_actions':[],'heading_actions':[]}
+    view = initial
+    # An optional pair of five-step macros can reach the taught mark after
+    # an odd stride count. The loaded retrace only offers even-step retreats.
+    pending = []
+    for forward, run in groupby(actions, key=lambda action: action in ('empty_forward2','free_forward')):
+        motions = list(run)
+        if forward and 'free_forward' in motions:
+            steps = sum(5 if action=='free_forward' else 2 for action in motions)
+            if steps % 2:
+                raise ValueError('接驳站进近需要偶数步以便持物返回')
+            motions = ['empty_forward2'] * (steps//2)
+        pending.extend(motions)
+    while True:
+        robot.check()
+        if view is None:
+            view = {'expected_id':1, 'observation_windows':0, 'detected':False}
+            Checkpoint_Observe(robot, nav, view, lambda:None, single_window=True, quick_id=True, reuse_settled_cache=True)
+        pose = _handoff_measure(robot,nav,view,reference)
+        if pose:
+            station['observations'].append(pose)
+            if pose['within_position']:
+                if abs(pose['heading_error_deg']) > reference['heading_tolerance_deg']:
+                    # This peripheral taught yaw is local to the bay. Do not apply it
+                    # as the magnetic zero for the loaded return to the obstacle course.
+                    ReturnTrial_AlignEmptyMarker(robot,nav,view,direction='outbound',
+                                                 local_handoff=reference)
+                    station['heading_actions'] = view['empty_heading']['actions']
+                    fresh = _handoff_measure(robot,nav,view,reference)
+                    if fresh and fresh['latest_stamp_ns'] != pose['latest_stamp_ns']:
+                        station['observations'].append(fresh)
+                    pose = fresh
+                station['status'] = ('taught_position' if pose and pose['within_position']
+                                     and abs(pose['heading_error_deg']) <= reference['heading_tolerance_deg']
+                                     else 'color_alignment_pending')
+                station['omitted_actions'].extend(pending)
+                break
+            # A bounded nominal group only advances on axes still short of the
+            # taught position. A fresh pose after each group supersedes it.
+            while pending and ((pending[0]=='empty_strafe_right' and pose['side_reached'])
+                               or (pending[0]=='empty_forward2' and pose['depth_reached'])):
+                station['omitted_actions'].append(pending.pop(0))
+        if not pending:
+            break
+        residual, uncertain = _prepare_return_group(robot,nav)
+        action, count = _return_motion_group(robot,pending,residual,uncertain,group_forward=False)
+        del pending[:count]
+        robot.finite(action,configured=True,checkpoint_follows=True)
+        result['station_side_actions'].append(action)
+        result['station_actions'].append(action)
+        view = None
+
+
 def ReturnTrial_ReachPickupStation(robot, chain, result):
-    """Finish the 12-step transfer, face outbound, observe Tag 1 again, then enter the pickup bay."""
+    """Finish the configured transfer, face outbound, observe Tag 1 again, then enter the pickup bay."""
     estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
     planned_anchor = estimate and result.get('estimated_pickup_anchor_tag') == 1
     if not result.get('station_reached') or not (result.get('pickup_anchor_tag') == 1 or planned_anchor) or robot.load_kind != 'empty':
@@ -555,6 +665,15 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     observed, detail = Checkpoint_Observe(robot, nav, leg, waiting, advisory_windows=3,
                                                        reuse_settled_cache=True)
     leg.update(status=observed.value, reason=detail)
+    reference = robot.cfg.get('route_steps',{}).get('command2_handoff_reference')
+    live_handoff = bool(reference and callable(getattr(nav.io,'visual_motion_ready',None)))
+    side = _actions(chain['station_side'])
+    if live_handoff:
+        initial = _handoff_measure(robot,nav,leg,reference)
+        if initial and initial['within_position']:
+            _reach_handoff(robot,nav,side,result,reference,initial=leg)
+            leg.update(ready=True,heading_source='handoff_reference')
+            return leg
     if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
         ReturnTrial_AlignEmptyMarker(robot, nav, leg, direction='outbound')
     heading = leg.get('empty_heading') or {}
@@ -606,8 +725,10 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
         last_seen = 1
     _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=last_seen, return_step='station_side',
                      reason_zh='进入接驳位置，随后用胸部相机识别方块。')
-    _move(robot, nav, _actions(chain['station_side']), result['station_side_actions'],
-          station_actions=result['station_actions'], scan_follows=True)
+    if live_handoff:
+        _reach_handoff(robot,nav,side,result,reference,initial=retry)
+    else:
+        _move(robot, nav, side, result['station_side_actions'], station_actions=result['station_actions'], scan_follows=True)
     leg['ready'] = True
     return leg
 
@@ -649,6 +770,9 @@ def ReturnTrial_Run(robot):
         group_probe = getattr(robot.backend, 'ensure_empty_strafe_group', None)
         if group_probe is not None:
             result['empty_strafe_group_ready'] = group_probe() is True
+        forward_probe = getattr(robot.backend, 'ensure_empty_forward4', None)
+        if forward_probe is not None:
+            result['empty_forward4_ready'] = forward_probe() is True
     profile = RoutePose_Load(robot.project)
 
     set_status(ReturnTrialResult.RETURNING, 'moving through the estimated empty return')
