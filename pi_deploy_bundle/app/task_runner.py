@@ -477,15 +477,21 @@ class Robot:
         return None
 
     def _entry_visual_before_magnetic_turn(self,name,next_action,nav,settings):
-        from entrance_trial import _tag2_boundary_replan
+        from entrance_trial import _tag2_boundary_replan, _tag2_partial_near_boundary
         report=self.boundary_visual_observation(name)
+        if not report:
+            return None
         checkpoint=Checkpoint_FromBoundary(self,nav,2,action=name,report=report)
-        if checkpoint is None:
-            return None
         remaining=Cmd0Motion_ForwardStepCount([next_action]) if next_action else 0
-        decision=_tag2_boundary_replan(checkpoint,nav,settings,remaining)
+        decision=(_tag2_boundary_replan(checkpoint,nav,settings,remaining,
+                                        continuous=Cmd0Motion_ContinuousReady(self.backend))
+                  if checkpoint is not None else None)
         if decision is None:
-            return None
+            hint=_tag2_partial_near_boundary(self,nav,settings,name,report)
+            if hint is None:
+                return None
+            return {'next_action':'scan_tag2','fresh_tag':2,'advisory_frames':hint['samples'],
+                    'position_confirmed':False,'reason_zh':'动作结束时看到近处 Tag 2，先在当前站姿补帧。'}
         _,plan,_=decision
         return {'next_action':next_action or 'scan_tag2','fresh_tag':2,
                 'visual_heading_deg':plan['heading_deg'],'position_confirmed':False}
@@ -752,7 +758,7 @@ class Robot:
             if entry_context is not None:
                 sample_options['entry_followup']=lambda:self._entry_followup(name,entry_context[0])
                 trial=self.cfg.get('route_steps',{}).get('tag2_forward_trial') or {}
-                if trial.get('enabled') is True and Cmd0Motion_ContinuousReady(self.backend):
+                if trial.get('enabled') is True:
                     sample_options['prefer_visual_followup']=lambda:self._entry_visual_before_magnetic_turn(
                         name,entry_context[0],nav,trial)
             else:
@@ -1508,11 +1514,15 @@ class Robot:
         stance_evidence['other_id'] |= any(tag!=1 for tag in observed)
         stance_evidence['seen'] |= (1 in observed or bool(scan.get('observations'))
                                    or type(decoded) is int and decoded>0)
-        if (scan.get('status')!='no_tag' or stance_evidence['other_id']
+        if (scan.get('status') not in _TAG1_REOBSERVE_SCANS or stance_evidence['other_id']
                 or approach.get('retreat_action')):
             return decision.WAIT_AMBIGUOUS,None
         if not stance_evidence['seen']:
-            if approach.get('far_probe_done'):
+            # At the end of the pickup strafe a blank frame provides no range.
+            # Repeating a blind probe can carry the tag underneath the chest.
+            pickup_entry=getattr(self,'route_command','0') in ('1','2')
+            if (scan.get('status')!='no_tag' or approach.get('far_probe_done')
+                    or pickup_entry and approach.get('completed_actions')):
                 return decision.WAIT_AMBIGUOUS,None
             return decision.ADVANCE_UNSEEN,None
 
@@ -1545,10 +1555,19 @@ class Robot:
         camera_ready=VisualCamera_GetFreshnessCheck(nav.io)
         live=camera_ready is not None and camera_ready(geometry['latest_stamp_ns'])
         if .02<=near<=far<=.11:
-            if (live and approach.get('last_forward_completed_ros_ns')==stance
+            # An unreliable orientation cannot authorize the next leg, but
+            # fresh, consistent close-range rows can veto another forward probe.
+            # When the ID was decoded but its orientation was rejected, double
+            # check the raw body-forward position independently of that orientation.
+            raw_near,raw_far=geometry['body_forward_bounds_m']
+            close_confirmed=(scan.get('status')=='no_tag' or
+                             geometry['samples']>=2 and .01<=raw_near<=raw_far<=.14 and raw_far-raw_near<=.025)
+            if (live and close_confirmed and approach.get('last_forward_completed_ros_ns')==stance
                     and Cmd0Motion_ContinuousReady(self.backend)):
                 return decision.RETREAT_NEAR,geometry
             return decision.WAIT_NEAR,geometry
+        if scan.get('status')!='no_tag':
+            return decision.WAIT_AMBIGUOUS,geometry
         # Use the configured upper travel bound without weakening the default margin.
         settings=self.cfg.get('route_steps',{}).get('tag2_forward_trial',{})
         travel=settings.get('approach_two_step_distance_m',

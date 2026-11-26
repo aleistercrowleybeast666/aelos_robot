@@ -132,6 +132,14 @@ class TaskReportTests(unittest.TestCase):
         self.assertIn("Tag 2 提前读码 · 第 12 步 · 剩余直行 2 → 0 步 · 距码约 18.5 cm · 航向 -12.26°",lines)
         self.assertIn("Tag 2 已复用当前动作结束后的有效帧",lines)
 
+    def test_partial_near_tag2_reports_pending_sideways_decision(self):
+        result = {"entrance_trial": {"entry_boundary_observations": [{
+            "after_steps": 8, "previous_remaining_steps": 2, "remaining_steps": 0,
+            "advisory_frames": 1, "confirmed_for_strafe": False,
+        }]}}
+        self.assertIn("Tag 2 提前读码 · 第 8 步 · 剩余直行 2 → 0 步 · 1 帧提示已靠近，原地补帧后再判断侧跨",
+                      task_report.TaskReport_Diagnostics(result))
+
     def test_failed_atomic_publish_cleans_temporary_file(self):
         with patch.object(task_report.os, "replace", side_effect=PermissionError("publish denied")):
             with self.assertRaises(PermissionError):

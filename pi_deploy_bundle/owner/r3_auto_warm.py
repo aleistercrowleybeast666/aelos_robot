@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-from r3_micro_gate import (CORRECTION_PROFILE_PROBE, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
+from r3_micro_gate import (LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
                            PICKUP_BACKWARD6_OPS, PROBE_OPS, RIGHT5_ROUTE_PROBE, SMALL_PROFILE_PROBE, SMALL_STRAFE_PROBE)
 
 PROTOCOL='r3.warm.v1'
@@ -166,8 +166,8 @@ class GateBackend:
                 self.current()
                 if op in EMPTY_PROBES:
                     raise EmptyRecoveryUnavailable('MCU 未提供空载回程微调能力')
-                if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
-                    return  # Keep the latest confirmed profile.
+                if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE,LEVEL_BACKWARD8_PROBE):
+                    return  # Ordered decline; keep the previously confirmed capabilities.
                 raise PairProbeUnavailable('MCU 未确认双抱能力')
             raise RuntimeError('operation {} failed; reason={}; last_result={}; last_rejection={}; in_flight={}'.format(op,detail.get('reason'),detail.get('last_result'),detail.get('last_rejection'),detail.get('in_flight')))
         r=self.current(require_mcu=False);expected='manual' if op in ('finish','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES) else 'auto'
@@ -217,6 +217,7 @@ class GateBackend:
     def verify_pickup_capabilities(self,timeout):
         self.check_manual_idle()
         micro=self.current()['micro_trial']
+        pair_confirmed=False
         if (micro['cmd0_route_deployment_readback_ready']
                 and not micro['pair_deployment_readback_ready']):
             try:
@@ -224,9 +225,12 @@ class GateBackend:
             except PairProbeUnavailable:
                 pass
             else:
-                if self.current().get('mission_v5_pair_ready') is True:
-                    return
-        self.verify_cmd0_continuous(timeout)
+                pair_confirmed=self.current().get('mission_v5_pair_ready') is True
+        if not pair_confirmed:
+            self.verify_cmd0_continuous(timeout)
+        micro=self.current()['micro_trial']
+        if micro.get('pickup_level_backward8_ready') is False and micro.get('cmd0_route_ready') is True:
+            self.call(LEVEL_BACKWARD8_PROBE,min(timeout,PAIR_PROBE_TIMEOUT_S))
     def verify_small_strafe(self,timeout):
         self.check_manual_idle()
         if self.current().get('micro_trial',{}).get('small_strafe_deployment_readback_ready') is not True:
@@ -319,6 +323,8 @@ class GateBackend:
     def Pickup_CanTryBackward6(self):
         state=self.current(require_mcu=False)
         return state.get('mode')=='auto' and state.get('mission_v5_pair_ready') is True
+    def pickup_level_backward8_ready(self):
+        return self._pickup_backward_ready('pickup_level_backward8_ready')
     def pickup_backward8_ready(self):
         return self._pickup_backward_ready('pickup_backward8_ready')
     def cmd0_legacy_ready(self):

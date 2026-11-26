@@ -20,7 +20,7 @@ EntranceTrial_BoundaryCheckpoint = Checkpoint_FromBoundary
 EntranceTrial_ObserveCheckpoint = Checkpoint_Observe
 EntranceTrialResult = CheckpointScanResult
 
-_TAG1_FORWARD_TRIAL_COUNTS = (8, 12, 14, 15)
+_TAG1_FORWARD_TRIAL_OFFSETS = (-2, 2, 4, 5)
 _TAG1_STANCE_REFERENCE_MAX_NS = 5_000_000_000
 TAG1_CLEARANCE_YAW_DEG = 20.
 _TAG1_CLEARANCE_SIDE_M = .10
@@ -372,8 +372,13 @@ def _tag2_boundary_pose_rows(robot, nav, boundary):
     if (not boundary.get('camera_info_ready') or not all(type(stamp) is int for stamp in (after, completed, now))
             or not 0 < completed <= after <= now):
         return []
+    restart = boundary.get('camera_restart_ns', 0)
+    observed = boundary.get('now_ns', now)
+    if type(restart) is not int or type(observed) is not int or boundary.get('stance_completed_ns', completed) != completed:
+        return []
     return [row for row in boundary['scan'].get('observations', ())
-            if type(row.get('stamp_ns')) is int and after < row['stamp_ns'] <= now
+            if isinstance(row, dict) and type(row.get('stamp_ns')) is int
+            and max(after,restart) < row['stamp_ns'] <= min(observed,now)
             and now-row['stamp_ns'] <= nav.cfg['max_age_s']*1e9]
 
 
@@ -391,15 +396,51 @@ def _tag2_boundary_near_hint(robot, nav, boundary, near_limit, *, rows=None):
             'stance_completed_ns': robot.last_action_completed_ros_ns, 'advisory_only': True}
 
 
-def _tag2_boundary_replan(checkpoint, nav, settings, remaining):
+def _tag2_partial_near_boundary(robot, nav, settings, action, boundary):
+    # A partial reading may cancel unwalked forward strides. Only the normal
+    # checkpoint controller decides whether to retreat, turn or depart sideways.
+    boundary = boundary or {}
+    scan = boundary.get('scan') or {}
+    camera = boundary.get('camera_info') or {}
+    pinned = nav.cfg.get('visual_micro', {}).get('camera_info', {})
+    expected = pinned.get('expected_fingerprint')
+    if (pinned.get('source_confirmed') is not True or boundary.get('action') != action or boundary.get('target_id') != 2 or boundary.get('fault_diagnostic')
+            or not all(boundary.get(k) is True for k in ('boundary_valid','contract_match','camera_healthy','camera_info_ready'))
+            or boundary.get('stance_completed_ns') != robot.last_action_completed_ros_ns
+            or not expected or camera.get('ready') is not True or camera.get('fingerprint') != expected
+            or 2 not in scan.get('observed_ids', ()) or not settings.get('distance_window_m')):
+        return None
+    geometry = RoutePose_PartialCheckpointGeometry(_tag2_boundary_pose_rows(robot, nav, boundary), nav.cfg, 2)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if geometry is None or not live or not live(geometry['latest_stamp_ns']):
+        return None
+    near, far = geometry['distance_bounds_m']
+    # A singleton only justifies re-reading a genuinely near marker. A pair of
+    # independent, agreeing frames can also protect the configured target band.
+    limit = (settings['distance_window_m'][0] + .01 if geometry['samples'] == 1 else
+             settings['target_distance_m'] + settings['deadband_m'])
+    if (not .02 <= near <= far <= limit or far-near > .025 or geometry['max_heading_deviation_deg'] > 3.
+            or geometry['projection_bounds'][0] < .65 or geometry['body_forward_bounds_m'][0] <= 0.
+            or max(map(abs, geometry['lateral_bounds_m'])) > .20):
+        return None
+    return dict(geometry, distance_m=(near+far)/2, advisory_only=True)
+
+
+def _tag2_boundary_replan(checkpoint, nav, settings, remaining, *, continuous=True):
     """Shorten the pending straight using a settled observation before another macro."""
-    plan = RoutePose_PlanTag2ForwardTrial(checkpoint,nav.cfg,settings,candidate_counts=TAG2_APPROACH_COUNTS)
+    counts = TAG2_APPROACH_COUNTS if continuous else tuple(count for count in TAG2_APPROACH_COUNTS if count % 2 == 0)
+    plan = RoutePose_PlanTag2ForwardTrial(checkpoint,nav.cfg,settings,candidate_counts=counts)
     if 'distance_bounds_m' not in plan:
         return None
     near, far = plan['distance_bounds_m']
     left, right = plan['lateral_bounds_m']
     if (not .02 <= near <= far <= .40 or far-near > .025 or right-left > .025
-            or plan['projection_bounds'][0] < .85 or plan['max_heading_deviation_deg'] > 3.):
+            or plan['max_heading_deviation_deg'] > 3.):
+        return None
+    if (far <= settings['target_distance_m'] + settings['deadband_m']
+            and plan['projection_bounds'][0] >= .65):
+        return 0,plan,'Tag 2 已在目标距离内或更近，结束剩余直行，原地核对侧跨起点。'
+    if plan['projection_bounds'][0] < .85:
         return None
     if plan.get('heading_to_correct_deg') is not None or plan.get('heading_reobserve_required'):
         return 0,plan,'已提前读到 Tag 2，先修正当前航向。'
@@ -546,10 +587,16 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         profile = RoutePose_Load(robot.project)
         trial = route_steps.get('tag2_forward_trial') or {}
         trial_options = []
-        if target_steps == COMMAND0_ENTRY_FORWARD_STEPS and trial.get('enabled') is True:
-            for count in _TAG1_FORWARD_TRIAL_COUNTS:
+        if trial.get('enabled') is True:
+            pairs = getattr(robot.backend, 'mission_pair_ops', None)
+            supported = pairs() if robot.load_kind == 'double' and pairs is not None else None
+            for offset in _TAG1_FORWARD_TRIAL_OFFSETS:
+                count = target_steps + offset
+                if not 2 <= count <= 80:
+                    continue
                 actions, exact_steps = EntranceTrial_PlanForward(count, continuous=continuous, legacy=legacy)
-                if exact_steps == count and robot.count + len(actions) <= robot.cfg['max_body_macros_per_journey']:
+                if (exact_steps == count and robot.count + len(actions) <= robot.cfg['max_body_macros_per_journey']
+                        and (supported is None or all('double_' + action in supported for action in actions))):
                     trial_options.append(count)
         trial_stride = trial.get('two_step_distance_m')
         entry_scan = entry_alignment.get('scan', {})
@@ -598,7 +645,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
     move_entry = getattr(robot, 'entry_forward_action', None)
     tag2_settings = route_steps.get('tag2_forward_trial') or {}
     live_tag2_trial = tag2_settings.get('enabled') is True
-    use_boundary_plan = (live_tag2_trial and continuous and move_entry is not None
+    use_boundary_plan = (live_tag2_trial and move_entry is not None
                          and callable(getattr(nav.io,'boundary_visual_snapshot',None)))
     if use_boundary_plan:
         native_splits = {('cmd0_carry_forward10',):('carry_forward','carry_forward2'),
@@ -630,18 +677,25 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
             result['completed_steps'] = Cmd0Motion_ForwardStepCount(result['completed_actions'])
         if not use_boundary_plan or not pending:
             continue
-        checkpoint = Checkpoint_FromBoundary(robot,nav,expected_id,action=operation)
-        if checkpoint is None:
-            continue
-        result['tag2_seen_earlier_boundary'] = True
+        boundary = getattr(robot, 'last_boundary_visual', None)
+        checkpoint = Checkpoint_FromBoundary(robot,nav,expected_id,action=operation,report=boundary)
         remaining = Cmd0Motion_ForwardStepCount(pending)
-        decision = _tag2_boundary_replan(checkpoint,nav,tag2_settings,remaining)
+        if checkpoint is not None:
+            result['tag2_seen_earlier_boundary'] = True
+            decision = _tag2_boundary_replan(checkpoint,nav,tag2_settings,remaining,continuous=continuous)
+        else:
+            decision = None
         if decision is None:
-            continue
+            hint = _tag2_partial_near_boundary(robot,nav,tag2_settings,operation,boundary)
+            if hint is None:
+                continue
+            decision = (0,hint,'动作边界已看到近处 Tag 2，留在当前站姿补帧，核对后再横移。')
         proposed, plan, reason = decision
         change = {'after_steps':result['completed_steps'], 'previous_remaining_steps':remaining,
                   'remaining_steps':remaining,'distance_m':plan['distance_m'],
                   'heading_deg':plan['heading_deg'],'lateral_bounds_m':plan['lateral_bounds_m']}
+        if plan.get('advisory_only'):
+            change.update(advisory_frames=plan['samples'], confirmed_for_strafe=False)
         result.setdefault('entry_boundary_observations',[]).append(change)
         if not reason or proposed == remaining:
             continue
@@ -673,7 +727,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
             and boundary.get('camera_healthy') is True and expected_id in glimpse.get('observed_ids', ())):
         result['tag2_boundary_sighting'] = {'accepted_frames': glimpse.get('samples',0),
                                             'after_ns': boundary.get('after_ns')}
-        if live_tag2_trial and 'distance_window_m' in tag2_settings and continuous:
+        if live_tag2_trial and 'distance_window_m' in tag2_settings:
             rows = _tag2_boundary_pose_rows(robot, nav, boundary)
             if rows:
                 result['tag2_boundary_sighting'].update(partial_pose_rows=rows,

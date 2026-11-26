@@ -10,7 +10,7 @@ import time
 import uuid
 import re
 from r3_recovery_gate import RecoveryGate
-from r3_micro_gate import CORRECTION_PROFILE_PROBE, EMPTY_GROUP_OPS, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
+from r3_micro_gate import LEVEL_BACKWARD8_PROBE, CORRECTION_PROFILE_PROBE, EMPTY_GROUP_OPS, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
 
 WIRE_BASE=0x2A00
 CANCELLED_BOUNDARY=WIRE_BASE+0xFE
@@ -286,6 +286,8 @@ class Gate:
             if c.get('probe_unavailable'):
                 if op == EMPTY_RECOVERY_PROBE:
                     self.micro.empty_recovery_receipt = None
+                elif op == LEVEL_BACKWARD8_PROBE:
+                    self.micro.level_backward8_receipt = None
                 elif op == EMPTY_GROUP_PROBE:
                     self.micro.empty_group_receipt = None
                 elif op == CORRECTION_PROFILE_PROBE:

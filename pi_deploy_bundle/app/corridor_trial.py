@@ -2490,10 +2490,17 @@ def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
         return pose, ready
     # A double grip can travel less than predicted. Reconsider the complete measured
     # pose once, including yaw and retreat clearance, before starting the right traverse.
+    stance = robot.last_action_completed_ros_ns
     latest_pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True)
     followup = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings, candidate_counts=(2,))
     initial['paired_approach_followup'] = followup
     if 'distance_bounds_m' not in followup:
+        return pose, ready
+    stamp = followup.get('latest_stamp_ns')
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if (type(stance) is not int or robot.last_action_completed_ros_ns != stance
+            or type(stamp) is not int or stamp <= stance or not live or not live(stamp)):
+        followup.update(planned_steps=0, reason='双抱已完成本组进近，缺少动作结束后的新位姿，沿用本组落点估算。')
         return pose, ready
     leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
     leg.pop('tag2_projected_side_hint', None)

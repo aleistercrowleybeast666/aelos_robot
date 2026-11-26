@@ -596,6 +596,9 @@ def _route_notes(result):
         if not all(type(value) is int for value in (at,before,remaining)) or before == remaining:
             continue
         details = [f"Tag 2 提前读码 · 第 {at} 步 · 剩余直行 {before} → {remaining} 步"]
+        frames = sighting.get("advisory_frames")
+        if type(frames) is int and frames > 0 and sighting.get("confirmed_for_strafe") is False:
+            details.append(f"{frames} 帧提示已靠近，原地补帧后再判断侧跨")
         distance = sighting.get("distance_m")
         if type(distance) in (int,float) and math.isfinite(distance):
             details.append(f"距码约 {distance*100:.1f} cm")

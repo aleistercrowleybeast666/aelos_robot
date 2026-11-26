@@ -24,7 +24,8 @@ EMPTY_RECOVERY_PROBE = 'empty_recovery_capability'
 EMPTY_PROBES = frozenset((EMPTY_RECOVERY_PROBE, EMPTY_GROUP_PROBE))
 EMPTY_RECOVERY_OPS = frozenset(('empty_micro_left', 'empty_micro_right', 'empty_backward2'))
 PAIR_PROBE = 'horizontal_pair_capability'
-OPTIONAL_PROBES = frozenset((PAIR_PROBE, SMALL_PROFILE_PROBE, CORRECTION_PROFILE_PROBE)) | EMPTY_PROBES
+LEVEL_BACKWARD8_PROBE = 'pickup_level_backward8_capability'
+OPTIONAL_PROBES = frozenset((PAIR_PROBE, SMALL_PROFILE_PROBE, CORRECTION_PROFILE_PROBE, LEVEL_BACKWARD8_PROBE)) | EMPTY_PROBES
 PICKUP_BACKWARD4_PROBE = 'pickup_backward4_capability'
 PICKUP_BACKWARD4_OP = 'cmd1_carry_backward4'
 PICKUP_BACKWARD4_PAIR_OP = 'double_cmd1_carry_backward4'
@@ -46,6 +47,7 @@ PAIR_BODY_OPS = frozenset(('grab_double', 'place_double')) | frozenset(
      'carry_forward7', 'carry_forward9'}
 )
 PROBE_OPS = frozenset(('capability', SMALL_STRAFE_PROBE, CMD0_ROUTE_PROBE, MEDIUM_TURN_PROBE, RIGHT5_ROUTE_PROBE, *OPTIONAL_PROBES, *_PAIR_PROBES))
+NAMES[LEVEL_BACKWARD8_PROBE] = 'r3_pickup_level_v1_backward8_capability'
 NAMES[CORRECTION_PROFILE_PROBE] = 'r3_correction_v3_capability'
 NAMES[EMPTY_GROUP_PROBE] = 'r3_empty_group_v1_capability'
 NAMES.update({op: 'r3_empty_group_v1_' + op for op in EMPTY_GROUP_OPS})
@@ -124,10 +126,14 @@ TRANSFER_STRAFE_CODE_SHA256 = dict(INTERMEDIATE_STRAFE_CODE_SHA256, **{
     'lua/craic_auto_bridge.lua': 'cca85e5f51fcdb5f25f3e41705aad57ad846885a362e8390537ba388e5b6be61',
     'lua/craic_single_micro.lua': '4043c09d9a77a603df28346c27f0b11680eb279dcdd059b1da074f5e0c1222b4',
 })
+LEVEL_BACKWARD8_CODE_SHA256 = dict(TRANSFER_STRAFE_CODE_SHA256, **{
+    'lua/craic_auto_bridge.lua': '1cf0bf7bcfe7b0511a171373ccda1e8a77233546b5acc4cc9eb68fa9b26b1da5',
+    'lua/craic_button_gaits.lua': '0ced4cce313f9c961a1d2f8dfbb52779fcec59a342de8063f41431e00de6e7f9',
+})
 _PICKUP_BACKWARD_CODE_VARIANTS = (PICKUP_BACKWARD4_CODE_SHA256, PICKUP_BACKWARD6_CODE_SHA256,
                                   PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256,
                                   PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256, PICKUP_LEVEL_BACKWARD6_CODE_SHA256,
-                                  EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256)
+                                  EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256, LEVEL_BACKWARD8_CODE_SHA256)
 _PAIR_ROUTE_CODE_VARIANTS = (PAIR_ROUTE_CODE_SHA256, *_PICKUP_BACKWARD_CODE_VARIANTS)
 _CMD0_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
@@ -169,6 +175,7 @@ class MicroGate:
         self.capability = None
         self.empty_recovery_receipt = None
         self.empty_group_receipt = None
+        self.level_backward8_receipt = None
         self.small_profile_receipt = None
         self.permit = None
         self.used_nonces = set()
@@ -177,6 +184,7 @@ class MicroGate:
         self.capability = None
         self.empty_recovery_receipt = None
         self.empty_group_receipt = None
+        self.level_backward8_receipt = None
         self.small_profile_receipt = None
         self.permit = None
 
@@ -315,12 +323,15 @@ class MicroGate:
         return None
 
     def empty_recovery_ready(self, epoch, recovery_ready):
-        return self._empty_receipt_ready(self.empty_recovery_receipt, epoch, recovery_ready)
+        return self._motion_receipt_ready(self.empty_recovery_receipt, epoch, recovery_ready)
 
     def empty_strafe_group_ready(self, epoch, recovery_ready):
-        return self._empty_receipt_ready(self.empty_group_receipt, epoch, recovery_ready)
+        return self._motion_receipt_ready(self.empty_group_receipt, epoch, recovery_ready)
 
-    def _empty_receipt_ready(self, receipt, epoch, recovery_ready):
+    def pickup_level_backward8_ready(self, epoch, recovery_ready):
+        return self._motion_receipt_ready(self.level_backward8_receipt, epoch, recovery_ready)
+
+    def _motion_receipt_ready(self, receipt, epoch, recovery_ready):
         return bool(receipt and self.mission_ready(epoch, recovery_ready)
                     and receipt['session'] == self.session and receipt['epoch'] == epoch
                     and receipt['boot_id'] == self.boot_id
@@ -388,6 +399,8 @@ class MicroGate:
             return 'micro_MCU_verified_installation_and_initial_reload_required'
         if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE) and not self.small_strafe_ready(epoch, recovery_ready):
             return 'small_strafe_profile_requires_current_small_strafe_capability'
+        if op == LEVEL_BACKWARD8_PROBE and not self.cmd0_route_ready(epoch,recovery_ready):
+            return 'level_eight_probe_requires_current_route'
         if op in EMPTY_PROBES and not self.mission_ready(epoch, recovery_ready):
             return 'empty_recovery_probe_requires_current_mission'
         if op in EMPTY_GROUP_OPS and not self.empty_strafe_group_ready(epoch, recovery_ready):
@@ -421,7 +434,9 @@ class MicroGate:
         if op in PICKUP_BACKWARD6_OPS and not (self.pickup_backward6_ready(epoch, recovery_ready)
                 or self.pair_ready(epoch, recovery_ready)):
             return 'pickup_backward6_current_native_capability_required'
-        if op in PICKUP_BACKWARD8_OPS and not self.pickup_backward8_ready(epoch, recovery_ready):
+        if op in PICKUP_BACKWARD8_OPS and not (self.pickup_backward8_ready(epoch, recovery_ready) or
+                self.pickup_level_backward8_ready(epoch, recovery_ready) and
+                (not op.startswith('double_') or self.pair_ready(epoch,recovery_ready))):
             return 'pickup_backward8_current_native_capability_required'
         if op in MOTION_OPS and not (self.deployment.get('policy_single_enabled') is True and recovery_ready and self.permit_ready(epoch) and self.capability_ready(epoch)):
             return 'micro_live_capability_recovery_and_guarded_trial_required'
@@ -442,6 +457,8 @@ class MicroGate:
                 c.get('cancelled') is not False):
             if op == EMPTY_RECOVERY_PROBE:
                 self.empty_recovery_receipt = None
+            elif op == LEVEL_BACKWARD8_PROBE:
+                self.level_backward8_receipt = None
             elif op == EMPTY_GROUP_PROBE:
                 self.empty_group_receipt = None
             elif op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
@@ -456,6 +473,8 @@ class MicroGate:
 
         if op == EMPTY_RECOVERY_PROBE:
             self.empty_recovery_receipt = receipt
+        elif op == LEVEL_BACKWARD8_PROBE:
+            self.level_backward8_receipt = receipt
         elif op == EMPTY_GROUP_PROBE:
             self.empty_group_receipt = receipt
         elif op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
@@ -468,7 +487,7 @@ class MicroGate:
                     small_strafe_profile=self.small_strafe_profile(epoch),
                     empty_recovery_deployment_readback_ready=(self.deployment_ready()
                         and any(_matches_readback(self.deployment['verified_files_sha256'], code)
-                                for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256))),
+                                for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256,LEVEL_BACKWARD8_CODE_SHA256))),
                     empty_strafe_group_ready=self.empty_strafe_group_ready(epoch,recovery_ready),
                     correction_profile_probe_supported=True,
                     empty_recovery_ready=self.empty_recovery_ready(epoch,recovery_ready),
@@ -493,6 +512,7 @@ class MicroGate:
                     pickup_backward6_ready=self.pickup_backward6_ready(epoch,recovery_ready),
                     pickup_backward8_deployment_readback_ready=self.pickup_backward8_deployment_ready(),
                     pickup_backward8_ready=self.pickup_backward8_ready(epoch,recovery_ready),
+                    pickup_level_backward8_ready=self.pickup_level_backward8_ready(epoch,recovery_ready),
                     deployment_evidence_scope=(self.deployment or {}).get('installation_evidence_scope','same_boot_legacy_record'),
                     initial_reload_boot_id=(self.deployment or {}).get('verified_boot_id'),
                     current_boot_file_readback_claimed=False,

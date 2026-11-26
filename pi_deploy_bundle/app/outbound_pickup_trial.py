@@ -75,8 +75,11 @@ def _pickup_retreat_groups(backend, remaining, *, allow_native_six=True):
                                     (6, PICKUP_BACKWARD6_ACTION), (4, PICKUP_BACKWARD4_ACTION)):
         if remaining < native_steps or (native_steps == 6 and not allow_native_six):
             continue
-        ready = getattr(backend, f'pickup_backward{native_steps}_ready', lambda: False)
-        live_six = (native_steps == remaining == 6
+        # Older boards export an eight-step macro with extra backward pitch.
+        # Only the gait revision verified by the owner can run all eight together.
+        capability = 'pickup_level_backward8_ready' if native_steps == 8 else f'pickup_backward{native_steps}_ready'
+        ready = getattr(backend, capability, lambda: False)
+        live_six = (native_steps == 6
                     and getattr(backend, 'Pickup_CanTryBackward6', lambda: False)() is True)
         if ready() is True or live_six:
             repeats, remaining = divmod(remaining, native_steps)
@@ -107,8 +110,10 @@ def _run_startup_retreat(robot, nav, pending, report):
         except PickupRetreatUnavailable:
             if operation != PICKUP_BACKWARD6_ACTION:
                 raise
-            fallback = _pickup_retreat_groups(robot.backend, strides, allow_native_six=False)
-            unrun.extendleft(reversed(fallback))
+            # The MCU explicitly rejected this request before starting. Replan
+            # every still-unexecuted stride, so an older four-step board uses 4+4.
+            remaining_steps = strides + sum(count for _, count in unrun)
+            unrun = deque(_pickup_retreat_groups(robot.backend, remaining_steps, allow_native_six=False))
             boundary.update(continuous=False, native_six_unavailable=True,
                             groups=completed_groups + [group for _,group in unrun])
             continue
@@ -243,6 +248,9 @@ def _tag1_pickup_exit_actions(approach):
     # The turn precedes pickup. Undo the actual walk in the same body frame, in reverse order.
     reverse = {'empty_forward2': ('back', 2), 'free_forward': ('back', 5),
                'empty_strafe_left': ('strafe_right_once', 1), 'empty_strafe_right': ('strafe_left_once', 1)}
+    for count in (2, 3):
+        reverse[f'empty_strafe_left{count}'] = ('strafe_right_once', count)
+        reverse[f'empty_strafe_right{count}'] = ('strafe_left_once', count)
     actions = []
     for direction, group in groupby((reverse[name] for name in reversed(approach)), key=lambda motion: motion[0]):
         count = sum(strides for _, strides in group)

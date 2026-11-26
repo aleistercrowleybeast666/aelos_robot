@@ -6,7 +6,7 @@ from math import acos, atan2, degrees, radians, sin, sqrt, tan
 from pathlib import Path
 from statistics import median
 
-from cmd0_motion import COMMAND0_ENTRY_FORWARD_STEPS, SMALL_SIDE_ACTIONS, LEGACY_SMALL_STRAFE_LIMIT_M
+from cmd0_motion import SMALL_SIDE_ACTIONS, LEGACY_SMALL_STRAFE_LIMIT_M
 from entry_camera import finite, rotate
 from nav_observation import Observation_DistinctTagRows, circular_median, ground_pose, summarize, wrap
 from pixel_diagnostics import load_entrance_reference
@@ -569,9 +569,9 @@ def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_count
     """Fold a repeatable Tag 1 depth error into the length of the existing straight."""
     result = {'status': RoutePosePlanResult.NOMINAL.value, 'tag_id': 1, 'count': nominal,
               'nominal_count': nominal, 'source': 'tag1_forward_trial'}
-    if (nominal != COMMAND0_ENTRY_FORWARD_STEPS or not _interval(two_step_distance_m)
+    if (type(nominal) is not int or not 2 <= nominal <= 80 or not _interval(two_step_distance_m)
             or two_step_distance_m[0] <= 0):
-        return dict(result, reason='Tag 1 trial requires the ten-step baseline and a trial stride range')
+        return dict(result, reason='Tag 1 trial requires a valid configured baseline and a trial stride range')
     evidence, problem = _trial_ground_depth(checkpoint, nav_cfg, 1)
     if problem:
         return dict(result, reason=problem)
@@ -594,6 +594,8 @@ def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_count
     residual = (nearest - _TAG1_TRIAL_TARGET_M, farthest - _TAG1_TRIAL_TARGET_M)
     candidates = []
     for count in candidate_counts:
+        if type(count) is not int or not 2 <= count <= 80:
+            continue
         difference = count - nominal
         if difference * direction <= 0 or abs(difference) > 5:
             continue

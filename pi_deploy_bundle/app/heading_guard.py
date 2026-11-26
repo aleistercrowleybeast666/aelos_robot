@@ -1286,7 +1286,7 @@ class HeadingGuard:
             followup = prefer_visual_followup()
             if followup is not None:
                 report.update(status='entry_heading_followup',entry_followup=followup,
-                              reason_zh=f"当前动作结束后已读到有效 Tag {followup['fresh_tag']} 位姿，先用视觉更新路线。")
+                              reason_zh=followup.get('reason_zh') or f"当前动作结束后已读到有效 Tag {followup['fresh_tag']} 位姿，先用视觉更新路线。")
                 return report
         residual_driven=recovery and not self.budget.limit_total_angle
         if abs(error) <= self.c['release_deg']:
