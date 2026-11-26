@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,31 @@ def _exchange(left, right):
     temporary.rename(right)
 
 
+class OwnerRestartDiagnosticsTests(unittest.TestCase):
+    def test_absent_status_socket_reports_remote_path(self):
+        with patch.object(remote.socket, 'AF_UNIX', 1, create=True), patch.object(remote.socket, 'socket') as socket_factory:
+            connection = socket_factory.return_value.__enter__.return_value
+            connection.connect.side_effect = FileNotFoundError(errno.ENOENT, 'No such file or directory')
+            with self.assertRaises(FileNotFoundError) as failure:
+                remote._status()
+        self.assertEqual(failure.exception.filename, str(Path.home()/'.local/state/r3_simple/control.sock'))
+        self.assertIn('ROS 控制节点', str(failure.exception))
+
+    def test_wait_reports_last_observation_and_accepts_verified_replacement(self):
+        cases = ((FileNotFoundError('control.sock missing'), 'control.sock missing'),
+                 ({'owner': {'session': 'old'}}, '仍是重载前的会话'),
+                 ({'owner': {'session': 'new'}}, '任务进度接口'))
+        for last, message in cases:
+            with self.subTest(last=last), patch.object(remote, '_status', side_effect=[
+                    RuntimeError('first poll'), last]), patch.object(remote.time, 'sleep'), \
+                    patch.object(remote.time, 'monotonic', side_effect=[0, 0, 1, 36]):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    remote._wait_owner('old', True)
+        new = {'owner': {'session': 'new'}, 'mission_progress': None}
+        with patch.object(remote, '_status', side_effect=[FileNotFoundError(), new]), patch.object(remote.time,'sleep'):
+            self.assertEqual(remote._wait_owner('old', True), new)
+
+
 class DeploymentTransactionTests(unittest.TestCase):
     def setUp(self):
         if not (settings.DEFAULT_BUNDLE/'manifest.json').is_file():
@@ -27,6 +53,8 @@ class DeploymentTransactionTests(unittest.TestCase):
         self.target = directory/'app'
         self.owner_dir = directory/'owner'
         self.owner_dir.mkdir()
+        self.service = self.owner_dir/'CMDcontrol_service.py'
+        self.service.write_bytes(b'custom serial service')
         self.owner = self.owner_dir/remote.OWNER_NAME
         self.owner.write_text('old owner', encoding='utf-8')
         for name in remote.OWNER_SUPPORT:
@@ -90,6 +118,88 @@ class DeploymentTransactionTests(unittest.TestCase):
         for name in remote.OWNER_SUPPORT:
             self.assertEqual((self.owner_dir/name).read_text(), 'old '+name)
         self.assertTrue((self.slot/'app/run_auto.py').exists())
+
+    def test_serial_maintenance_precedes_exchange_and_a_new_session_deploys(self):
+        original = b"serial.Serial('/dev/serial0', 9600)"
+        fixed = b"serial.Serial('/dev/serial0', 9600, timeout=0.2)"
+        self.service.write_bytes(original)
+        self.service.chmod(0o755)
+        initial = self.service.stat()
+        for ticket in ('b'*32, 'c'*32):
+            shutil.copytree(self.slot, remote._transaction(self.target, ticket))
+        backup = self.slot/'pre-serial-shutdown-CMDcontrol_service.py'
+        with patch.object(remote, '_SERIAL_ORIGINAL_SHA', hashlib.sha256(original).hexdigest()), \
+                patch.object(remote, '_SERIAL_TIMED_SHA', hashlib.sha256(fixed).hexdigest()):
+            with self.assertRaisesRegex(RuntimeError, '重启树莓派一次'):
+                remote._commit(self.target, self.ticket)
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(self.service.read_bytes(), fixed)
+            latest = self.service.stat()
+            self.assertEqual((latest.st_uid,latest.st_gid,latest.st_mode),
+                             (initial.st_uid,initial.st_gid,initial.st_mode))
+            with self.assertRaisesRegex(RuntimeError, '旧控制进程仍在运行'):
+                remote._commit(self.target, 'b'*32)
+            self.mocks['_exchange'].assert_not_called()
+            self.mocks['_reload'].assert_not_called()
+            self.assertTrue((self.target/'old.py').is_file())
+            self.mocks['_status'].return_value['owner']['session'] = 'new'
+            self.assertEqual(remote._commit(self.target, 'c'*32)['status'], 'deployed')
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(self.service.read_bytes(), fixed)
+
+    def test_serial_maintenance_preserves_custom_and_nondefault_targets(self):
+        custom = self.service.read_bytes()
+        self.assertEqual(remote._commit(self.target, self.ticket)['status'], 'deployed')
+        self.assertEqual(self.service.read_bytes(), custom)
+        self.assertFalse((self.slot/'pre-serial-shutdown-CMDcontrol_service.py').exists())
+        remote._rollback(self.target)
+        extra = remote._transaction(self.target, 'e'*32)
+        shutil.copytree(settings.DEFAULT_BUNDLE, extra)
+        manifest = extra/'manifest.json'
+        doc = json.loads(manifest.read_bytes())
+        doc['owner_directory'] = str(self.owner_dir)
+        manifest.write_text(json.dumps(doc),encoding='utf8')
+        with patch.object(remote, 'DEFAULT_PATH', self.target/'unrelated'), \
+                patch.object(remote, 'SerialReceiver_PrepareShutdown') as maintenance:
+            self.assertFalse(remote._commit(self.target, 'e'*32)['owner_reloaded'])
+            maintenance.assert_not_called()
+
+    def test_serial_maintenance_refuses_nonregular_source_and_bad_backup(self):
+        self.service.unlink()
+        self.service.mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'ordinary file'):
+            remote.SerialReceiver_PrepareShutdown(self.target,self.slot,'old')
+        self.service.rmdir()
+        original = b"serial.Serial('/dev/serial0', 9600)"
+        fixed = b"serial.Serial('/dev/serial0', 9600, timeout=0.2)"
+        self.service.write_bytes(original)
+        backup = self.slot/'pre-serial-shutdown-CMDcontrol_service.py'
+        backup.write_bytes(b'previous wrong bytes')
+        with patch.object(remote, '_SERIAL_ORIGINAL_SHA', hashlib.sha256(original).hexdigest()), \
+                patch.object(remote, '_SERIAL_TIMED_SHA', hashlib.sha256(fixed).hexdigest()), \
+                self.assertRaisesRegex(RuntimeError, '备份校验失败'):
+            remote.SerialReceiver_PrepareShutdown(self.target,self.slot,'old')
+        self.assertEqual(self.service.read_bytes(), original)
+        self.assertEqual(backup.read_bytes(), b'previous wrong bytes')
+
+    def test_failed_activation_and_failed_restored_owner_report_both_errors(self):
+        self.mocks['_reload'].side_effect = [RuntimeError('first activation error'), RuntimeError('restore error')]
+        with self.assertRaises(RuntimeError) as failure:
+            remote._commit(self.target, self.ticket)
+        detail = str(failure.exception)
+        for text in ('first activation error', 'restore error', str(self.slot)):
+            self.assertIn(text, detail)
+        self.assertEqual(self.owner.read_text(), 'old owner')
+        self.assertTrue((self.target/'old.py').is_file())
+
+    def test_failed_explicit_rollback_and_failed_reload_report_both_errors(self):
+        remote._commit(self.target, self.ticket)
+        self.mocks['_reload'].side_effect = [RuntimeError('rollback error'), RuntimeError('newer reload error')]
+        with self.assertRaises(RuntimeError) as failure:
+            remote._rollback(self.target)
+        for text in ('rollback error', 'newer reload error', str(self.slot)):
+            self.assertIn(text, str(failure.exception))
+        self.assertTrue((self.target/'run_auto.py').is_file())
 
     def _stage_route_upgrade(self, *, customized=False):
         updated = (self.slot/'app/routes.py').read_bytes()

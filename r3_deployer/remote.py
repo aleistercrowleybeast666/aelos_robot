@@ -18,6 +18,8 @@ import uuid
 DEFAULT_PATH = Path('/home/lemon/aelos_auto_r3_python')
 OWNER_DIR = Path('/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/CMDcontrol_node')
 OWNER_NAME = 'r3_auto_warm.py'
+_SERIAL_ORIGINAL_SHA = 'c2d0a64de4e28a3b8e914d623f4a8ba56f30533963cf50f6c5c394ee4f4981e2'
+_SERIAL_TIMED_SHA = '8f396415968782628aaff3276af2a604e0ae9e34c7fc73556101be6ed1e6b09d'
 OWNER_SUPPORT = ('r3_micro_gate.py', 'r3_auto_gate.py')
 OWNER_VERSION = 'r3-visual-pickup-20261109-v5'
 NODE = '/CMDcontrol_server_node'
@@ -138,17 +140,24 @@ def _status(require_idle=False):
     address = Path.home()/'.local/state/r3_simple/control.sock'
     with socket.socket(socket.AF_UNIX) as conn:
         conn.settimeout(3)
-        conn.connect(str(address))
-        conn.sendall(b'{"protocol":"r3.warm.v1","op":"status"}\n')
-        with conn.makefile('rb') as reply:
-            row = json.loads(reply.readline(131072))
+        try:
+            conn.connect(str(address))
+            conn.sendall(b'{"protocol":"r3.warm.v1","op":"status"}\n')
+            with conn.makefile('rb') as reply:
+                row = json.loads(reply.readline(131072))
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(exc.errno, '树莓派 ROS 控制节点的状态套接字不存在', str(address)) from exc
+        except OSError as exc:
+            raise OSError(exc.errno, f'读取 ROS 控制节点状态失败（{exc}）', str(address)) from exc
     owner = row.get('owner', {})
     if (row.get('protocol') != 'r3.warm.v1' or owner.get('robot_id') != 3
             or owner.get('owner_version') != OWNER_VERSION or owner.get('expected_wire_abi') != 42):
         raise RuntimeError('R3 warm owner / ABI mismatch.')
     if require_idle and not (row.get('prepared') is True and row.get('task_active') is False
                              and owner.get('mode') == 'manual' and owner.get('in_flight') is False):
-        raise RuntimeError('R3 owner must be ready, idle and in manual mode.')
+        raise RuntimeError(f"ROS 控制节点尚未手动就绪（prepared={row.get('prepared')}, "
+                           f"task_active={row.get('task_active')}, mode={owner.get('mode')}, "
+                           f"in_flight={owner.get('in_flight')}）")
     return row
 
 
@@ -179,15 +188,23 @@ def _reload(session, require_new_helper):
 
 def _wait_owner(session, require_new_helper):
     deadline = time.monotonic()+35
+    detail = '尚未收到状态'
     while time.monotonic() < deadline:
         try:
             row = _status(require_idle=True)
-            if row['owner']['session'] != session and (not require_new_helper or 'mission_progress' in row):
+            current = row['owner'].get('session')
+            if not current:
+                detail = '控制节点未返回会话编号'
+            elif current == session:
+                detail = '仍是重载前的会话'
+            elif require_new_helper and 'mission_progress' not in row:
+                detail = '新会话尚未返回任务进度接口'
+            else:
                 return row
-        except (OSError, ValueError, RuntimeError):
-            pass
+        except (OSError, ValueError, RuntimeError) as exc:
+            detail = str(exc)
         time.sleep(1)
-    raise RuntimeError('ROS owner did not return in manual idle state after reload.')
+    raise RuntimeError(f'等待 ROS 控制节点 {NODE} 重载超时，最后一次检查为「{detail}」')
 
 
 def _reload_restored(session, require_new_helper):
@@ -212,7 +229,7 @@ def _exchange(left, right):
         raise OSError(code, os.strerror(code), str(right))
 
 
-def _atomic_bytes(path, data):
+def _atomic_bytes(path, data, *, owner_stat=None):
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     fd, name = tempfile.mkstemp(prefix='.r3-deploy-', dir=path.parent)
     temp = Path(name)
@@ -220,6 +237,8 @@ def _atomic_bytes(path, data):
         with os.fdopen(fd, 'wb') as out:
             out.write(data)
             out.flush()
+            if owner_stat is not None and os.fstat(out.fileno()).st_gid != owner_stat.st_gid:
+                os.fchown(out.fileno(), -1, owner_stat.st_gid)
             os.fsync(out.fileno())
         temp.chmod(mode)
         os.replace(temp, path)
@@ -388,6 +407,61 @@ def _owner_backup(slot, name):
     return slot/('owner.backup' if name == OWNER_NAME else name+'.backup')
 
 
+def SerialReceiver_PrepareShutdown(root, slot, session):
+    """Upgrade only the known blocking UART source before an application exchange."""
+    service = _regular(OWNER_DIR/'CMDcontrol_service.py')
+    if service.resolve() != service:
+        raise RuntimeError(f'ROS 串口程序路径异常 {service}')
+    source = service.read_bytes()
+    digest = hashlib.sha256(source).hexdigest()
+    note = root.with_name('.'+root.name+'.uart-maintenance.json')
+    restart = '请在机器人静止时重启树莓派一次，然后重新连接并部署。'
+    if digest == _SERIAL_TIMED_SHA and _regular(note, optional=True).is_file():
+        record = _json(note)
+        if record.get('session') == session:
+            raise RuntimeError(f'串口修复已写入磁盘，旧控制进程仍在运行。{restart} 原件备份 {record.get("backup")}')
+    if digest != _SERIAL_ORIGINAL_SHA:
+        return
+    original = service.stat()
+    if original.st_uid != os.getuid():
+        raise RuntimeError(f'当前 SSH 账户不拥有 ROS 串口程序 {service}')
+    updated = source.replace(b'def main():\n', b'''def main():
+    def read_exact(port, size):
+        # Preserve a partial UART frame across timed reads. Only ROS shutdown abandons it.
+        received = bytearray()
+        while len(received) < size:
+            if rospy.is_shutdown():
+                return None
+            received.extend(port.read(size - len(received)))
+        return None if rospy.is_shutdown() else received
+
+''')
+    updated = updated.replace(b"serial.Serial('/dev/serial0', 9600)", b"serial.Serial('/dev/serial0', 9600, timeout=0.2)")
+    updated = updated.replace(b'            cur_byte = ser.read()', b'            cur_byte = read_exact(ser, 1)\n            if cur_byte is None:\n                break')
+    updated = updated.replace(b'            tmp_head.append(ord(cur_byte))', b'            tmp_head.append(cur_byte[0])')
+    updated = updated.replace(b'                    length_high = ord(ser.read())\n                    length_low = ord(ser.read())',
+                              b'                    length = read_exact(ser, 2)\n                    if length is None:\n                        break\n                    length_high, length_low = length')
+    updated = updated.replace(b'                    package_data_byte = ser.read(package_data_length)',
+                              b'                    package_data_byte = read_exact(ser, package_data_length)\n                    if package_data_byte is None:\n                        break')
+    if hashlib.sha256(updated).hexdigest() != _SERIAL_TIMED_SHA:
+        raise RuntimeError('串口修补结果与已验证版本不符，原程序仍在使用。')
+    backup = _regular(slot/('pre-serial-shutdown-'+service.name), optional=True)
+    if not backup.exists():
+        _atomic_bytes(backup, source)
+    if _digest(backup) != digest:
+        raise RuntimeError(f'串口原件备份校验失败 {backup}')
+    if _status(require_idle=True)['owner']['session'] != session or _digest(service) != digest:
+        raise RuntimeError('部署期间控制会话或串口程序发生变化，请重新连接后部署。')
+    _regular(note, optional=True)
+    _write_json(note, {'session':session, 'backup':str(backup)})
+    _atomic_bytes(service, updated, owner_stat=original)
+    actual = service.stat()
+    if (_digest(service) != _SERIAL_TIMED_SHA or actual.st_uid != original.st_uid
+            or actual.st_gid != original.st_gid or actual.st_mode != original.st_mode):
+        raise RuntimeError(f'串口修复写入后的内容或权限校验失败，原件备份 {backup}')
+    raise RuntimeError(f'已修复并核验 ROS 串口退出机制，旧控制进程仍在运行。{restart} 原件备份 {backup}')
+
+
 def _commit(root, ticket, mcu_readback=None):
     slot = _transaction(root, ticket)
     if slot.resolve() != slot or (slot/'receipt.json').exists():
@@ -415,6 +489,7 @@ def _commit(root, ticket, mcu_readback=None):
         _node_pid()
         owner_status = _status(require_idle=True)['owner']
         session = owner_status['session']
+        SerialReceiver_PrepareShutdown(root, slot, session)
         if mcu_readback is not None:
             verified_boot = _write_mcu_readback(app, owner_status, mcu_readback)
         for owner in owners:
@@ -496,8 +571,9 @@ def _commit(root, ticket, mcu_readback=None):
         if owners_changed:
             try:
                 _reload_restored(session, require_new_helper=False)
-            except Exception:
-                raise RuntimeError('Original files restored; unable to verify owner reload. Backup: '+str(slot)) from exc
+            except Exception as restore_exc:
+                raise RuntimeError(f'新程序激活失败（{exc}）。已恢复原文件，恢复后的控制服务核验也失败'
+                                   f'（{restore_exc}）。事务目录 {slot}') from restore_exc
         raise RuntimeError('Deployment did not activate; original files restored. Details: '+str(exc)) from exc
     result = {'status': 'deployed', 'id': ticket, 'path': str(root), 'backup': str(app),
               'owner_reloaded': bool(owners)}
@@ -537,8 +613,9 @@ def _rollback(root):
             _atomic_bytes(owner, current)
         try:
             _reload_restored(session, require_new_helper=True)
-        except Exception:
-            raise RuntimeError('Rollback activation failed; the newer files were restored. Verify the owner service.') from exc
+        except Exception as restore_exc:
+            raise RuntimeError(f'回滚版本激活失败（{exc}）。已换回较新文件，控制服务核验也失败'
+                               f'（{restore_exc}）。事务目录 {slot}') from restore_exc
         raise
     return {'status': 'rolled_back', 'path': str(root), 'saved_newer_version': str(backup),
             'owner_reloaded': bool(owners)}
