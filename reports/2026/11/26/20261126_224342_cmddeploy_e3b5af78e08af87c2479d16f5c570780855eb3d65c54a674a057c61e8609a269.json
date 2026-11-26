@@ -1,0 +1,16 @@
+{
+  "after_update": false,
+  "command": "deploy",
+  "received_at": "2026-11-26T22:43:42.192+08:00",
+  "result": {
+    "exception_type": "RuntimeError",
+    "ok": false,
+    "reason": "[Errno 2] No such file or directory",
+    "status": "deploy_failed"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [],
+    "reason": "[Errno 2] No such file or directory"
+  }
+}
