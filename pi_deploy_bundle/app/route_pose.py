@@ -994,7 +994,7 @@ def RoutePose_PlanSideCount(pose, profile, tag_id, op, nominal):
 
 def _small_strafe_calibration_matches(pose, small):
     profile = small.get('gait_profile', 'legacy_v1')
-    return profile in ('legacy_v1', 'intermediate_v2') and pose.get('small_strafe_profile', 'legacy_v1') == profile
+    return profile in ('legacy_v1', 'intermediate_v2', 'transfer_v3') and pose.get('small_strafe_profile', 'legacy_v1') == profile
 
 
 def RoutePose_PlanSmallSide(pose, profile, tag_id, op, nominal):

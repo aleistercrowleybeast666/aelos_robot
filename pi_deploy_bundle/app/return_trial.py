@@ -1,8 +1,10 @@
 """Estimated empty-load return from the base to the Tag 1 pickup area."""
 
 from enum import Enum
+import math
 
 from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_AlignEmptyMarker,
+                                  Checkpoint_AlignEmptyDeparture,
                                   Checkpoint_MeasureEmptyMarker as _empty_marker_geometry,
                                   Checkpoint_EmptyMarkerCurrent as _empty_marker_current,
                                   Checkpoint_EmptyTurnAction)
@@ -32,7 +34,7 @@ def ReturnTrial_DefaultChain():
         'base_turn': dict(turn),
         'tag5': [],
         'tag6': [{'op': 'free_forward', 'repeat': 2}],
-        'tag7': [{'op': 'empty_strafe_left', 'repeat': 5}, {'op': 'free_forward', 'repeat': 2}],
+        'tag7': [{'op': 'empty_strafe_left', 'repeat': 6}, {'op': 'free_forward', 'repeat': 2}],
         'tag1': [{'op': 'empty_strafe_right', 'repeat': 9}],
         'transfer_approach': [{'op': 'empty_forward2'}, {'op': 'free_forward', 'repeat': 2}],
         'transfer_turn': dict(turn),
@@ -126,13 +128,56 @@ def _revalidate_heading(robot, nav):
         robot.events.append({'return_heading_reference': report})
 
 
+def _return_heading_state(robot, nav):
+    report = getattr(robot, 'last_heading_report', None) or {}
+    residual = report.get('return_motion_residual_deg', report.get('after_error_deg', report.get('error_deg')))
+    if not report:
+        anchor = getattr(nav.mag, 'anchor', None) or {}
+        tag = anchor.get('tag_departure') or {}
+        stamp = tag.get('observed_at_ns')
+        if (anchor.get('load') == 'empty' and type(stamp) is int
+                and stamp > (robot.last_action_completed_ros_ns or 0)):
+            residual = tag.get('error_deg')
+    if type(residual) not in (int, float) or not math.isfinite(residual):
+        # A simulation fixture with no sensors can still exercise nominal grouping.
+        unknown = (bool(report) or residual is not None or getattr(robot, 'heading_guard', None) is not None
+                   or getattr(robot.backend, 'is_simulation', False) is not True)
+        return None, bool(unknown or getattr(robot,'magnetic_route_only',False))
+    return residual, bool(abs(residual) > 15 or getattr(robot,'magnetic_route_only',False))
+
+
+def _return_strafe_group(robot, actions, uncertain):
+    action = actions[0]
+    if (uncertain or action not in ('empty_strafe_left', 'empty_strafe_right')
+            or getattr(robot.backend, 'empty_strafe_group_ready', lambda: False)() is not True):
+        return action, 1
+    run = 1
+    while run < min(len(actions), 5) and actions[run] == action:
+        run += 1
+    group = 2 if run == 4 else min(run, 3)
+    return (action + str(group) if group > 1 else action), group
+
+
+def _prepare_return_group(robot, nav):
+    robot.check()
+    if robot.load_kind != 'empty':
+        raise RuntimeError('return movement requires empty expected load')
+    _revalidate_heading(robot, nav)
+    previous = getattr(robot, 'last_heading_report', None) or {}
+    if previous.pop('return_heading_pending', False):
+        # A checkpoint gets visual priority. A successful visual rebase clears
+        # this report; a miss still owes a heading check before the next motion.
+        robot._await_heading(previous['action'], configured=True)
+    return _return_heading_state(robot, nav)
+
+
 def _move(robot, nav, actions, completed, *, scan_follows=False, station_actions=None):
-    for index, action in enumerate(actions):
-        robot.check()
-        _revalidate_heading(robot, nav)
-        if robot.load_kind != 'empty':
-            raise RuntimeError('return movement requires empty expected load')
-        robot.finite(action, configured=True, checkpoint_follows=scan_follows and index == len(actions) - 1)
+    index = 0
+    while index < len(actions):
+        _, uncertain = _prepare_return_group(robot, nav)
+        action, count = _return_strafe_group(robot, actions[index:], uncertain)
+        index += count
+        robot.finite(action, configured=True, checkpoint_follows=scan_follows and index == len(actions))
         completed.append(action)
         if station_actions is not None:
             station_actions.append(action)
@@ -179,7 +224,11 @@ def _return_boundary_geometry(robot, nav, tag, *, health=None):
     floor, now = scan.get('after_ns'), scan.get('now_ns')
     if type(floor) is not int or type(now) is not int or not after <= floor < now:
         return None
-    rows = [row for row in scan.get('observations', ()) if type(row.get('stamp_ns')) is int
+    restart = scan.get('camera_restart_ns', 0)
+    if type(restart) is not int or restart > now:
+        return None
+    floor = max(floor, restart)
+    rows = [row for row in scan.get('observations', ()) if isinstance(row, dict) and type(row.get('stamp_ns')) is int
             and floor < row['stamp_ns'] <= now and now - row['stamp_ns'] <= nav.cfg['max_age_s'] * 1e9]
     return RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
 
@@ -192,9 +241,20 @@ def _return_travel(robot, nav, leg, actions):
     snapshot = getattr(nav.io, 'boundary_visual_snapshot', None)
     goal = next(point for point in nav.cfg['legs']['return'] if point['id'] == tag)
     early_heading = False
-    for index, action in enumerate(actions):
-        _move(robot, nav, (action,), leg['completed_actions'], scan_follows=index == len(actions)-1)
-        pending = actions[index+1:]
+    pending = list(actions)
+    while pending:
+        residual, uncertain = _prepare_return_group(robot, nav)
+        if uncertain and pending[:2] == ['free_forward', 'free_forward']:
+            # Two five-step macros and five two-step macros cover the same distance.
+            # Shorten the feedback interval immediately after unresolved side drift.
+            pending[:2] = ['empty_forward2'] * 5
+            leg.setdefault('motion_adaptations', []).append({'reason':'heading_uncertain',
+                'residual_deg':residual,'forward_steps':10,'group_steps':2})
+        action = pending[0]
+        native, consumed = _return_strafe_group(robot, pending, uncertain)
+        del pending[:consumed]
+        robot.finite(native, configured=True, checkpoint_follows=not pending)
+        leg['completed_actions'].append(native)
         if (not pending or not snapshot or not target or goal.get('tag_heading_deg') is None
                 or any(op != action for op in pending)):
             continue
@@ -228,12 +288,22 @@ def _return_travel(robot, nav, leg, actions):
         # Consume a lateral remainder only when already abreast of the expected marker.
         if (len(pending) > (1 if action == 'free_forward' else 2)
                 or -high < target[0] or -low > target[1] or high-low > .035
+                or geometry['body_forward_bounds_m'][0] <= 0
                 or max(map(abs, lateral)) > .07 or angle + geometry['max_heading_deviation_deg'] > 15.):
             continue
         leg['early_arrival'] = {'completed_actions': len(leg['completed_actions']),
                                 'omitted_actions': list(pending), 'geometry': geometry}
         return candidate
     return None
+
+
+def _align_return_departure(robot, nav, leg):
+    ReturnTrial_AlignEmptyMarker(robot, nav, leg)
+    if leg['expected_id'] in (5, 6, 7):
+        Checkpoint_AlignEmptyDeparture(robot, nav, leg)
+        recovery = leg.get('backward_search')
+        if recovery and (leg.get('empty_departure_correction') or {}).get('actions'):
+            recovery['resolution'] = 'use_corrected_departure_stance'
 
 
 def _return_recovery_decision(robot, nav, leg, miss, boundary, *, forward_reserved):
@@ -358,7 +428,7 @@ def _return_retreat_scan(robot, nav, profile, leg, previous, reserved, prior_bou
 def _return_repay_search(robot, nav, leg, *, camera_ok):
     """A search is extra motion. Preserve a measured waypoint, or repay the search before the next leg."""
     recovery = leg.get('backward_search')
-    if not recovery:
+    if not recovery or recovery.get('resolution') == 'use_corrected_departure_stance':
         return
     tag = leg['expected_id']
     target = getattr(robot, 'mission', {}).get('checkpoint_forward_windows_m', {}).get('return', {}).get(str(tag))
@@ -576,6 +646,9 @@ def ReturnTrial_Run(robot):
         if probe is not None:
             ready = probe()
             result['empty_recovery_ready'] = ready is True
+        group_probe = getattr(robot.backend, 'ensure_empty_strafe_group', None)
+        if group_probe is not None:
+            result['empty_strafe_group_ready'] = group_probe() is True
     profile = RoutePose_Load(robot.project)
 
     set_status(ReturnTrialResult.RETURNING, 'moving through the estimated empty return')
@@ -644,7 +717,7 @@ def ReturnTrial_Run(robot):
             continue
         if estimate and observed in (CheckpointScanResult.MOTION_NOT_STARTED, CheckpointScanResult.CAMERA_UNAVAILABLE):
             if leg.get('detected') and observed is CheckpointScanResult.MOTION_NOT_STARTED:
-                ReturnTrial_AlignEmptyMarker(robot, nav, leg)
+                _align_return_departure(robot, nav, leg)
                 result['checkpoint'] = tag
             else:
                 result['missing_checkpoints'].append(leg.get('checkpoint_not_seen') or
@@ -656,7 +729,7 @@ def ReturnTrial_Run(robot):
             return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED, reason)
         if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
             return set_status(ReturnTrialResult.CAMERA_UNAVAILABLE, reason)
-        ReturnTrial_AlignEmptyMarker(robot, nav, leg)
+        _align_return_departure(robot, nav, leg)
         _return_repay_search(robot, nav, leg, camera_ok=True)
         result['checkpoint'] = tag
 

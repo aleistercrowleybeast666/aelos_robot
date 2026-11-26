@@ -244,7 +244,11 @@ def Checkpoint_MeasureEmptyMarker(robot, nav, leg):
             or camera.get('ready') is not True or camera.get('fingerprint') != pinned['expected_fingerprint']
             or scan.get('ids') != [tag] or not scan.get('contract_match') or not scan.get('camera_healthy')):
         return None
-    rows = [row for row in scan.get('observations', ()) if type(row.get('stamp_ns')) is int
+    restart = scan.get('camera_restart_ns', 0)
+    if type(restart) is not int or restart > now:
+        return None
+    floor = max(floor, restart)
+    rows = [row for row in scan.get('observations', ()) if isinstance(row, dict) and type(row.get('stamp_ns')) is int
             and floor < row['stamp_ns'] <= now and now - row['stamp_ns'] <= nav.cfg['max_age_s'] * 1e9]
     geometry = RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
     if (geometry and geometry['samples'] >= nav.cfg['min_frames'] and geometry['max_heading_deviation_deg'] <= 5.
@@ -300,8 +304,10 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
         previous = heading['observations'][-2] if attempt else None
         # With several consistent frames, an improvement smaller than three degrees
         # is usable if the pre/post yaw intervals no longer overlap.
-        progress = previous is None or (previous['error_deg']*error > 0 and stamp > previous['latest_stamp_ns']
-            and abs(previous['error_deg']) - abs(error) > min(3., previous['spread_deg'] + reading['spread_deg']))
+        progress = previous is None or (
+            stamp > previous['latest_stamp_ns']
+            and abs(previous['error_deg']) - abs(error) > min(3., previous['spread_deg'] + reading['spread_deg'])
+            and (previous['error_deg'] * error > 0 or turn.startswith('empty_micro_')))
         route_feedback = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
         if (attempt == 2 or not progress or goal.get('allow_turn') is not True
                 or (not route_feedback and robot.nav_count >= nav.cfg['max_extra_actions_per_journey'])
@@ -329,3 +335,120 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
         if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
             heading['status'] = 'marker_lost_after_turn'
             return
+
+
+def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
+    depth_lo, depth_hi = geometry['body_forward_bounds_m']
+    error = wrap(geometry['heading_deg'] - goal_yaw)
+    reading = {'heading_error_deg': error, 'body_depth_m': (depth_lo, depth_hi)}
+    if (abs(error) + geometry['max_heading_deviation_deg'] > 15.
+            or not .035 < depth_lo <= depth_hi <= .45 or depth_hi - depth_lo > .04):
+        return None, None, reading, 'pose_outside_translation_range'
+    if tag == 5:
+        # ground_pose gives the robot position in the marker frame. Facing
+        # the opposite way interchanges robot-left and marker-left.
+        direction = 1 if math.cos(math.radians(goal_yaw)) > 0 else -1
+        lo, hi = sorted(direction * (v - target_lateral) for v in geometry['lateral_bounds_m'])
+        reading['body_lateral_m'] = (lo, hi)
+        if hi - lo > .04 or max(abs(lo), abs(hi)) > .30:
+            return None, None, reading, 'uncertain_lateral_position'
+        tolerance = config['gate_lateral_tolerance_m']
+        if lo > tolerance:
+            return 'empty_strafe_left', lo - tolerance, reading, 'outside_gate_center'
+        if hi < -tolerance:
+            return 'empty_strafe_right', -tolerance - hi, reading, 'outside_gate_center'
+    else:
+        near, far = config['side_departure_depth_m']
+        if depth_lo > far:
+            return 'empty_forward2', depth_lo - far, reading, 'far_before_side_travel'
+        if depth_hi < near:
+            return 'empty_backward2', near - depth_hi, reading, 'near_before_side_travel'
+    return None, 0., reading, 'within_departure_band'
+
+
+def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
+    """Close the cross-track error at the reverse gate or depth error before a side leg."""
+    tag = leg['expected_id']
+    config = robot.cfg.get('route_steps', {}).get('command2_empty_departure')
+    if tag not in (5, 6, 7) or not config or robot.load_kind != 'empty':
+        return
+    goal = next((item for item in nav.cfg['legs']['return'] if item['id'] == tag), {})
+    goal_yaw = goal.get('tag_heading_deg')
+    if goal_yaw is None:
+        return
+    report = {'actions': [], 'observations': []}
+    leg['empty_departure_correction'] = report
+    previous_action, previous_gap = None, None
+    refreshed = False
+    while True:
+        geometry = Checkpoint_MeasureEmptyMarker(robot, nav, leg)
+        if geometry is None:
+            # A magnetic rebase can outlive the previous camera window even
+            # at rest. Acquire one fresh window for this stance before giving up.
+            if not refreshed and leg.get('detected'):
+                refreshed = True
+                current = _empty_departure_rescan(robot, nav, leg)
+                if current['detected']:
+                    continue
+            report['status'] = 'no_current_pose'
+            return
+        action, gap, reading, status = _empty_departure_step(
+            tag, geometry, goal_yaw, config, goal.get('lateral_m', 0.))
+        report['observations'].append(reading)
+        report['status'] = status
+        if action is None:
+            return
+        if tag == 5 and goal.get('allow_strafe') is not True:
+            report['status'] = 'lateral_action_disabled_for_checkpoint'
+            return
+        if previous_action and (action != previous_action or gap >= previous_gap - .01):
+            report['status'] = 'retain_latest_pose_after_limited_progress'
+            return
+        if len(report['actions']) >= 2 or robot.count >= robot.cfg['max_body_macros_per_journey']:
+            report['status'] = 'continue_from_latest_pose'
+            return
+        if (action == 'empty_backward2'
+                and not getattr(robot.backend, 'empty_recovery_ready', lambda: False)()):
+            report['status'] = 'backward_capability_unavailable'
+            return
+        stamp = geometry['latest_stamp_ns']
+
+        def verify():
+            robot.check()
+            if not Checkpoint_EmptyMarkerCurrent(robot, nav, tag, stamp):
+                raise _EmptyMarkerExpired()
+
+        try:
+            robot.finite(action, configured=True, checkpoint_follows=True, before_dispatch=verify)
+        except _EmptyMarkerExpired:
+            if not refreshed:
+                refreshed = True
+                current = _empty_departure_rescan(robot, nav, leg)
+                if current['detected']:
+                    continue
+            report['status'] = 'pose_expired_before_translation'
+            return
+        robot.nav_count += 1
+        report['actions'].append(action)
+        previous_action, previous_gap = action, gap
+        refreshed = False
+        current = _empty_departure_rescan(robot, nav, leg)
+        if not leg['detected']:
+            report['status'] = 'marker_lost_after_translation'
+            return
+        # The shift itself can rotate the chassis. Align/rebase only with
+        # the new stance and pass that observation on to the return planner.
+        Checkpoint_AlignEmptyMarker(robot, nav, current)
+        report.setdefault('heading_after_translation', []).append(current['empty_heading'])
+        leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {},
+                   detected=current['detected'])
+
+
+def _empty_departure_rescan(robot, nav, leg):
+    current = {'expected_id': leg['expected_id'], 'observation_windows': 0, 'detected': False}
+    observed, _ = Checkpoint_Observe(robot, nav, current, lambda: None,
+        quick_id=True, single_window=True, reuse_settled_cache=True)
+    current['detected'] = observed is CheckpointScanResult.CHECKPOINT_DETECTED
+    leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {},
+               detected=current['detected'])
+    return current

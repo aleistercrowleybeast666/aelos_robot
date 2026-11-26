@@ -817,6 +817,8 @@ class HeadingGuard:
                 and self.c.get('micro_trial',{}).get('bounded_route_mode') is True)
 
     def _uses_route_feedback(self,name,load):
+        if load=='empty' and getattr(self,'empty_return_feedback_action',None)==name:
+            return self.allow_missing_magnetic
         phase='planned_turn_complete' if name=='planned_turn_intermediate' else name
         return (self.allow_missing_magnetic and not self.budget.limit_total_angle
                 and self.boundary_recovery_enabled(phase,load))
@@ -1297,6 +1299,10 @@ class HeadingGuard:
             return report
         if abs(error) > self.c['max_error_deg'] and not route_feedback:
             self.fault('heading error exceeds configured trial envelope: error=%s limit=%s' % (error,self.c['max_error_deg']),report)
+        if load=='empty' and route_feedback:
+            report.update(status='return_heading_recovery',reason='recover empty travel heading at this boundary',
+                          reason_zh='空载回程偏航，使用当前航向和回程的空载转向动作纠正。')
+            return report
         if (not self.c['execute'] or self.blocked or not allow_correction or not self.carry_load_supported(load) or
                 not sample.get('capture_verified',False) or not anchor.get('capture_verified',False)):
             report['reason'] = 'execution disabled, unsafe, capture freshness unverified, or calibration/load unavailable'

@@ -553,6 +553,30 @@ def _route_notes(result):
             else:
                 pieces.append(heading.get("reason_zh") or "本窗未执行转向")
             lines.append(" · ".join(piece for piece in pieces if piece))
+        correction = _as_dict(leg.get("empty_departure_correction"))
+        positions = correction.get("observations") or ()
+        if positions:
+            key = "body_lateral_m" if tag == 5 else "body_depth_m"
+            measurements = []
+            for row in positions:
+                interval = _as_dict(row).get(key)
+                if (isinstance(interval, (tuple, list)) and len(interval) == 2 and
+                        all(type(v) in (int, float) and math.isfinite(v) for v in interval)):
+                    measurements.append(f"{sum(interval) * 50:+.1f}" if tag == 5 else f"{sum(interval) * 50:.1f}")
+            parts = [f"返程 Tag {tag} 出发位置"]
+            if measurements:
+                label = "机身横偏（右为正）" if tag == 5 else "距码"
+                parts.append(label + " " + " → ".join(measurements) + " cm")
+            translations = {"empty_strafe_left":"左跨", "empty_strafe_right":"右跨",
+                            "empty_forward2":"前进两步", "empty_backward2":"后退两步"}
+            actions = [translations[op] for op in correction.get("actions", ()) if op in translations]
+            if actions:
+                parts.append("已执行" + "、".join(actions))
+            if correction.get("status") == "within_departure_band":
+                parts.append("已在出发容差内")
+            elif actions and correction.get("status") in ("marker_lost_after_translation", "no_current_pose"):
+                parts.append("移动后未确认新位姿")
+            lines.append(" · ".join(parts))
     for missing_tag in returned.get("missing_checkpoints") or ():
         tag = _as_dict(missing_tag).get("tag_id")
         if type(tag) is int:

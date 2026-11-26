@@ -28,6 +28,10 @@
   ],
   "command2_continue_return": true,
   "command2_before_base_turn_extra_steps": 2,
+  "command2_empty_departure": {
+    "gate_lateral_tolerance_m": 0.055,
+    "side_departure_depth_m": [0.12, 0.21]
+  },
   "corridor": {
     "tag2_to_tag3": [
       {"op": "strafe_right_once", "repeat": 5}
@@ -55,7 +59,7 @@
       {"op": "free_forward", "repeat": 2}
     ],
     "tag7": [
-      {"op": "empty_strafe_left", "repeat": 5},
+      {"op": "empty_strafe_left", "repeat": 6},
       {"op": "free_forward", "repeat": 2}
     ],
     "tag1": [

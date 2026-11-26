@@ -9,6 +9,13 @@ from r3_deployer.control_api import RobotControlUncertainError
 
 
 class TaskReportTests(unittest.TestCase):
+    def test_reverse_gate_logs_actual_shift_and_new_position(self):
+        leg = {"expected_id":5, "empty_departure_correction":{
+            "observations":[{"body_lateral_m":[-.125,-.122]}, {"body_lateral_m":[-.041,-.039]}],
+            "actions":["empty_strafe_right"], "status":"within_departure_band"}}
+        lines = task_report.TaskReport_Diagnostics({"events":[{"return_trial":{"legs":[leg]}}]})
+        self.assertIn("返程 Tag 5 出发位置 · 机身横偏（右为正） -12.3 → -4.0 cm · 已执行右跨 · 已在出发容差内", lines)
+
     def test_cancelled_return_keeps_observed_marker_and_completed_motions(self):
         leg = {"expected_id":6, "empty_heading":{"observations":[{"error_deg":15.46},{"error_deg":4.1}],
                  "actions":["empty_micro_left"]},

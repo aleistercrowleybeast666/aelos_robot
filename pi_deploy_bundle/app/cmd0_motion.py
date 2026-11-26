@@ -21,6 +21,7 @@ SMALL_SIDE_ACTIONS = {'strafe_left_once': 'single_small_strafe_left',
                       'strafe_right_once': 'single_small_strafe_right'}
 LEGACY_SMALL_STRAFE_LIMIT_M = .035
 INTERMEDIATE_SMALL_STRAFE_LIMIT_M = .060
+TRANSFER_SMALL_STRAFE_LIMIT_M = .070
 PLACE_ACTION = 'cmd0_place_single'
 PICKUP_BACKWARD4_ACTION = 'cmd1_carry_backward4'
 PICKUP_BACKWARD6_ACTION = 'cmd1_carry_backward6'
@@ -41,7 +42,9 @@ def Cmd0Motion_SmallStrafeProfile(backend):
     profile = getattr(backend, 'small_strafe_profile', lambda: None)()
     if profile == 'legacy_v1':
         return profile, LEGACY_SMALL_STRAFE_LIMIT_M
-    return ('intermediate_v2' if profile == 'intermediate_v2' else None), INTERMEDIATE_SMALL_STRAFE_LIMIT_M
+    if profile == 'intermediate_v2':
+        return profile, INTERMEDIATE_SMALL_STRAFE_LIMIT_M
+    return ('transfer_v3' if profile == 'transfer_v3' else None), TRANSFER_SMALL_STRAFE_LIMIT_M
 
 
 def _validate_transfer_chain(chain):
@@ -92,7 +95,8 @@ def Cmd0Motion_LoadRouteSteps(project):
         raise ValueError('无法读取路线步数配置 route_steps.json') from exc
     optional = {'command0_transfer', 'pickup_exit', 'command1_pickup_exit', 'corridor', 'return_chain', 'wall_pickup_advance_steps',
                 'micro_turn_filter', 'tag5_entry_lateral', 'tag2_forward_trial', 'command2_continue_return',
-                'continue_estimated_route', 'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps'}
+                'continue_estimated_route', 'wall_pickup_side_limit', 'tag4_forward_trial', 'command2_before_base_turn_extra_steps',
+                'command2_empty_departure'}
     if not isinstance(steps, dict) or not defaults.keys() <= steps.keys() or steps.keys()-defaults.keys()-optional:
         raise ValueError('路线步数配置需要 transfer_forward_steps 和 tag1_to_tag2_forward_steps 两项')
     if any(type(steps[key]) is not int or not 2 <= steps[key] <= 80 for key in defaults):
@@ -114,6 +118,16 @@ def Cmd0Motion_LoadRouteSteps(project):
     if 'command2_continue_return' in steps and type(steps['command2_continue_return']) is not bool:
         raise ValueError('command2_continue_return 需填写 true 或 false')
     before_base_turn = steps.get('command2_before_base_turn_extra_steps', 0)
+    if 'command2_empty_departure' in steps:
+        departure = steps['command2_empty_departure']
+        if not isinstance(departure, dict) or departure.keys() != {'gate_lateral_tolerance_m', 'side_departure_depth_m'}:
+            raise ValueError('返程出发位姿需要门口横向容差和侧跨前距离范围')
+        band = departure['side_departure_depth_m']
+        tolerance = departure['gate_lateral_tolerance_m']
+        if (not isinstance(band, list) or len(band) != 2
+                or not all(type(value) in (int, float) and isfinite(value) for value in (*band, tolerance))
+                or not .025 <= tolerance <= .10 or not .06 <= band[0] < band[1] <= .35):
+            raise ValueError('返程出发位姿范围无效，距离单位为米')
     if type(before_base_turn) is not int or before_base_turn not in (0, 2, 4):
         raise ValueError('命令 2 第一次放物前可在大本营内补进 0、2 或 4 步')
     if 'corridor' in steps:

@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-from r3_micro_gate import (CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
+from r3_micro_gate import (CORRECTION_PROFILE_PROBE, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
                            PICKUP_BACKWARD6_OPS, PROBE_OPS, RIGHT5_ROUTE_PROBE, SMALL_PROFILE_PROBE, SMALL_STRAFE_PROBE)
 
 PROTOCOL='r3.warm.v1'
@@ -80,7 +80,7 @@ class GateBackend:
     def __init__(self,gate):
         self.gate=gate;self.session=None;self.epoch=None
         self.cancelled=threading.Event();self.progress=None
-        self.empty_recovery_attempt=None
+        self.empty_probe_attempts={}
     def snapshot(self, *, require_mcu=True):
         r=self.gate.status()
         if r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5':raise RuntimeError('R3 owner mismatch')
@@ -125,7 +125,7 @@ class GateBackend:
             self.cancelled.wait(min(0.05,remaining))
             state=self.current(require_mcu=False)
     def call(self,op,timeout):
-        manual_only=op in ('begin','begin_align','stand') or (op in PROBE_OPS and op != EMPTY_RECOVERY_PROBE)
+        manual_only=op in ('begin','begin_align','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES)
         if manual_only:
             if self.session is None:self.ready()
             else:
@@ -159,18 +159,18 @@ class GateBackend:
                 self.check()
                 from cmd0_motion import PickupRetreatUnavailable
                 raise PickupRetreatUnavailable('当前 MCU 未注册连续后退六步动作')
-            if (op in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) and result.get('op')==op and result.get('request_nonce')==nonce
+            if (op in OPTIONAL_PROBES and result.get('op')==op and result.get('request_nonce')==nonce
                     and result.get('probe_unavailable') is True and result.get('drained') is True
                     and result.get('started') is False and result.get('cancelled') is False
                     and not detail.get('in_flight')):
                 self.current()
-                if op == EMPTY_RECOVERY_PROBE:
+                if op in EMPTY_PROBES:
                     raise EmptyRecoveryUnavailable('MCU 未提供空载回程微调能力')
-                if op == SMALL_PROFILE_PROBE:
-                    return  # The ordered idle receipt selected the legacy gait.
+                if op in (SMALL_PROFILE_PROBE,CORRECTION_PROFILE_PROBE):
+                    return  # Keep the latest confirmed profile.
                 raise PairProbeUnavailable('MCU 未确认双抱能力')
             raise RuntimeError('operation {} failed; reason={}; last_result={}; last_rejection={}; in_flight={}'.format(op,detail.get('reason'),detail.get('last_result'),detail.get('last_rejection'),detail.get('in_flight')))
-        r=self.current(require_mcu=False);expected='manual' if op in ('finish','stand') or (op in PROBE_OPS and op != EMPTY_RECOVERY_PROBE) else 'auto'
+        r=self.current(require_mcu=False);expected='manual' if op in ('finish','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES) else 'auto'
         result=r.get('last_result') or {}
         if (result.get('request_nonce')!=nonce or result.get('op')!=op or
                 type(result.get('operation_seq')) is not int or result['operation_seq']<=sequence or
@@ -207,6 +207,8 @@ class GateBackend:
         if ('small_strafe_profile' in micro and micro['small_strafe_profile'] is None
                 and micro.get('small_strafe_ready') is True):
             self.call(SMALL_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
+            if micro.get('correction_profile_probe_supported') and self.small_strafe_profile()=='intermediate_v2':
+                self.call(CORRECTION_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
 
     def verify_mission_v5(self,timeout):
         self.verify_micro(timeout)
@@ -270,22 +272,32 @@ class GateBackend:
         state = self.current(require_mcu=False)
         return state['mode'] == 'auto' and state.get('micro_trial', {}).get('empty_recovery_ready') is True
 
+    def empty_strafe_group_ready(self):
+        state=self.current(require_mcu=False)
+        return state['mode']=='auto' and state.get('micro_trial',{}).get('empty_strafe_group_ready') is True
+
     def ensure_empty_recovery(self):
-        if self.empty_recovery_ready():
+        return self._ensure_empty_probe('empty_recovery_ready', EMPTY_RECOVERY_PROBE)
+
+    def ensure_empty_strafe_group(self):
+        return self._ensure_empty_probe('empty_strafe_group_ready', EMPTY_GROUP_PROBE)
+
+    def _ensure_empty_probe(self,field,probe):
+        if getattr(self,field)():
             return True
         state = self.current(require_mcu=False)
         if (state['mode'] != 'auto' or state.get('mission_v5_ready') is not True
-                or 'empty_recovery_ready' not in state.get('micro_trial', {})):
+                or field not in state.get('micro_trial', {})):
             return False
         scope = (self.session, self.epoch)
-        if self.empty_recovery_attempt == scope:
+        if self.empty_probe_attempts.get(probe) == scope:
             return False
-        self.empty_recovery_attempt = scope
+        self.empty_probe_attempts[probe] = scope
         try:
-            self.call(EMPTY_RECOVERY_PROBE, PAIR_PROBE_TIMEOUT_S)
+            self.call(probe, PAIR_PROBE_TIMEOUT_S)
         except EmptyRecoveryUnavailable:
             return False
-        return self.empty_recovery_ready()
+        return getattr(self,field)()
 
     def medium_turn_ready(self):
         state=self.current()

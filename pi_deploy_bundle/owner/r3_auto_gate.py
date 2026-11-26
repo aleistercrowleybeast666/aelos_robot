@@ -10,7 +10,7 @@ import time
 import uuid
 import re
 from r3_recovery_gate import RecoveryGate
-from r3_micro_gate import EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
+from r3_micro_gate import CORRECTION_PROFILE_PROBE, EMPTY_GROUP_OPS, EMPTY_GROUP_PROBE, EMPTY_PROBES, OPTIONAL_PROBES, EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
 
 WIRE_BASE=0x2A00
 CANCELLED_BOUNDARY=WIRE_BASE+0xFE
@@ -30,7 +30,12 @@ INTERMEDIATE_STRAFE_HASHES = {
     op: 'leju_' + hashlib.md5(('r3_lateral_v2_' + op).encode()).hexdigest()
     for op in (*SMALL_STRAFE_OPS, *('double_' + name for name in SMALL_STRAFE_OPS))
 }
-OWNED=frozenset(HASHES.values()) | frozenset(INTERMEDIATE_STRAFE_HASHES.values())
+CORRECTION_V3_HASHES = {
+    op: 'leju_' + hashlib.md5(('r3_correction_v3_' + op).encode()).hexdigest()
+    for op in (*INTERMEDIATE_STRAFE_HASHES, 'single_micro_left','single_micro_right',
+               'double_single_micro_left','double_single_micro_right','empty_micro_left','empty_micro_right')
+}
+OWNED=frozenset(HASHES.values()) | frozenset(INTERMEDIATE_STRAFE_HASHES.values()) | frozenset(CORRECTION_V3_HASHES.values())
 _ACQUIRE_LOAD=frozenset(('grab_single','grab_double','begin_align'))
 _RELEASE_LOAD=frozenset(('stand','place_single','cmd0_place_single','place_double'))
 _RESET_REQUIRED='previous automatic task may still hold a block; explicitly restore empty stand before starting again'
@@ -74,7 +79,7 @@ class Gate:
     def cancel(self,reason,key=0,force_epoch=False):
         with self.cv:
             c=self.current
-            if (reason==_MCU_ERROR and c and (c['op'] in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) or c['op'] in PICKUP_BACKWARD6_OPS)
+            if (reason==_MCU_ERROR and c and (c['op'] in OPTIONAL_PROBES or c['op'] in PICKUP_BACKWARD6_OPS)
                     and c['dispatched'] and not c['started'] and not c['cancelled']):
                 # Installed UART owners report unknown aliases through cancel.
                 # Defer classification until the next ordered idle REQ.
@@ -165,7 +170,7 @@ class Gate:
                     elif now-first>=_IDLE_DRAIN_MIN_S:
                         c.update(drained=True,drain_source='ordered_idle_requests_after_cancel')
                         self.cv.notify_all()
-                elif (c['op'] in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) and bridge_idle and not c['complete'] and not c['cancelled']
+                elif (c['op'] in OPTIONAL_PROBES and bridge_idle and not c['complete'] and not c['cancelled']
                         and c.get('mcu_error_before_start') and not c['started']):
                     # Older Lua reports an unknown alias via ERROR, then returns to idle.
                     # A repeated REQ alone is not a verdict on the dispatched probe.
@@ -245,7 +250,7 @@ class Gate:
             if self.queue:return reject('existing_queue_not_empty')
             if type(timeout) not in (float,int) or not 1<=timeout<=120:return reject('invalid_timeout')
             if op=='begin' and self._may_hold_load:return reject('previous_load_requires_explicit_empty_reset')
-            if op == EMPTY_RECOVERY_PROBE or op in EMPTY_RECOVERY_OPS:
+            if op in EMPTY_PROBES or op in EMPTY_RECOVERY_OPS or op in EMPTY_GROUP_OPS:
                 if self.mode != 'auto' or self._may_hold_load:
                     return reject('empty_automatic_return_required')
             elif op in PROBE_OPS:
@@ -261,7 +266,9 @@ class Gate:
             self.operation_seq+=1
             if nonce is not None:self._accepted_nonces.add(nonce)
             native = HASHES[op]
-            if op in INTERMEDIATE_STRAFE_HASHES and self.micro.small_strafe_profile(self.epoch) == 'intermediate_v2':
+            if op in CORRECTION_V3_HASHES and self.micro.small_strafe_profile(self.epoch) == 'transfer_v3':
+                native = CORRECTION_V3_HASHES[op]
+            elif op in INTERMEDIATE_STRAFE_HASHES and self.micro.small_strafe_profile(self.epoch) == 'intermediate_v2':
                 native = INTERMEDIATE_STRAFE_HASHES[op]
             c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':native,'epoch':self.epoch,'op':op,'dispatched':False,
                 'started':False,'complete':False,'cancelled':False,'drained':False,
@@ -279,6 +286,10 @@ class Gate:
             if c.get('probe_unavailable'):
                 if op == EMPTY_RECOVERY_PROBE:
                     self.micro.empty_recovery_receipt = None
+                elif op == EMPTY_GROUP_PROBE:
+                    self.micro.empty_group_receipt = None
+                elif op == CORRECTION_PROFILE_PROBE:
+                    pass  # Keep the earlier independent v2 receipt.
                 elif op == SMALL_PROFILE_PROBE:
                     self.micro.small_profile_receipt = dict(session=self.session,epoch=self.epoch,
                         boot_id=self.micro.boot_id, profile='legacy_v1')

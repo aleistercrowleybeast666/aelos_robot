@@ -163,10 +163,12 @@ class RosNavigationIO:
 
     def visual_motion_ready(self,stamp_ns):
         with self.lock:
-            return bool(self.visual_camera_status().get('ready') and self.publisher_ok and
-                stamp_ns>=self.restart_barrier and 0<=self.ros_now_ns()-stamp_ns<=self.cfg['max_age_s']*1e9 and
-                0<=self.ros_now_ns()-self.last_stamp<=self.cfg['max_age_s']*1e9 and
-                0<=self.clock()-self.last_image_receipt<=self.cfg['camera_health']['max_age_s'])
+            now_ns = self.ros_now_ns()
+            return bool(not self.closed and self.parameters_ok and type(stamp_ns) is int
+                and self.restart_barrier < stamp_ns <= self.last_stamp
+                and 0 <= now_ns - stamp_ns <= self.cfg['max_age_s'] * 1e9
+                and self._camera_healthy(now_ns, self.clock(), self.restart_barrier)
+                and self.visual_camera_status().get('ready'))
 
     def on_image(self,msg):
         h=header_info(msg) or {};stamp=h.get('stamp_ns',0);now=self.ros_now_ns()

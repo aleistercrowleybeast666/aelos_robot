@@ -159,6 +159,18 @@ def _verified_search_heading(robot, cfg, sample, scope):
             and owner_scope == (getattr(robot.backend, 'session', ''), getattr(robot.backend, 'epoch', -1)))
 
 
+def Checkpoint_EmptyMotionSampleReady(robot, nav, anchor, sample):
+    guard = robot.heading_guard
+    if (not sample or not anchor or guard is None or sample != guard.last_sample
+            or anchor is not nav.mag.anchor or sample.get('load') != 'empty' or anchor.get('load') != 'empty'):
+        return False
+    scope = tuple(sample.get(key) for key in _MAGNETIC_WINDOW_SCOPE)
+    return (scope == tuple(anchor.get(key) for key in _MAGNETIC_WINDOW_SCOPE)
+            and _verified_search_heading(robot, nav.cfg, sample, scope)
+            and guard.corridor_motion_sample_ready('empty', sample['received_monotonic'],
+                                                   robot.last_action_completed_monotonic))
+
+
 def _select_measured_sweep_turn(robot, heading_cfg, sweep, offset):
     from micro_trial import MEDIUM_MAX_RESPONSE_DEG, MEDIUM_NOMINAL_DEG, MEDIUM_OPS, OPS, deltas, response_limit
 
@@ -250,6 +262,10 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
         if chosen is None:
             return False
         empty_fine = chosen.startswith('empty_micro_')
+        marker_scope=(scope,anchor['tag_id'],anchor['tag_departure'].get('observed_at_ns'))
+        if empty_fine and getattr(robot,'ineffective_empty_return_turn',None)==(marker_scope,chosen):
+            sweep.update(blocked=True,status='empty_fine_previously_ineffective')
+            return False
     if sweep['origin'] is None:
         sweep['origin']=angle
         sweep['scope']=scope
@@ -290,7 +306,7 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
             signed = -8. if error > 0 else 8.
             bound = 16.  # Estimated response for scheduling; checked against the settled observation.
     direction=-1 if signed<0 else 1
-    if signed==0 or abs(offset+direction*bound)>limit:
+    if signed==0 or (not anchored_return and abs(offset+direction*bound)>limit):
         return False
     if error is not None and (signed*error>=0 or (not empty_fine and bound>=2*(abs(error)-3.))):
         return False
@@ -348,10 +364,14 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
     elif empty_fine and actual is not None and (direction*actual < _SEARCH_MIN_TURN_DEG
             or abs(wrap(error+actual)) >= abs(error)):
         sweep['blocked']=True
+        robot.ineffective_empty_return_turn=(marker_scope,native)
     elif actual is None:
         sweep['blocked']=True
         if measured:
             sweep.update(status='heading_unavailable', reason='same-scope post-turn heading could not be verified')
+    elif anchored_return:
+        if direction*actual < _SEARCH_MIN_TURN_DEG or abs(wrap(error+actual)) >= abs(error):
+            sweep['blocked']=True
     elif direction*actual < -3. or abs(actual)>bound or abs(wrap(angle+actual-sweep['origin']))>limit:
         sweep['limit_reached' if accept_verified_angle else 'blocked']=True
     if is_micro and actual is not None and not robot.micro_budget().reconcile(
@@ -359,6 +379,9 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
         sweep['blocked']=True
     event = {'checkpoint_search_turn':native,'observed_delta_deg':actual,
              'sweep_limited':sweep['blocked'] or sweep.get('limit_reached',False)}
+    if anchored_return:
+        event.update(reference_tag=anchor['tag_id'],before_error_deg=error,
+                     after_error_deg=wrap(error+actual) if actual is not None else None)
     if measured:
         event.update(offset_deg=sweep['offset_deg'], coverage_deg=sweep['coverage_deg'],
                      target_offset_deg=sweep['target_offset_deg'], search_status=sweep['status'])

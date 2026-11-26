@@ -16,7 +16,7 @@ from pickup_controller import PickupController, validate as validate_pickup
 from block_camera import BlockCameraContractLost, BlockEvidenceExpired, BlockFrameUnavailable
 from heading_guard import HeadingGuard, MagneticDataUnavailable
 from mission_checkpoints_v5 import (
-    CheckpointArrivalResult, Checkpoint_ChooseNudge, Checkpoint_Locate, Checkpoint_ReadHeading,
+    CheckpointArrivalResult, Checkpoint_ChooseNudge, Checkpoint_EmptyMotionSampleReady, Checkpoint_Locate, Checkpoint_ReadHeading,
     Checkpoint_TrySweepTurn, Checkpoint_ValidateArrivals, align_if_configured,
 )
 from nav_observation import MagneticReference, wrap
@@ -28,6 +28,8 @@ OPS={
     'empty_micro_left':('empty','empty'), 'empty_micro_right':('empty','empty'),
     'empty_backward2':('empty','empty'),
     'empty_strafe_left':('empty','empty'), 'empty_strafe_right':('empty','empty'),
+    'empty_strafe_left2':('empty','empty'), 'empty_strafe_right2':('empty','empty'),
+    'empty_strafe_left3':('empty','empty'), 'empty_strafe_right3':('empty','empty'),
     'grab_single':('empty','single'), 'place_single':('single','empty'),
     'grab_double':('empty','double'), 'place_double':('double','empty'),
     'carry_forward':('single','single'),'carry_forward2':('single','single'),
@@ -42,9 +44,10 @@ _LOAD_TRANSITIONS=('grab_single','grab_double','place_single','place_double')
 PAIR_MOTION_OPS={op:'double_'+op for op,loads in OPS.items() if loads==('single','single')}
 _TURN_OPS=('left_turn','right_turn','empty_left_turn','empty_right_turn','empty_micro_left','empty_micro_right')
 _CARRY_FORWARD_OPS=('carry_forward','carry_forward2','carry_forward4','carry_forward7','carry_forward9')
+_EMPTY_STRAFE_GROUPS=('empty_strafe_left2','empty_strafe_left3','empty_strafe_right2','empty_strafe_right3')
 _TRANSLATION_OPS=_CARRY_FORWARD_OPS+(
     'strafe_left_once','strafe_right_once','free_forward','empty_forward2','empty_backward2','empty_strafe_left','empty_strafe_right',
-)
+)+_EMPTY_STRAFE_GROUPS
 _GRAB_OPS=('grab_single','grab_double')
 VISUAL_PICKUP_OPS=frozenset((*_GRAB_OPS,'free_forward','empty_forward2','empty_strafe_left','empty_strafe_right'))
 _SENSOR_RECHECKS = 4
@@ -371,6 +374,8 @@ class MissionRobot(Robot):
             ready = getattr(self.backend, 'empty_recovery_ready', None)
             if not callable(ready) or not ready():
                 raise NotReady('当前 MCU 会话未确认空载回程微调动作')
+        if op in _EMPTY_STRAFE_GROUPS and not getattr(self.backend,'empty_strafe_group_ready',lambda:False)():
+            raise NotReady('当前 MCU 会话未确认空载连续侧跨动作')
         if required_load=='double' or next_load=='double':
             if not self.supports_pair() or native_op not in self.backend.mission_pair_ops():
                 raise RuntimeError('V5 double-load native capability unavailable before '+native_op)
@@ -440,6 +445,10 @@ class MissionRobot(Robot):
         alias={'empty_left_turn':'left_turn','empty_right_turn':'right_turn','place_single':'stand',
                'place_double':'stand','grab_double':'grab_single',
                'carry_forward7':'carry_forward','carry_forward9':'carry_forward'}.get(op,op)
+        return_motion=(configured and self.load_kind=='empty' and getattr(self,'route_command',None)=='2'
+                       and op in _TRANSLATION_OPS and self._allows_missing_magnetic())
+        if guard is not None and return_motion:
+            guard.empty_return_feedback_action=alias
         try:
             self.monitor_heading(alias,allow_correction=(
                 (allow_heading_correction and op in _CARRY_FORWARD_OPS)
@@ -451,13 +460,19 @@ class MissionRobot(Robot):
         except Exception:
             self.record_fall_diagnostic(native_op)
             raise
-        if (guard is not None and op in _TRANSLATION_OPS and not checkpoint_follows
+        finally:
+            if guard is not None and return_motion:
+                guard.empty_return_feedback_action=None
+        if (guard is not None and op in _TRANSLATION_OPS
                 and not (magnetic_optional and self.magnetic_route_only)):
             report=self.last_heading_report or {}
             residual=report.get('after_error_deg',report.get('error_deg'))
             if (guard.blocked or type(residual) not in (int,float) or not math.isfinite(residual)
                     or abs(residual)>guard.c['deadband_deg']):
-                self._await_heading(op,**motion_context)
+                if not checkpoint_follows:
+                    self._await_heading(op,**motion_context)
+                elif return_motion and self.last_heading_report is not None:
+                    report['return_heading_pending']=True
 
     def chain_step(self,step,*,checkpoint_follows=False,configured=False):
         self.check()
@@ -556,6 +571,8 @@ class MissionRobot(Robot):
         anchor=nav.mag.anchor
         motion_context={'configured': True} if configured else {}
         advisory_heading=configured and self._allows_missing_magnetic()
+        empty_return=advisory_heading and self.load_kind=='empty' and getattr(self,'route_command',None)=='2'
+        report=self.last_heading_report if empty_return else None
         sweep={'origin':None,'turns':0,'blocked':False}
         idle_windows=0
         with self._pause_route_timer():
@@ -569,11 +586,20 @@ class MissionRobot(Robot):
                 self._record_progress('recovering_heading',after_action=op)
                 try:
                     sample=self._read_heading(nav,self.check,**motion_context)
+                    if empty_return:
+                        anchor=nav.mag.anchor
+                        if not Checkpoint_EmptyMotionSampleReady(self,nav,anchor,sample):
+                            sample=None
                     if anchor and sample and sample.get('calibration_id')==anchor.get('calibration_id'):
                         yaw=nav.cfg['magnetic']['heading_sign']*sample['raw_heading_deg']
                         error=wrap(yaw+anchor['offset_deg']-anchor['route_heading_deg'])
                         if abs(error)<=nav.cfg['post_action_heading']['deadband_deg']:
-                            nav.mag.anchor=dict(anchor,received_monotonic=sample['received_monotonic'])
+                            if empty_return:
+                                nav.mag.anchor=dict(anchor,stationary_validated_monotonic=sample['received_monotonic'])
+                            else:
+                                nav.mag.anchor=dict(anchor,received_monotonic=sample['received_monotonic'])
+                            if report is not None:
+                                report['return_motion_residual_deg']=error
                             return
                         moved=self._search_turn(nav,sweep,error=error,**motion_context)
                         if moved:
@@ -585,11 +611,14 @@ class MissionRobot(Robot):
                             continue
                         if advisory_heading:
                             latest=self.heading_guard.last_sample or {}
-                            if self.heading_guard.corridor_motion_sample_ready(self.load_kind,
-                                    latest.get('received_monotonic'),self.last_action_completed_monotonic):
+                            if (Checkpoint_EmptyMotionSampleReady(self,nav,anchor,latest) if empty_return
+                                    else self.heading_guard.corridor_motion_sample_ready(self.load_kind,
+                                        latest.get('received_monotonic'),self.last_action_completed_monotonic)):
                                 yaw=nav.cfg['magnetic']['heading_sign']*latest['raw_heading_deg']
                                 residual=wrap(yaw+anchor['offset_deg']-anchor['route_heading_deg'])
                                 nav.mag.anchor=dict(anchor,stationary_validated_monotonic=latest['received_monotonic'])
+                                if report is not None:
+                                    report['return_motion_residual_deg']=residual
                                 self.events.append({'return_heading_advisory':{
                                     'after_action':op,'remaining_heading_error_deg':residual,
                                     'heading_aligned':abs(residual)<=nav.cfg['post_action_heading']['deadband_deg'],
@@ -608,6 +637,12 @@ class MissionRobot(Robot):
         if advisory_heading:
             capture_health=getattr(nav.io,'magnetic_capture_health',lambda:{})()
             if self._enter_magnetic_route_fallback(capture_health,'return_heading_recheck'):
+                return
+            if empty_return:
+                if report is not None:
+                    report['return_motion_residual_deg']=None
+                self.events.append({'return_heading_advisory':{'after_action':op,
+                    'reason_zh':'缺少同一参考下的空载航向，下一组采用短步并重新扫码。'}})
                 return
         raise NotReady('动作已完成，但航向连续复查无进展，未找到可用的下一段航向参考。')
 
