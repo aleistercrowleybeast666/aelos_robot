@@ -1,0 +1,62 @@
+{
+  "after_update": false,
+  "command": "stand",
+  "received_at": "2026-11-26T23:40:38.098+08:00",
+  "result": {
+    "accepted": true,
+    "command": "stand",
+    "elapsed_s": 1.9495206660000122,
+    "event": "done",
+    "exit_code": 0,
+    "expected_load": "empty_on_MCU",
+    "fall_recovery": false,
+    "may_release_object": true,
+    "next_stage_started": false,
+    "ok": true,
+    "physical_load_sensor_confirmation": false,
+    "physical_posture_confirmed": false,
+    "physical_release_confirmed": false,
+    "post_action_monitor": [
+      {
+        "stage_timing": {
+          "action": "stand",
+          "elapsed_s": 0.7608417220000092,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "stand",
+          "correction_actions": 0,
+          "planned_turn_error_measured": false,
+          "reason": "planned heading/load change; next straight establishes a new stationary relative reference; turn angle error unknown",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "5aa9e7eed7b249ec80f1a78baab23ee3",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "empty",
+              "load_epoch": 5,
+              "norm": 1748.611464682729,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 93.0,
+              "raw_heading_deg": 267.0,
+              "raw_norm": 1925.7211636163736,
+              "received_monotonic": 191.923514181,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      }
+    ],
+    "requested_posture": "normal_stand_arms_down",
+    "status": "stand_request_completed"
+  },
+  "schema": "r3.console.task-report.v1"
+}
