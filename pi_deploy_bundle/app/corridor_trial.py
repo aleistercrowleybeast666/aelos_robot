@@ -438,6 +438,9 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
              'error_after_strafe_deg': initial[0] if initial else None, 'drift_deg': drift,
              'residual_deg': initial[0] if initial else None, 'correction_actions': 0}
     leg.setdefault('lateral_heading_checks', []).append(check)
+    if leg.get('tag3_side_turn_deferred'):
+        check['compensation_status'] = 'tag3_recent_turn_would_worsen_residual'
+        return CorridorLateralHeadingResult.PROCEED
     if tag3_probe_handled:
         check['compensation_status'] = ('tag3_visual_checked_before_forward'
             if (leg.get('tag3_straight_heading') or {}).get('checked_before_magnetic_turn')
@@ -862,8 +865,7 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings, *, prof
     sample = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
     previous = leg.pop('tag4_deferred_heading_deg', None)
     completed_at = getattr(robot, 'last_action_completed_monotonic', None)
-    short_handoff = ((leg.get('tag3_straight_heading') or {}).get('short_first_forward')
-                     and leg.get('completed_forward_steps') == 2 and profile is not None)
+    short_handoff = _tag3_short_first_forward(leg) and leg.get('completed_forward_steps') == 2 and profile is not None
     if short_handoff:
         # Reuse Tag 3 only from the new two-step stance. Far Tag 4 is a depth
         # landmark; it must not displace a usable Tag 3 heading at this boundary.
@@ -909,7 +911,7 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings, *, prof
 def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautious=False, native_five=False):
     """Choose one closed gait. Past depth can shorten a gait but cannot authorise a long one."""
     completed = leg.get('completed_forward_steps', 0)
-    handoff_limited = completed == 0 and (leg.get('tag3_straight_heading') or {}).get('short_first_forward') is True
+    handoff_limited = completed == 0 and _tag3_short_first_forward(leg)
     if handoff_limited:
         cautious = True
     # A four-step run reduced measured depth from 37.0 to 15.4 cm. Reserve the
@@ -2898,13 +2900,10 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
     return pose, refreshed
 
 
-def _tag3_peripheral_heading(robot, nav, leg, hint):
-    """Check a small peripheral yaw against the existing Tag 3 route reference."""
-    bearing = hint.get('min_abs_body_bearing_deg', 0.)
-    yaw = hint['heading_deg']
+def _tag3_fresh_magnetic_witness(robot, nav, leg):
+    """Use only a settled observation tied to the current Tag 3 anchor and stance."""
     deadband = nav.cfg.get('post_action_heading', {}).get('deadband_deg', 8.)
-    if (bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG or abs(yaw) > 2 * deadband
-            or (leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
+    if ((leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
             or getattr(robot, 'magnetic_route_only', False)):
         return None
     guard = getattr(robot, 'heading_guard', None)
@@ -2933,16 +2932,13 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
             or set(guard._target_observation_faults(sample, robot.load_kind)) - {'sample_stale'}
             or abs(magnetic) > 2 * deadband):
         return None
-    evidence = {'body_bearing_min_abs_deg': bearing, 'magnetic_error_deg': magnetic,
-                'magnetic_receipt_age_s': now-receipt}
-    if max(abs(yaw), abs(magnetic)) <= deadband:
-        return evidence
-    # At the edge of this wide-angle lens a nominal 10-degree turn can look
-    # attractive even immediately after the very same gait turned 24 degrees.
-    # Use current-session measurements to veto a repeat, never to command a turn.
+    return magnetic, now-receipt, scope
+
+
+def _tag3_likely_overshoot(robot, nav, yaw, scope):
+    """Use recent current-load measurements to veto a repeat, never to command a turn."""
+    now = robot.clock()
     gains = nav.cfg.get('visual_micro', {}).get('signed_nominal_delta_deg', {})
-    if abs(wrap(yaw - magnetic)) > deadband:
-        return None
     for event in reversed(getattr(robot, 'events', ())):
         report = event.get('post_action_heading', {})
         for step in reversed(report.get('correction_steps') or [report]):
@@ -2957,11 +2953,38 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
                     or sample.get('load') != robot.load_kind or not measured.get('post_capture_verified')
                     or tuple(sample.get(k) for k in ('capture_session', 'load_epoch', 'calibration_id')) != scope):
                 continue
-            if (type(observed) in (int,float) and observed * yaw < 0
+            if (type(observed) in (int,float) and isfinite(observed) and observed * yaw < 0
                     and abs(wrap(yaw + observed)) >= abs(yaw)):
-                return dict(evidence, recent_turn=operation, recent_turn_delta_deg=observed)
+                return {'recent_turn':operation, 'recent_turn_delta_deg':observed}
             return None  # A newer representative response supersedes older ones.
     return None
+
+
+def _tag3_peripheral_heading(robot, nav, leg, hint):
+    """Check a small peripheral yaw against the existing Tag 3 route reference."""
+    bearing = hint.get('min_abs_body_bearing_deg', 0.)
+    yaw = hint['heading_deg']
+    deadband = nav.cfg.get('post_action_heading', {}).get('deadband_deg', 8.)
+    if bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG or abs(yaw) > 2 * deadband:
+        return None
+    witness = _tag3_fresh_magnetic_witness(robot, nav, leg)
+    if witness is None:
+        return None
+    magnetic, age, scope = witness
+    evidence = {'body_bearing_min_abs_deg': bearing, 'magnetic_error_deg': magnetic, 'magnetic_receipt_age_s': age}
+    if max(abs(yaw),abs(magnetic)) <= deadband:
+        return evidence
+    if abs(wrap(yaw-magnetic)) <= deadband:
+        prior = _tag3_likely_overshoot(robot, nav, yaw, scope)
+        if prior:
+            return dict(evidence, **prior)
+    return None
+
+
+def _tag3_short_first_forward(leg):
+    visual = leg.get('tag3_straight_heading') or {}
+    return (visual.get('short_first_forward') is True or bool(leg.get('tag3_side_turn_deferred'))
+            and visual.get('magnetic_reference') not in ('applied','prior_tag3_reference_retained'))
 
 
 def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False,
@@ -3031,6 +3054,14 @@ def CorridorTrial_CheckTag3SideEndpoint(robot, nav, profile, leg, magnetic_repor
     if visual.get('turn') or visual.get('magnetic_reference') in ('applied','prior_tag3_reference_retained'):
         visual['checked_before_magnetic_turn'] = True
         return robot.last_action_completed_ros_ns, hint
+    witness = _tag3_fresh_magnetic_witness(robot, nav, leg)
+    if witness:
+        yaw, age, scope = witness
+        prior = _tag3_likely_overshoot(robot,nav,yaw,scope)
+        if prior:
+            leg['tag3_side_turn_deferred'] = dict(prior, before_error_deg=yaw, magnetic_receipt_age_s=age,
+                predicted_error_deg=wrap(yaw+prior['recent_turn_delta_deg']),
+                reason_zh='最近同负载的微转会放大余差，先在此站姿找 Tag 3，仍不可见时短进两步再测。')
     return None
 
 
