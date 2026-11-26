@@ -1,0 +1,16 @@
+{
+  "after_update": false,
+  "command": "deploy",
+  "received_at": "2026-11-26T22:42:31.820+08:00",
+  "result": {
+    "exception_type": "RuntimeError",
+    "ok": false,
+    "reason": "Original files restored; unable to verify owner reload. Backup: /home/lemon/.aelos_auto_r3_python.r3-b2e9f15b36eb477ca332070a017b3504",
+    "status": "deploy_failed"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [],
+    "reason": "Original files restored; unable to verify owner reload. Backup: /home/lemon/.aelos_auto_r3_python.r3-b2e9f15b36eb477ca332070a017b3504"
+  }
+}
