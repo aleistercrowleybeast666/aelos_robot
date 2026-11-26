@@ -1,0 +1,3239 @@
+{
+  "after_update": false,
+  "command": 2,
+  "received_at": "2026-11-26T22:56:09.385+08:00",
+  "result": {
+    "accepted": true,
+    "command": "2",
+    "completed_returns": 0,
+    "deliveries": 0,
+    "diagnostic": {
+      "current_operation": null,
+      "epoch": 1,
+      "expected_wire_abi": 42,
+      "in_flight": false,
+      "last_key": 0,
+      "last_rejection": null,
+      "last_result": {
+        "cancelled": false,
+        "complete": true,
+        "dispatched": true,
+        "drained": true,
+        "ignored_predispatch_complete": 0,
+        "ignored_predispatch_start": 0,
+        "native": "leju_dade86b855eee7f28828dfbc6055d609",
+        "op": "double_single_micro_right",
+        "operation_seq": 18,
+        "protocol_completed": true,
+        "reason": "explicit automatic start",
+        "request_nonce": "c2cbff5f19fa4590a5ba623dcc57d275",
+        "started": true
+      },
+      "mcu_last_contact_age_s": 0.24380955500001278,
+      "mcu_last_contact_source": "request",
+      "mcu_ready": true,
+      "micro_trial": {
+        "angle_evidence": "source_nominal",
+        "boot_id": "7b7caee9-4881-4b92-bd40-bb8f9c56e6c7",
+        "capability": null,
+        "capability_verified": false,
+        "cmd0_right5_capability_verified": false,
+        "cmd0_right5_deployment_readback_ready": false,
+        "cmd0_right5_ready": false,
+        "cmd0_route_capability_verified": false,
+        "cmd0_route_deployment_readback_ready": true,
+        "cmd0_route_ready": false,
+        "contract": "r3.single_micro_turn.v1",
+        "current_boot_file_readback_claimed": false,
+        "deployment_evidence_scope": "persistent_mcu_files_until_next_deployment",
+        "deployment_readback_ready": true,
+        "empty_recovery_deployment_readback_ready": false,
+        "empty_recovery_ready": false,
+        "guarded_trial_confirmed": false,
+        "initial_reload_boot_id": "9e2267bf-51af-4e2a-9879-867d224fe3f5",
+        "measured_degrees": null,
+        "medium_turn_capability_verified": false,
+        "medium_turn_deployment_readback_ready": true,
+        "medium_turn_ready": false,
+        "native_immediate_stop": false,
+        "nominal_degrees": 5,
+        "pair_deployment_readback_ready": false,
+        "pair_live_capability_verified": false,
+        "physical_health_verified": false,
+        "pickup_backward4_deployment_readback_ready": false,
+        "pickup_backward4_ready": false,
+        "pickup_backward6_deployment_readback_ready": false,
+        "pickup_backward6_ready": false,
+        "pickup_backward8_deployment_readback_ready": false,
+        "pickup_backward8_ready": false,
+        "ready": false,
+        "small_strafe_capability_verified": false,
+        "small_strafe_deployment_readback_ready": true,
+        "small_strafe_profile": null,
+        "small_strafe_ready": false
+      },
+      "mission_v5_pair_ops": [],
+      "mission_v5_pair_ready": false,
+      "mission_v5_ready": false,
+      "mode": "manual",
+      "native_immediate_cancel": false,
+      "operation_seq": 18,
+      "owner_version": "r3-visual-pickup-20261109-v5",
+      "published_at_s": 1794230398.2897308,
+      "reason": "local trigger/client cancelled",
+      "recovery_gate": {
+        "body_commands": 0,
+        "epoch": 1,
+        "mcu_guard_online_status_available": false,
+        "operator": null,
+        "physical_load_sensor_confirmation": false,
+        "ready": false,
+        "reason": "cancel/takeover invalidated recovery acknowledgment",
+        "remaining_s": 0.0,
+        "session": "e0099141fb244019a04bf2bc43fbdca2",
+        "temperature_sensor_available": false
+      },
+      "restart_requires_empty_reset": true,
+      "robot_id": 3,
+      "schema": "r3.simple.v1",
+      "session": "e0099141fb244019a04bf2bc43fbdca2"
+    },
+    "elapsed_s": 52.66152013500002,
+    "event": "done",
+    "events": [
+      {
+        "body_commands": 0,
+        "parallel_read_only": false,
+        "sensor_preflight": "fresh magnetic and chest streams"
+      },
+      {
+        "segment_heading_reference": {
+          "claim": "straight-segment drift only; planned turn error and absolute route heading unknown",
+          "correction_actions": 0,
+          "reference": {
+            "absolute_route_heading_known": false,
+            "action_completed_monotonic": null,
+            "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+            "capture_session": "55fc84a9bddd49818704976664d63f4c",
+            "capture_verified": true,
+            "decision_after_monotonic": 132.618544364,
+            "decision_capture_times": [
+              132.679690142,
+              132.78142075300002,
+              132.882055753
+            ],
+            "decision_receipt_times": [
+              132.979427012,
+              133.080371142,
+              133.181993716
+            ],
+            "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+            "load": "empty",
+            "load_epoch": 2,
+            "norm": 1861.1642438544325,
+            "norm_basis": "calibrated_horizontal",
+            "offset_deg": 85.00000000000006,
+            "owner_observation_scope": [
+              "e0099141fb244019a04bf2bc43fbdca2",
+              0
+            ],
+            "planned_turn_error_measured": false,
+            "raw_heading_deg": 274.99999999999994,
+            "raw_norm": 2081.3197736051998,
+            "received_monotonic": 133.19270166,
+            "route_heading_deg": 0.0,
+            "source": "relative_stationary_segment_start",
+            "stable_samples": 3,
+            "tag_id": null,
+            "usable_for_heading": true
+          },
+          "status": "relative_reference_established"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.7583302029999857,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "empty",
+          "journey": 1,
+          "outbound_only": false,
+          "phase": "pickup",
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true
+        }
+      },
+      {
+        "block_observation": {
+          "camera_healthy": true,
+          "candidates": [],
+          "count": null,
+          "height": 480,
+          "load": "empty",
+          "reason": "concave merged block layout without a clear bottom pair",
+          "received_monotonic": 136.214119677,
+          "scope": [
+            "e0099141fb244019a04bf2bc43fbdca2",
+            0
+          ],
+          "staged_count_unresolved": true,
+          "stamp_ns": 1794230352443336773,
+          "status": "unknown",
+          "target": null,
+          "width": 640
+        }
+      },
+      {
+        "segment_heading_reference": {
+          "reference_source": "relative_stationary_segment_start",
+          "status": "reference_retained"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.000329203000006828,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "grab_double",
+          "completed_monotonic": 140.147968286,
+          "completed_ros_ns": 1794230356389311790,
+          "elapsed_s": 3.641189091000001,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 136.506779195
+        }
+      },
+      {
+        "expected_load": "double",
+        "physical_success": "unobserved",
+        "v5_action": "grab_double"
+      },
+      {
+        "stage_timing": {
+          "action": "grab_single",
+          "elapsed_s": 0.7226129439999909,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "grab_single",
+          "correction_actions": 0,
+          "field_norm_fraction_change": 0.021872028149571163,
+          "planned_turn_error_measured": false,
+          "reason": "new same-load reference established from post-pickup sample; no duplicate pre-straight sample",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1820.456807121873,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 75.0,
+              "raw_heading_deg": 285.0,
+              "raw_norm": 2077.0659594726403,
+              "received_monotonic": 140.869365915,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "pickup": {
+          "adjustments": 0,
+          "expected_load": "double",
+          "grip_count": 2,
+          "observed_count": null,
+          "physical_grip_confirmed": false,
+          "planned_count": 2,
+          "reason_zh": "人工摆放区未确认方块数量，已执行默认双抱。",
+          "stacked_triple": false,
+          "staged_default_pair": true,
+          "status": "double_pickup_protocol_completed"
+        }
+      },
+      {
+        "segment_heading_reference": {
+          "claim": "straight-segment drift only; planned turn error and absolute route heading unknown",
+          "correction_actions": 0,
+          "reference": {
+            "absolute_route_heading_known": false,
+            "action_completed_monotonic": null,
+            "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+            "capture_session": "55fc84a9bddd49818704976664d63f4c",
+            "capture_verified": true,
+            "decision_after_monotonic": 141.042932007,
+            "decision_capture_times": [
+              141.13831874800002,
+              141.240130377,
+              141.340900785
+            ],
+            "decision_receipt_times": [
+              141.440599877,
+              141.546151581,
+              141.659490711
+            ],
+            "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+            "load": "double",
+            "load_epoch": 3,
+            "norm": 1828.4991315171267,
+            "norm_basis": "calibrated_horizontal",
+            "offset_deg": 75.0,
+            "owner_observation_scope": [
+              "e0099141fb244019a04bf2bc43fbdca2",
+              0
+            ],
+            "pickup_approach_heading": {
+              "empty_reading_deg": 274.99999999999994,
+              "loaded_reading_deg": 285.0,
+              "loading_residual_deg": 10.000000000000057,
+              "route_heading_deg": -10.000000000000057
+            },
+            "planned_turn_error_measured": false,
+            "raw_heading_deg": 285.0,
+            "raw_norm": 2085.071941204907,
+            "received_monotonic": 141.698286711,
+            "route_heading_deg": -10.000000000000057,
+            "source": "relative_stationary_segment_start",
+            "stable_samples": 3,
+            "tag_id": null,
+            "usable_for_heading": true
+          },
+          "status": "relative_reference_established"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.827576037,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "double",
+          "grip_count": 2,
+          "journey": 1,
+          "observed_count": null,
+          "outbound_only": false,
+          "phase": "transfer_to_entry",
+          "planned_count": 2,
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true,
+          "stacked_triple": false
+        }
+      },
+      {
+        "pickup_exit": {
+          "completed_actions": [
+            "cmd1_carry_backward6",
+            "cmd0_strafe_left2",
+            "cmd0_strafe_left2",
+            "cmd0_strafe_left4",
+            "cmd0_strafe_left3",
+            "single_small_strafe_left"
+          ],
+          "lateral_heading_checks": [
+            {
+              "action": "cmd0_strafe_left2",
+              "compensation_status": "within_deadband",
+              "correction_actions": 1,
+              "drift_deg": 8.0,
+              "error_after_strafe_deg": 18.0,
+              "error_before_deg": 10.0,
+              "heading_status": "corrected_once",
+              "large_drift": false,
+              "residual_deg": -7.0
+            },
+            {
+              "action": "cmd0_strafe_left2",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": 3.0,
+              "error_after_strafe_deg": -4.0,
+              "error_before_deg": -7.0,
+              "large_drift": false,
+              "residual_deg": -4.0
+            },
+            {
+              "action": "cmd0_strafe_left4",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": -3.0,
+              "error_after_strafe_deg": -7.0,
+              "error_before_deg": -4.0,
+              "large_drift": false,
+              "residual_deg": -7.0
+            },
+            {
+              "action": "cmd0_strafe_left3",
+              "compensation_status": "heading_correction_only",
+              "correction_actions": 3,
+              "drift_deg": -9.0,
+              "error_after_strafe_deg": -16.0,
+              "error_before_deg": -7.0,
+              "heading_status": "corrected_once",
+              "large_drift": false,
+              "residual_deg": -6.0
+            },
+            {
+              "action": "single_small_strafe_left",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": 4.000000000000114,
+              "error_after_strafe_deg": -1.9999999999998863,
+              "error_before_deg": -6.0,
+              "large_drift": false,
+              "residual_deg": -1.9999999999998863
+            }
+          ],
+          "retreat": {
+            "completed_actions": [
+              "cmd1_carry_backward6"
+            ],
+            "continuous": true,
+            "correction_actions": 0,
+            "groups": [
+              6
+            ],
+            "heading_before_correction_deg": 10.0,
+            "heading_status": "corridor_heading_followup",
+            "next_group_split": {
+              "action": "cmd0_strafe_left4",
+              "groups": [
+                2,
+                2
+              ]
+            },
+            "planned_steps": 6,
+            "residual_deg": 10.0
+          }
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd1_carry_backward6",
+          "completed_monotonic": 144.639655987,
+          "completed_ros_ns": 1794230360880946397,
+          "elapsed_s": 2.8508041839999976,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 141.788851803
+        }
+      },
+      {
+        "action": "cmd1_carry_backward6",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "pickup_retreat_complete",
+          "elapsed_s": 1.552143999000009,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "pickup_retreat_complete",
+          "correction_actions": 0,
+          "error_deg": 10.0,
+          "medium_candidate": {
+            "action": "single_medium_left",
+            "status": "prefer_small_in_corridor"
+          },
+          "motion_prediction": {
+            "action": null,
+            "rejected": {
+              "single_micro_left": "insufficient_worst_case_improvement",
+              "single_micro_right": "wrong_direction"
+            },
+            "status": "no_safe_candidate"
+          },
+          "reason": "verified corridor residual retained for the next movement boundary",
+          "reason_zh": "航向余差在通道容差内，继续到下一次航向检查。",
+          "remaining_heading_error_deg": 10.0,
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1719.8950061423213,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 75.00000000000006,
+              "raw_heading_deg": 284.99999999999994,
+              "raw_norm": 1976.0541490556375,
+              "received_monotonic": 146.189696634,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "stationary_recheck": {
+            "first_error_deg": 10.0,
+            "reason": "prediction selection rejected: no_safe_candidate"
+          },
+          "status": "corridor_heading_followup"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left2",
+          "completed_monotonic": 148.060961133,
+          "completed_ros_ns": 1794230364302262067,
+          "elapsed_s": 1.8588998330000095,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 146.2020613
+        }
+      },
+      {
+        "action": "cmd0_strafe_left2",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7434522210000125,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 18.0,
+          "reason": "execution disabled, unsafe, capture freshness unverified, or calibration/load unavailable",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1886.6245718231712,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 67.0,
+              "raw_heading_deg": 293.0,
+              "raw_norm": 2158.2914539051485,
+              "received_monotonic": 148.803238243,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_medium_left",
+          "completed_monotonic": 150.280194835,
+          "completed_ros_ns": 1794230366521488904,
+          "elapsed_s": 1.378479814000002,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 148.901715021
+        }
+      },
+      {
+        "magnetic_action": "single_medium_left",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 2.253691943000007,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "after_error_deg": -7.0,
+          "angle_evidence": "source_nominal",
+          "budget": {
+            "history": [
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 28.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 25.0,
+                "op": "single_medium_left",
+                "signed_nominal_delta_deg": -10.0,
+                "source": "magnetic"
+              }
+            ],
+            "locked": false,
+            "max_actions": 16,
+            "max_nominal_degrees": 80,
+            "max_response_deg": 20.0,
+            "measured_degrees": null,
+            "reason": null,
+            "total_angle_limit_enabled": false,
+            "used_actions": 1,
+            "used_conservative_degrees": 28.0,
+            "used_nominal_degrees": 10.0
+          },
+          "commanded_delta_deg": -10.0,
+          "correction": "single_medium_left",
+          "correction_actions": 1,
+          "correction_diagnostic": {
+            "after_error_deg": -7.0,
+            "after_heading_deg": 268.0,
+            "before_error_deg": 18.0,
+            "before_heading_deg": 293.0,
+            "commanded_delta_deg": -10.0,
+            "failures": [],
+            "improvement_deg": 11.0,
+            "max_step_deg": 28.0,
+            "minimum_improvement_deg": 1.0,
+            "norm_fraction_change": 0.032728798089442755,
+            "norm_fraction_limit": 0.35,
+            "observed_change_deg": -25.0,
+            "post_capture_verified": true,
+            "post_norm": 1888.3437103992721,
+            "reference_norm": 1828.4991315171267,
+            "response_bound_is_diagnostic": true
+          },
+          "error_deg": 18.0,
+          "medium_candidate": {
+            "action": "single_medium_left",
+            "status": "considered",
+            "upper_abs_deg": 28.0
+          },
+          "micro_turn_observation": {
+            "accepted": true,
+            "delta_deg": -25.0,
+            "estimate": {
+              "degrees": -25.0,
+              "mad_deg": 0.0,
+              "physical_upper_bound_verified": false,
+              "sample_count": 1,
+              "source": "observed_provisional",
+              "used_for_control": false
+            },
+            "filter_update": {
+              "after_deg": -12.25,
+              "alpha": 0.15,
+              "before_deg": -10.0,
+              "raw_delta_deg": -25.0
+            },
+            "reason": "recorded_only",
+            "sample_count": 1
+          },
+          "motion_prediction": {
+            "action": "single_medium_left",
+            "adaptive_interval_verified": true,
+            "budget_delta_deg": -28.0,
+            "evidence": "adaptive_medium_prior",
+            "lower_abs_deg": 6.0,
+            "observation_time_unchanged": 148.28933009500003,
+            "physical_upper_bound_verified": false,
+            "predicted_delta_deg": -10.0,
+            "predicted_error_deg": 8.0,
+            "predicted_only": true,
+            "rejected": {
+              "single_micro_right": "wrong_direction"
+            },
+            "sample_count": 0,
+            "status": "selected",
+            "upper_abs_deg": 28.0,
+            "worst_predicted_residual_deg": 12.0
+          },
+          "physical_inflight_angle_limit_guaranteed": false,
+          "prediction_update": {
+            "innovation_deg": -15.0,
+            "observed_error_deg": -7.0,
+            "posterior_error_deg": -7.0,
+            "predicted_error_deg": 8.0,
+            "prediction_not_new_sample": true,
+            "source": "fresh_magnetic_observation"
+          },
+          "requested_correction": "single_medium_left",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1886.6245718231712,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 67.0,
+              "raw_heading_deg": 293.0,
+              "raw_norm": 2158.2914539051485,
+              "received_monotonic": 148.819543503,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "corrected_once",
+          "verification": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1888.3437103992721,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 92.0,
+              "raw_heading_deg": 268.0,
+              "raw_norm": 2065.727232719751,
+              "received_monotonic": 151.051005927,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          }
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left2",
+          "completed_monotonic": 153.048669926,
+          "completed_ros_ns": 1794230369289970636,
+          "elapsed_s": 1.9681535910000036,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 151.080516335
+        }
+      },
+      {
+        "action": "cmd0_strafe_left2",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7404669250000211,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": -4.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1942.311501251754,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 89.00000000000006,
+              "raw_heading_deg": 270.99999999999994,
+              "raw_norm": 2126.705668398897,
+              "received_monotonic": 153.785637481,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left4",
+          "completed_monotonic": 156.560402813,
+          "completed_ros_ns": 1794230372801715373,
+          "elapsed_s": 2.753213536000004,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 153.807189277
+        }
+      },
+      {
+        "action": "cmd0_strafe_left4",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7137949810000066,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": -7.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1984.70217438268,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 92.0,
+              "raw_heading_deg": 268.0,
+              "raw_norm": 2149.5832154164214,
+              "received_monotonic": 157.27284759,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left3",
+          "completed_monotonic": 159.486406792,
+          "completed_ros_ns": 1794230375727701425,
+          "elapsed_s": 2.1978808869999966,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 157.288525905
+        }
+      },
+      {
+        "action": "cmd0_strafe_left3",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7089195179999876,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": -16.0,
+          "reason": "execution disabled, unsafe, capture freshness unverified, or calibration/load unavailable",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2017.2880325156068,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 101.0,
+              "raw_heading_deg": 259.0,
+              "raw_norm": 2148.745680623931,
+              "received_monotonic": 160.193502533,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_micro_right",
+          "completed_monotonic": 161.277309754,
+          "completed_ros_ns": 1794230377518602609,
+          "elapsed_s": 1.005689517999997,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 160.271620236
+        }
+      },
+      {
+        "magnetic_action": "single_micro_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_micro_right",
+          "completed_monotonic": 163.046956642,
+          "completed_ros_ns": 1794230379289979457,
+          "elapsed_s": 0.9801664990000063,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 162.066790143
+        }
+      },
+      {
+        "magnetic_action": "single_micro_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_micro_right",
+          "completed_monotonic": 165.134276382,
+          "completed_ros_ns": 1794230381375573158,
+          "elapsed_s": 1.2410088510000037,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 163.893267531
+        }
+      },
+      {
+        "magnetic_action": "single_micro_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 5.698317441,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "after_error_deg": -6.0,
+          "angle_evidence": "source_nominal",
+          "budget": {
+            "history": [
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 28.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 25.0,
+                "op": "single_medium_left",
+                "signed_nominal_delta_deg": -10.0,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 20.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 1.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 11.65,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 4.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 10.9525,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 5.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              }
+            ],
+            "locked": false,
+            "max_actions": 16,
+            "max_nominal_degrees": 80,
+            "max_response_deg": 20.0,
+            "measured_degrees": null,
+            "reason": null,
+            "total_angle_limit_enabled": false,
+            "used_actions": 4,
+            "used_conservative_degrees": 70.60249999999999,
+            "used_nominal_degrees": 25.0
+          },
+          "commanded_delta_deg": 5,
+          "correction": "single_micro_right",
+          "correction_actions": 3,
+          "correction_diagnostic": {
+            "after_error_deg": -6.0,
+            "after_heading_deg": 269.0,
+            "before_error_deg": -11.0,
+            "before_heading_deg": 264.0,
+            "commanded_delta_deg": 5,
+            "failures": [],
+            "improvement_deg": 5.0,
+            "max_step_deg": 20,
+            "minimum_improvement_deg": 1.0,
+            "norm_fraction_change": 0.08726104446594712,
+            "norm_fraction_limit": 0.35,
+            "observed_change_deg": 5.0,
+            "post_capture_verified": true,
+            "post_norm": 1988.0558755383884,
+            "reference_norm": 1828.4991315171267,
+            "response_bound_is_diagnostic": true
+          },
+          "correction_steps": [
+            {
+              "action": "corridor_side_boundary",
+              "after_error_deg": -15.0,
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 2,
+                "used_conservative_degrees": 48.0,
+                "used_nominal_degrees": 15.0
+              },
+              "commanded_delta_deg": 5,
+              "correction": "single_micro_right",
+              "correction_actions": 1,
+              "correction_diagnostic": {
+                "after_error_deg": -15.0,
+                "after_heading_deg": 260.0,
+                "before_error_deg": -16.0,
+                "before_heading_deg": 259.0,
+                "commanded_delta_deg": 5,
+                "failures": [],
+                "improvement_deg": 1.0,
+                "max_step_deg": 20,
+                "minimum_improvement_deg": 1.0,
+                "norm_fraction_change": 0.10135327560804913,
+                "norm_fraction_limit": 0.35,
+                "observed_change_deg": 1.0,
+                "post_capture_verified": true,
+                "post_norm": 2013.8235079428605,
+                "reference_norm": 1828.4991315171267,
+                "response_bound_is_diagnostic": true
+              },
+              "error_deg": -16.0,
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "prefer_small_in_corridor"
+              },
+              "micro_turn_observation": {
+                "accepted": true,
+                "delta_deg": 1.0,
+                "estimate": {
+                  "degrees": 1.0,
+                  "mad_deg": 0.0,
+                  "physical_upper_bound_verified": false,
+                  "sample_count": 1,
+                  "source": "observed_provisional",
+                  "used_for_control": false
+                },
+                "filter_update": {
+                  "after_deg": 8.65,
+                  "alpha": 0.15,
+                  "before_deg": 10,
+                  "raw_delta_deg": 1.0
+                },
+                "reason": "recorded_only",
+                "sample_count": 1
+              },
+              "motion_prediction": {
+                "action": "single_micro_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 20.0,
+                "evidence": "adaptive_micro_prior",
+                "lower_abs_deg": 5.0,
+                "observation_time_unchanged": 159.673879811,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 10,
+                "predicted_error_deg": -6.0,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 0,
+                "status": "selected",
+                "upper_abs_deg": 20.0,
+                "worst_predicted_residual_deg": 11.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "prediction_update": {
+                "innovation_deg": -9.0,
+                "observed_error_deg": -15.0,
+                "posterior_error_deg": -15.0,
+                "predicted_error_deg": -6.0,
+                "prediction_not_new_sample": true,
+                "source": "fresh_magnetic_observation"
+              },
+              "requested_correction": "single_micro_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2017.2880325156068,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 101.0,
+                  "raw_heading_deg": 259.0,
+                  "raw_norm": 2148.745680623931,
+                  "received_monotonic": 160.210910107,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "corrected_once",
+              "verification": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2013.8235079428605,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 100.0,
+                  "raw_heading_deg": 260.0,
+                  "raw_norm": 2156.412066373215,
+                  "received_monotonic": 162.017501106,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              }
+            },
+            {
+              "action": "corridor_side_boundary",
+              "after_error_deg": -11.0,
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 11.65,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 4.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 3,
+                "used_conservative_degrees": 59.65,
+                "used_nominal_degrees": 20.0
+              },
+              "commanded_delta_deg": 5,
+              "correction": "single_micro_right",
+              "correction_actions": 1,
+              "correction_diagnostic": {
+                "after_error_deg": -11.0,
+                "after_heading_deg": 264.0,
+                "before_error_deg": -15.0,
+                "before_heading_deg": 260.0,
+                "commanded_delta_deg": 5,
+                "failures": [],
+                "improvement_deg": 4.0,
+                "max_step_deg": 20,
+                "minimum_improvement_deg": 1.0,
+                "norm_fraction_change": 0.097053091541286,
+                "norm_fraction_limit": 0.35,
+                "observed_change_deg": 4.0,
+                "post_capture_verified": true,
+                "post_norm": 2005.9606251114203,
+                "reference_norm": 1828.4991315171267,
+                "response_bound_is_diagnostic": true
+              },
+              "error_deg": -15.0,
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "prefer_small_in_corridor"
+              },
+              "micro_turn_observation": {
+                "accepted": true,
+                "delta_deg": 4.0,
+                "estimate": {
+                  "degrees": 2.5,
+                  "mad_deg": 1.5,
+                  "physical_upper_bound_verified": false,
+                  "sample_count": 2,
+                  "source": "observed_provisional",
+                  "used_for_control": false
+                },
+                "filter_update": {
+                  "after_deg": 7.9525,
+                  "alpha": 0.15,
+                  "before_deg": 8.65,
+                  "raw_delta_deg": 4.0
+                },
+                "reason": "recorded_only",
+                "sample_count": 2
+              },
+              "motion_prediction": {
+                "action": "single_micro_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 11.65,
+                "evidence": "adaptive_micro_low_pass",
+                "lower_abs_deg": 1.0,
+                "observation_time_unchanged": 161.484866995,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 8.65,
+                "predicted_error_deg": -6.349999999999994,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 1,
+                "status": "selected",
+                "upper_abs_deg": 11.65,
+                "worst_predicted_residual_deg": 14.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "prediction_update": {
+                "innovation_deg": -4.650000000000006,
+                "observed_error_deg": -11.0,
+                "posterior_error_deg": -11.0,
+                "predicted_error_deg": -6.349999999999994,
+                "prediction_not_new_sample": true,
+                "source": "fresh_magnetic_observation"
+              },
+              "requested_correction": "single_micro_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2013.8235079428605,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 100.0,
+                  "raw_heading_deg": 260.0,
+                  "raw_norm": 2156.412066373215,
+                  "received_monotonic": 162.017501106,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "corrected_once",
+              "verification": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2005.9606251114203,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 96.0,
+                  "raw_heading_deg": 264.0,
+                  "raw_norm": 2161.9505082216847,
+                  "received_monotonic": 163.824358734,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              }
+            },
+            {
+              "action": "corridor_side_boundary",
+              "after_error_deg": -6.0,
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 11.65,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 4.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.9525,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 5.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 4,
+                "used_conservative_degrees": 70.60249999999999,
+                "used_nominal_degrees": 25.0
+              },
+              "commanded_delta_deg": 5,
+              "correction": "single_micro_right",
+              "correction_actions": 1,
+              "correction_diagnostic": {
+                "after_error_deg": -6.0,
+                "after_heading_deg": 269.0,
+                "before_error_deg": -11.0,
+                "before_heading_deg": 264.0,
+                "commanded_delta_deg": 5,
+                "failures": [],
+                "improvement_deg": 5.0,
+                "max_step_deg": 20,
+                "minimum_improvement_deg": 1.0,
+                "norm_fraction_change": 0.08726104446594712,
+                "norm_fraction_limit": 0.35,
+                "observed_change_deg": 5.0,
+                "post_capture_verified": true,
+                "post_norm": 1988.0558755383884,
+                "reference_norm": 1828.4991315171267,
+                "response_bound_is_diagnostic": true
+              },
+              "error_deg": -11.0,
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "prefer_small_in_corridor"
+              },
+              "micro_turn_observation": {
+                "accepted": true,
+                "delta_deg": 5.0,
+                "estimate": {
+                  "degrees": 4.0,
+                  "mad_deg": 1.0,
+                  "physical_upper_bound_verified": false,
+                  "sample_count": 3,
+                  "source": "observed_recent_three",
+                  "used_for_control": false
+                },
+                "filter_update": {
+                  "after_deg": 7.509625,
+                  "alpha": 0.15,
+                  "before_deg": 7.9525,
+                  "raw_delta_deg": 5.0
+                },
+                "reason": "recorded_only",
+                "sample_count": 3
+              },
+              "motion_prediction": {
+                "action": "single_micro_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 10.9525,
+                "evidence": "adaptive_micro_low_pass",
+                "lower_abs_deg": 1.0,
+                "observation_time_unchanged": 163.299855086,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 7.9525,
+                "predicted_error_deg": -3.0475000000000136,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 2,
+                "status": "selected",
+                "upper_abs_deg": 10.9525,
+                "worst_predicted_residual_deg": 10.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "prediction_update": {
+                "innovation_deg": -2.9524999999999864,
+                "observed_error_deg": -6.0,
+                "posterior_error_deg": -6.0,
+                "predicted_error_deg": -3.0475000000000136,
+                "prediction_not_new_sample": true,
+                "source": "fresh_magnetic_observation"
+              },
+              "requested_correction": "single_micro_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2005.9606251114203,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 96.0,
+                  "raw_heading_deg": 264.0,
+                  "raw_norm": 2161.9505082216847,
+                  "received_monotonic": 163.824358734,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "corrected_once",
+              "verification": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 1988.0558755383884,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 91.0,
+                  "raw_heading_deg": 269.0,
+                  "raw_norm": 2162.885572562728,
+                  "received_monotonic": 165.8813839,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              }
+            }
+          ],
+          "error_deg": -11.0,
+          "medium_candidate": {
+            "action": "single_medium_right",
+            "status": "prefer_small_in_corridor"
+          },
+          "micro_turn_observation": {
+            "accepted": true,
+            "delta_deg": 5.0,
+            "estimate": {
+              "degrees": 4.0,
+              "mad_deg": 1.0,
+              "physical_upper_bound_verified": false,
+              "sample_count": 3,
+              "source": "observed_recent_three",
+              "used_for_control": false
+            },
+            "filter_update": {
+              "after_deg": 7.509625,
+              "alpha": 0.15,
+              "before_deg": 7.9525,
+              "raw_delta_deg": 5.0
+            },
+            "reason": "recorded_only",
+            "sample_count": 3
+          },
+          "motion_prediction": {
+            "action": "single_micro_right",
+            "adaptive_interval_verified": true,
+            "budget_delta_deg": 10.9525,
+            "evidence": "adaptive_micro_low_pass",
+            "lower_abs_deg": 1.0,
+            "observation_time_unchanged": 163.299855086,
+            "physical_upper_bound_verified": false,
+            "predicted_delta_deg": 7.9525,
+            "predicted_error_deg": -3.0475000000000136,
+            "predicted_only": true,
+            "rejected": {
+              "single_micro_left": "wrong_direction"
+            },
+            "sample_count": 2,
+            "status": "selected",
+            "upper_abs_deg": 10.9525,
+            "worst_predicted_residual_deg": 10.0
+          },
+          "physical_inflight_angle_limit_guaranteed": false,
+          "prediction_update": {
+            "innovation_deg": -2.9524999999999864,
+            "observed_error_deg": -6.0,
+            "posterior_error_deg": -6.0,
+            "predicted_error_deg": -3.0475000000000136,
+            "prediction_not_new_sample": true,
+            "source": "fresh_magnetic_observation"
+          },
+          "requested_correction": "single_micro_right",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2005.9606251114203,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 96.0,
+              "raw_heading_deg": 264.0,
+              "raw_norm": 2161.9505082216847,
+              "received_monotonic": 163.824358734,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "corrected_once",
+          "verification": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1988.0558755383884,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 91.0,
+              "raw_heading_deg": 269.0,
+              "raw_norm": 2162.885572562728,
+              "received_monotonic": 165.8813839,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          }
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_small_strafe_left",
+          "completed_monotonic": 167.288455769,
+          "completed_ros_ns": 1794230383529751062,
+          "elapsed_s": 1.367176053999998,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 165.921279715
+        }
+      },
+      {
+        "action": "single_small_strafe_left",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7778870180000013,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": -1.9999999999998863,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2031.3351173180447,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 86.99999999999994,
+              "raw_heading_deg": 273.00000000000006,
+              "raw_norm": 2222.1552601022277,
+              "received_monotonic": 168.063341806,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "double",
+          "expected_tag": 1,
+          "journey": 1,
+          "outbound_only": false,
+          "phase": "outbound_entry_scan",
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true
+        }
+      },
+      {
+        "pickup_exit_entry": {
+          "confirmed_for_forward": true,
+          "heading_error_deg": null,
+          "seen_ids": [
+            1
+          ],
+          "status": "checked",
+          "tag_id": 1
+        }
+      },
+      {
+        "terminal_stationary_reobserve": {
+          "accepted_expected_frames": 5,
+          "body_commands": 0,
+          "camera_healthy": true,
+          "camera_window_status": {
+            "ar_after_barrier": true,
+            "ar_source_matches": true,
+            "ar_stamp_age_s": 0.222601841,
+            "image_after_barrier": true,
+            "image_receipt_age_s": 0.07154370400002108,
+            "image_stamp_age_s": 0.102948304,
+            "parameters_match": true,
+            "restart_barrier_ns": 0
+          },
+          "contract_match": true,
+          "decoded_expected_frames": 5,
+          "max_wait_s": 2.0,
+          "observed_ids": [
+            1
+          ],
+          "prior_ids": [],
+          "receiver_rejections_total": 0,
+          "scan_status": "id_seen_pose_untrusted",
+          "target_id": 1
+        }
+      },
+      {
+        "terminal_tag_forward_reacquisition": {
+          "completed_actions": [],
+          "decisions": [
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            },
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            },
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            },
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            }
+          ],
+          "observations": [],
+          "target_id": 1
+        }
+      },
+      {
+        "terminal_tag_reacquisition": {
+          "last_observation": {
+            "accepted_expected_frames": 3,
+            "camera_healthy": true,
+            "camera_window_status": {
+              "ar_after_barrier": true,
+              "ar_source_matches": true,
+              "ar_stamp_age_s": 0.048963573,
+              "image_after_barrier": true,
+              "image_receipt_age_s": 0.020513444999977537,
+              "image_stamp_age_s": 0.048963573,
+              "parameters_match": true,
+              "restart_barrier_ns": 0
+            },
+            "contract_match": true,
+            "decoded_expected_frames": 3,
+            "receiver_rejections_total": 0
+          },
+          "last_scan": {
+            "after_ns": 1794230385310408592,
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 1,
+            "ids": [
+              1
+            ],
+            "now_ns": 1794230385738819122,
+            "observations": [
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 353727772,
+                    "secs": 1794230385,
+                    "seq": 1122,
+                    "stamp_ns": 1794230385353727772,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 353727772,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385353727772,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.1488382595829454,
+                  "y": -0.04685987145844484,
+                  "z": -0.06332900810325398
+                },
+                "quaternion_raw": {
+                  "w": 0.7443963776390551,
+                  "x": 0.01740228308111006,
+                  "y": -0.03671185238434252,
+                  "z": -0.6665008877682972
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385353727772,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.74742673642263
+              },
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 458319087,
+                    "secs": 1794230385,
+                    "seq": 1123,
+                    "stamp_ns": 1794230385458319087,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 458319087,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385458319087,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.14903688425463138,
+                  "y": -0.04687852356906052,
+                  "z": -0.06349882662750339
+                },
+                "quaternion_raw": {
+                  "w": 0.7443072865187185,
+                  "x": 0.016257461243482336,
+                  "y": -0.03589767837413718,
+                  "z": -0.6666736194543819
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385458319087,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.76710776078797
+              },
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 689855549,
+                    "secs": 1794230385,
+                    "seq": 1124,
+                    "stamp_ns": 1794230385689855549,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 689855549,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385689855549,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.148783752619833,
+                  "y": -0.046840034716581595,
+                  "z": -0.06319634734470142
+                },
+                "quaternion_raw": {
+                  "w": 0.7442389995734241,
+                  "x": 0.017150261574120598,
+                  "y": -0.034948675654641784,
+                  "z": -0.6667779016373253
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385689855549,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.77588845107388
+              }
+            ],
+            "observed_ids": [
+              1
+            ],
+            "pose_usable": false,
+            "position_usable": false,
+            "reason": "insufficient tilt-compatible relative poses",
+            "samples": 3,
+            "status": "id_seen_pose_untrusted"
+          },
+          "reason_zh": "已识别 Tag 1，画面中的码位置稳定。沿当前磁航向按基准步数进入下一段。",
+          "status": "nominal_entry_accepted",
+          "target_id": 1,
+          "windows": 3
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 1.4186146479999877,
+          "stage": "visual_checkpoint",
+          "target_id": 1
+        }
+      },
+      {
+        "AR_checkpoint": {
+          "camera_info": {
+            "can_reobserve": false,
+            "detector_corners_available": false,
+            "exposure_time_verified": false,
+            "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+            "frame_id": "chest_usb_cam",
+            "height": 480,
+            "publisher": "/usb_cam_chest",
+            "ready": true,
+            "reason": "actual CameraInfo matches verified source, frame and calibration",
+            "reprojection_residual_available": false,
+            "use_raw_chest_distortion": false,
+            "width": 640
+          },
+          "expected_id": 1,
+          "fresh_target_detected": true,
+          "heading_aligned": false,
+          "nominal_entry_evidence": {
+            "accepted_frames": 3,
+            "body_forward_bounds_m": [
+              0.148783752619833,
+              0.14903688425463138
+            ],
+            "body_side_bounds_m": [
+              -0.04687852356906052,
+              -0.046840034716581595
+            ],
+            "latest_stamp_ns": 1794230385689855549,
+            "magnetic_heading_error_deg": -1.9999999999998863
+          },
+          "pose_accepted": false,
+          "position_controlled": false,
+          "ready_for_obstacle": false,
+          "reason": "已识别 Tag 1，画面中的码位置稳定。沿当前磁航向按基准步数进入下一段。",
+          "reason_zh": "已识别 Tag 1，画面中的码位置稳定。沿当前磁航向按基准步数进入下一段。",
+          "route_pose": {
+            "body_forward_in_tag_forward": null,
+            "body_right_in_tag_right": null,
+            "departure_axis": "forward",
+            "direction": "outbound",
+            "forward_m": null,
+            "forward_status": "unavailable",
+            "pose_template": {
+              "camera": {
+                "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+                "frame": "chest_usb_cam",
+                "size_px": [
+                  640,
+                  480
+                ],
+                "topic": "/usb_cam_chest/image_raw"
+              },
+              "diagnostic_only": true,
+              "image": "20261123_000428_811977_r3_entrance_reference.jpg",
+              "load": "single",
+              "reference_tag_id": 1,
+              "tag_center_px": [
+                325,
+                344
+              ],
+              "taught_for_tag": true
+            },
+            "position_usable": false,
+            "reason": "same-load metric checkpoint calibration unavailable",
+            "status": "pose_unavailable",
+            "tag_id": 1,
+            "x_error_m": null,
+            "x_m": null,
+            "yaw_deg": null
+          },
+          "scan": {
+            "after_ns": 1794230385310408592,
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 1,
+            "ids": [
+              1
+            ],
+            "now_ns": 1794230385738819122,
+            "observations": [
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 353727772,
+                    "secs": 1794230385,
+                    "seq": 1122,
+                    "stamp_ns": 1794230385353727772,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 353727772,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385353727772,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.1488382595829454,
+                  "y": -0.04685987145844484,
+                  "z": -0.06332900810325398
+                },
+                "quaternion_raw": {
+                  "w": 0.7443963776390551,
+                  "x": 0.01740228308111006,
+                  "y": -0.03671185238434252,
+                  "z": -0.6665008877682972
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385353727772,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.74742673642263
+              },
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 458319087,
+                    "secs": 1794230385,
+                    "seq": 1123,
+                    "stamp_ns": 1794230385458319087,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 458319087,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385458319087,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.14903688425463138,
+                  "y": -0.04687852356906052,
+                  "z": -0.06349882662750339
+                },
+                "quaternion_raw": {
+                  "w": 0.7443072865187185,
+                  "x": 0.016257461243482336,
+                  "y": -0.03589767837413718,
+                  "z": -0.6666736194543819
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385458319087,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.76710776078797
+              },
+              {
+                "confidence_raw": 0,
+                "confidence_semantics": "publisher specific/unknown; not used as a probability",
+                "frame_id": "/map",
+                "headers": {
+                  "array": {
+                    "frame_id": "/map",
+                    "nsecs": 689855549,
+                    "secs": 1794230385,
+                    "seq": 1124,
+                    "stamp_ns": 1794230385689855549,
+                    "stamp_valid": true
+                  },
+                  "marker": {
+                    "frame_id": "/map",
+                    "nsecs": 689855549,
+                    "secs": 1794230385,
+                    "seq": 0,
+                    "stamp_ns": 1794230385689855549,
+                    "stamp_valid": true
+                  },
+                  "pose": {
+                    "frame_id": "",
+                    "nsecs": 0,
+                    "secs": 0,
+                    "seq": 0,
+                    "stamp_ns": 0,
+                    "stamp_valid": true
+                  }
+                },
+                "headers_disagree": false,
+                "id": 1,
+                "pose_for_control_verified": false,
+                "position_raw_m": {
+                  "x": 0.148783752619833,
+                  "y": -0.046840034716581595,
+                  "z": -0.06319634734470142
+                },
+                "quaternion_raw": {
+                  "w": 0.7442389995734241,
+                  "x": 0.017150261574120598,
+                  "y": -0.034948675654641784,
+                  "z": -0.6667779016373253
+                },
+                "source_publisher": "/chest/ar_track_alvar",
+                "source_seq": 0,
+                "source_topic": "/chest/ar_pose_marker",
+                "stamp_ns": 1794230385689855549,
+                "stamp_source": "marker.header",
+                "timestamp_capture_semantics_field_verified": false,
+                "yaw_raw_deg": -83.77588845107388
+              }
+            ],
+            "observed_ids": [
+              1
+            ],
+            "pose_usable": false,
+            "position_usable": false,
+            "reason": "insufficient tilt-compatible relative poses",
+            "samples": 3,
+            "status": "id_seen_pose_untrusted"
+          },
+          "status": "partial",
+          "tag1_nominal_entry": true,
+          "tag_observation": {
+            "accepted_expected_frames": 3,
+            "camera_healthy": true,
+            "camera_window_status": {
+              "ar_after_barrier": true,
+              "ar_source_matches": true,
+              "ar_stamp_age_s": 0.048963573,
+              "image_after_barrier": true,
+              "image_receipt_age_s": 0.020513444999977537,
+              "image_stamp_age_s": 0.048963573,
+              "parameters_match": true,
+              "restart_barrier_ns": 0
+            },
+            "contract_match": true,
+            "decoded_expected_frames": 3,
+            "receiver_rejections_total": 0
+          },
+          "visual_micro": true
+        }
+      },
+      {
+        "entrance_trial": {
+          "completed_actions": [
+            "carry_forward"
+          ],
+          "completed_steps": 8,
+          "detected": false,
+          "entry_forward_grouping": [
+            "carry_forward",
+            "carry_forward2"
+          ],
+          "entry_heading_source": "retained_magnetic_reference",
+          "expected_id": 2,
+          "expected_load": "double",
+          "forward_plan": {
+            "count": 10,
+            "reason": "Tag 1 identified, but metric pose was not used",
+            "status": "nominal"
+          },
+          "forward_protocol_complete": false,
+          "from_tag": 1,
+          "initial_estimated_steps": 10,
+          "next_stage_started": true,
+          "nominal_target_steps": 10,
+          "observation_windows": 0,
+          "planned_steps": 10,
+          "position_confirmed": false,
+          "reason": "executing estimated Tag 1 to Tag 2 segment",
+          "route_evidence": "estimated_trial",
+          "scan": null,
+          "status": "moving_to_checkpoint",
+          "target_steps": 10
+        }
+      },
+      {
+        "segment_heading_reference": {
+          "reference_source": "relative_stationary_segment_start",
+          "status": "reference_retained"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.00024266700000907804,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_carry_forward",
+          "completed_monotonic": 173.73698008,
+          "completed_ros_ns": 1794230389978305816,
+          "elapsed_s": 3.415521498000004,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 170.321458582
+        }
+      },
+      {
+        "action": "carry_forward",
+        "physical_success": "unobserved"
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "carry_forward",
+          "after_ns": 1794230390128305816,
+          "boundary_valid": true,
+          "camera_healthy": true,
+          "camera_info": {
+            "can_reobserve": false,
+            "detector_corners_available": false,
+            "exposure_time_verified": false,
+            "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+            "frame_id": "chest_usb_cam",
+            "height": 480,
+            "publisher": "/usb_cam_chest",
+            "ready": true,
+            "reason": "actual CameraInfo matches verified source, frame and calibration",
+            "reprojection_residual_available": false,
+            "use_raw_chest_distortion": false,
+            "width": 640
+          },
+          "camera_info_ready": true,
+          "camera_restart_ns": 0,
+          "contract_match": true,
+          "correction_actions": 0,
+          "fault_diagnostic": false,
+          "now_ns": 1794230390746547222,
+          "recent_decoded_ids": [],
+          "recent_ids_are_diagnostic_only": true,
+          "row_counts": {
+            "buffered_rows": 87,
+            "current_rows": 0,
+            "pre_boundary_rows": 87,
+            "rejected": 0,
+            "stale_rows": 87
+          },
+          "scan": {
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 2,
+            "ids": [],
+            "observations": [],
+            "observed_ids": [],
+            "pose_usable": false,
+            "position_usable": false,
+            "samples": 0,
+            "status": "no_tag"
+          },
+          "stance_completed_ns": 1794230389978305816,
+          "target_id": 2,
+          "waited_s": 0.0
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_medium_right",
+          "completed_monotonic": 176.04515506,
+          "completed_ros_ns": 1794230392286451816,
+          "elapsed_s": 1.4148400170000173,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 174.630315043
+        }
+      },
+      {
+        "magnetic_action": "single_medium_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "carry_forward",
+          "after_ns": 1794230392436451816,
+          "boundary_valid": true,
+          "camera_healthy": true,
+          "camera_info": {
+            "can_reobserve": false,
+            "detector_corners_available": false,
+            "exposure_time_verified": false,
+            "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+            "frame_id": "chest_usb_cam",
+            "height": 480,
+            "publisher": "/usb_cam_chest",
+            "ready": true,
+            "reason": "actual CameraInfo matches verified source, frame and calibration",
+            "reprojection_residual_available": false,
+            "use_raw_chest_distortion": false,
+            "width": 640
+          },
+          "camera_info_ready": true,
+          "camera_restart_ns": 0,
+          "contract_match": true,
+          "correction_actions": 0,
+          "fault_diagnostic": false,
+          "now_ns": 1794230393779805421,
+          "recent_decoded_ids": [],
+          "recent_ids_are_diagnostic_only": true,
+          "row_counts": {
+            "buffered_rows": 87,
+            "current_rows": 0,
+            "pre_boundary_rows": 87,
+            "rejected": 0,
+            "stale_rows": 87
+          },
+          "scan": {
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 2,
+            "ids": [],
+            "observations": [],
+            "observed_ids": [],
+            "pose_usable": false,
+            "position_usable": false,
+            "samples": 0,
+            "status": "no_tag"
+          },
+          "stance_completed_ns": 1794230392286451816,
+          "target_id": 2,
+          "waited_s": 0.0
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_micro_right",
+          "completed_monotonic": 178.787010614,
+          "completed_ros_ns": 1794230395028302907,
+          "elapsed_s": 1.1456171840000025,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 177.64139343
+        }
+      },
+      {
+        "magnetic_action": "single_micro_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "carry_forward",
+          "after_ns": 1794230395178302907,
+          "boundary_valid": true,
+          "camera_healthy": true,
+          "camera_info": {
+            "can_reobserve": false,
+            "detector_corners_available": false,
+            "exposure_time_verified": false,
+            "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+            "frame_id": "chest_usb_cam",
+            "height": 480,
+            "publisher": "/usb_cam_chest",
+            "ready": true,
+            "reason": "actual CameraInfo matches verified source, frame and calibration",
+            "reprojection_residual_available": false,
+            "use_raw_chest_distortion": false,
+            "width": 640
+          },
+          "camera_info_ready": true,
+          "camera_restart_ns": 0,
+          "contract_match": true,
+          "correction_actions": 0,
+          "fault_diagnostic": false,
+          "now_ns": 1794230395789994478,
+          "recent_decoded_ids": [],
+          "recent_ids_are_diagnostic_only": true,
+          "row_counts": {
+            "buffered_rows": 87,
+            "current_rows": 0,
+            "pre_boundary_rows": 87,
+            "rejected": 0,
+            "stale_rows": 87
+          },
+          "scan": {
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 2,
+            "ids": [],
+            "observations": [],
+            "observed_ids": [],
+            "pose_usable": false,
+            "position_usable": false,
+            "samples": 0,
+            "status": "no_tag"
+          },
+          "stance_completed_ns": 1794230395028302907,
+          "target_id": 2,
+          "waited_s": 0.0
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_micro_right",
+          "completed_monotonic": 180.590244595,
+          "completed_ros_ns": 1794230396831545829,
+          "elapsed_s": 0.9781894070000021,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 179.612055188
+        }
+      },
+      {
+        "magnetic_action": "single_micro_right",
+        "physical_success": "unobserved"
+      },
+      {
+        "post_action_heading": {
+          "action": "carry_forward",
+          "angle_evidence": "source_nominal",
+          "budget": {
+            "history": [
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 28.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 25.0,
+                "op": "single_medium_left",
+                "signed_nominal_delta_deg": -10.0,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 20.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 1.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 11.65,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 4.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 10.9525,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 5.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 28.0,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 2.842170943040401e-14,
+                "op": "single_medium_right",
+                "signed_nominal_delta_deg": 10.0,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 10.509625,
+                "evidence": "source_nominal",
+                "feedback_only_response": true,
+                "observed_response_bound_deg": 1.0,
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              },
+              {
+                "attempt_reserved_before_dispatch": true,
+                "conservative_accounting_deg": 9.53318125,
+                "evidence": "source_nominal",
+                "op": "single_micro_right",
+                "signed_nominal_delta_deg": 5,
+                "source": "magnetic"
+              }
+            ],
+            "locked": false,
+            "max_actions": 16,
+            "max_nominal_degrees": 80,
+            "max_response_deg": 20.0,
+            "measured_degrees": null,
+            "reason": null,
+            "total_angle_limit_enabled": false,
+            "used_actions": 7,
+            "used_conservative_degrees": 118.64530624999999,
+            "used_nominal_degrees": 45.0
+          },
+          "commanded_delta_deg": 5,
+          "correction": "single_micro_right",
+          "correction_actions": 3,
+          "correction_completion_confirmed": true,
+          "correction_steps": [
+            {
+              "action": "carry_forward",
+              "after_error_deg": -24.00000000000003,
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 11.65,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 4.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.9525,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 5.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 2.842170943040401e-14,
+                    "op": "single_medium_right",
+                    "signed_nominal_delta_deg": 10.0,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 5,
+                "used_conservative_degrees": 98.60249999999999,
+                "used_nominal_degrees": 35.0
+              },
+              "commanded_delta_deg": 10.0,
+              "correction": "single_medium_right",
+              "correction_actions": 1,
+              "correction_diagnostic": {
+                "after_error_deg": -24.00000000000003,
+                "after_heading_deg": 251.0,
+                "before_error_deg": -24.0,
+                "before_heading_deg": 251.00000000000003,
+                "commanded_delta_deg": 10.0,
+                "failures": [],
+                "improvement_deg": -2.842170943040401e-14,
+                "max_step_deg": 28.0,
+                "minimum_improvement_deg": 1.0,
+                "norm_fraction_change": 0.1693220854507565,
+                "norm_fraction_limit": 0.35,
+                "observed_change_deg": -2.842170943040401e-14,
+                "post_capture_verified": true,
+                "post_norm": 2138.1044177105036,
+                "reference_norm": 1828.4991315171267,
+                "response_bound_is_diagnostic": true
+              },
+              "error_deg": -24.0,
+              "excluded_turn": "single_medium_right",
+              "first_stationary_verification": {
+                "capture_times": [
+                  176.29218174500002,
+                  176.403883634,
+                  176.49748415300002
+                ],
+                "heading_deg": 250.99999999999997,
+                "observed_change_deg": -5.684341886080802e-14,
+                "settled_capture_times": [
+                  176.99868152300002,
+                  177.09887102300002,
+                  177.20222957800001
+                ],
+                "settled_change_deg": -2.842170943040401e-14,
+                "trigger": "medium_nonresponse"
+              },
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "considered",
+                "upper_abs_deg": 28.0
+              },
+              "micro_turn_observation": {
+                "accepted": false,
+                "reason": "medium_nonresponse_not_used_for_learning"
+              },
+              "motion_prediction": {
+                "action": "single_medium_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 28.0,
+                "evidence": "adaptive_medium_prior",
+                "lower_abs_deg": 6.0,
+                "observation_time_unchanged": 173.97726671,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 10.0,
+                "predicted_error_deg": -14.0,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 0,
+                "status": "selected",
+                "upper_abs_deg": 28.0,
+                "worst_predicted_residual_deg": 18.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "prediction_update": {
+                "innovation_deg": -10.000000000000028,
+                "observed_error_deg": -24.00000000000003,
+                "posterior_error_deg": -24.00000000000003,
+                "predicted_error_deg": -14.0,
+                "prediction_not_new_sample": true,
+                "source": "fresh_magnetic_observation"
+              },
+              "reason": "unexpected turn response independently verified; replan from measured heading",
+              "reason_zh": "转向实测与预期不符，已复测航向，按当前余差重新选择动作。",
+              "requested_correction": "single_medium_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2121.206928725101,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 109.0,
+                  "raw_heading_deg": 251.00000000000003,
+                  "raw_norm": 2216.3594022630896,
+                  "received_monotonic": 174.495756135,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "medium_nonresponse_reobserved",
+              "verification": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2138.1044177105036,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 109.0,
+                  "raw_heading_deg": 251.0,
+                  "raw_norm": 2238.886553624368,
+                  "received_monotonic": 177.52064893,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              }
+            },
+            {
+              "action": "carry_forward",
+              "after_error_deg": -23.0,
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 11.65,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 4.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.9525,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 5.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 2.842170943040401e-14,
+                    "op": "single_medium_right",
+                    "signed_nominal_delta_deg": 10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.509625,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 6,
+                "used_conservative_degrees": 109.11212499999999,
+                "used_nominal_degrees": 40.0
+              },
+              "commanded_delta_deg": 5,
+              "correction": "single_micro_right",
+              "correction_actions": 1,
+              "correction_diagnostic": {
+                "after_error_deg": -23.0,
+                "after_heading_deg": 252.0,
+                "before_error_deg": -24.0,
+                "before_heading_deg": 251.0,
+                "commanded_delta_deg": 5,
+                "failures": [],
+                "improvement_deg": 1.0,
+                "max_step_deg": 20,
+                "minimum_improvement_deg": 1.0,
+                "norm_fraction_change": 0.1727373863620351,
+                "norm_fraction_limit": 0.35,
+                "observed_change_deg": 1.0,
+                "post_capture_verified": true,
+                "post_norm": 2144.349292460646,
+                "reference_norm": 1828.4991315171267,
+                "response_bound_is_diagnostic": true
+              },
+              "error_deg": -24.0,
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "unresponsive_at_this_boundary"
+              },
+              "micro_turn_observation": {
+                "accepted": true,
+                "delta_deg": 1.0,
+                "estimate": {
+                  "degrees": 4.0,
+                  "mad_deg": 1.0,
+                  "physical_upper_bound_verified": false,
+                  "sample_count": 3,
+                  "source": "observed_recent_three",
+                  "used_for_control": false
+                },
+                "filter_update": {
+                  "after_deg": 6.53318125,
+                  "alpha": 0.15,
+                  "before_deg": 7.509625,
+                  "raw_delta_deg": 1.0
+                },
+                "reason": "recorded_only",
+                "sample_count": 3
+              },
+              "motion_prediction": {
+                "action": "single_micro_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 10.509625,
+                "evidence": "adaptive_micro_low_pass",
+                "lower_abs_deg": 1.0,
+                "observation_time_unchanged": 176.99868152300002,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 7.509625,
+                "predicted_error_deg": -16.490375,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 3,
+                "status": "selected",
+                "upper_abs_deg": 10.509625,
+                "worst_predicted_residual_deg": 23.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "prediction_update": {
+                "innovation_deg": -6.509625,
+                "observed_error_deg": -23.0,
+                "posterior_error_deg": -23.0,
+                "predicted_error_deg": -16.490375,
+                "prediction_not_new_sample": true,
+                "source": "fresh_magnetic_observation"
+              },
+              "requested_correction": "single_micro_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2138.1044177105036,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 109.0,
+                  "raw_heading_deg": 251.0,
+                  "raw_norm": 2238.886553624368,
+                  "received_monotonic": 177.52064893,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "corrected_once",
+              "verification": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2144.349292460646,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 108.0,
+                  "raw_heading_deg": 252.0,
+                  "raw_norm": 2248.9228532788757,
+                  "received_monotonic": 179.535220021,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              }
+            },
+            {
+              "action": "carry_forward",
+              "angle_evidence": "source_nominal",
+              "budget": {
+                "history": [
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 25.0,
+                    "op": "single_medium_left",
+                    "signed_nominal_delta_deg": -10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 20.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 11.65,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 4.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.9525,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 5.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 28.0,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 2.842170943040401e-14,
+                    "op": "single_medium_right",
+                    "signed_nominal_delta_deg": 10.0,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 10.509625,
+                    "evidence": "source_nominal",
+                    "feedback_only_response": true,
+                    "observed_response_bound_deg": 1.0,
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  },
+                  {
+                    "attempt_reserved_before_dispatch": true,
+                    "conservative_accounting_deg": 9.53318125,
+                    "evidence": "source_nominal",
+                    "op": "single_micro_right",
+                    "signed_nominal_delta_deg": 5,
+                    "source": "magnetic"
+                  }
+                ],
+                "locked": false,
+                "max_actions": 16,
+                "max_nominal_degrees": 80,
+                "max_response_deg": 20.0,
+                "measured_degrees": null,
+                "reason": null,
+                "total_angle_limit_enabled": false,
+                "used_actions": 7,
+                "used_conservative_degrees": 118.64530624999999,
+                "used_nominal_degrees": 45.0
+              },
+              "commanded_delta_deg": 5,
+              "correction": "single_micro_right",
+              "correction_actions": 1,
+              "correction_completion_confirmed": true,
+              "error_deg": -23.0,
+              "first_stationary_verification": {
+                "capture_times": [
+                  180.827311409,
+                  180.92759761300002,
+                  181.03144574200002
+                ],
+                "heading_deg": 252.0,
+                "observed_change_deg": 0.0,
+                "trigger": "small_wrong_way"
+              },
+              "medium_candidate": {
+                "action": "single_medium_right",
+                "status": "unresponsive_at_this_boundary"
+              },
+              "motion_prediction": {
+                "action": "single_micro_right",
+                "adaptive_interval_verified": true,
+                "budget_delta_deg": 9.53318125,
+                "evidence": "adaptive_micro_low_pass",
+                "lower_abs_deg": 1.0,
+                "observation_time_unchanged": 179.011766577,
+                "physical_upper_bound_verified": false,
+                "predicted_delta_deg": 6.53318125,
+                "predicted_error_deg": -16.466818750000016,
+                "predicted_only": true,
+                "rejected": {
+                  "single_micro_left": "wrong_direction"
+                },
+                "sample_count": 4,
+                "status": "selected",
+                "upper_abs_deg": 9.53318125,
+                "worst_predicted_residual_deg": 22.0
+              },
+              "physical_inflight_angle_limit_guaranteed": false,
+              "reason": "local task cancelled; no automatic resume",
+              "reason_zh": "已收到纠偏动作完成回执，转后航向未确认。",
+              "requested_correction": "single_micro_right",
+              "sample": {
+                "reference": {
+                  "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+                  "capture_session": "55fc84a9bddd49818704976664d63f4c",
+                  "capture_verified": true,
+                  "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+                  "load": "double",
+                  "load_epoch": 3,
+                  "norm": 2144.349292460646,
+                  "norm_basis": "calibrated_horizontal",
+                  "offset_deg": 108.0,
+                  "raw_heading_deg": 252.0,
+                  "raw_norm": 2248.9228532788757,
+                  "received_monotonic": 179.535220021,
+                  "route_heading_deg": 0.0,
+                  "source": "sampling_probe",
+                  "tag_id": null,
+                  "usable_for_heading": true
+                },
+                "status": "updated"
+              },
+              "status": "correction_interrupted"
+            }
+          ],
+          "error_deg": -23.0,
+          "first_stationary_verification": {
+            "capture_times": [
+              180.827311409,
+              180.92759761300002,
+              181.03144574200002
+            ],
+            "heading_deg": 252.0,
+            "observed_change_deg": 0.0,
+            "trigger": "small_wrong_way"
+          },
+          "medium_candidate": {
+            "action": "single_medium_right",
+            "status": "unresponsive_at_this_boundary"
+          },
+          "motion_prediction": {
+            "action": "single_micro_right",
+            "adaptive_interval_verified": true,
+            "budget_delta_deg": 9.53318125,
+            "evidence": "adaptive_micro_low_pass",
+            "lower_abs_deg": 1.0,
+            "observation_time_unchanged": 179.011766577,
+            "physical_upper_bound_verified": false,
+            "predicted_delta_deg": 6.53318125,
+            "predicted_error_deg": -16.466818750000016,
+            "predicted_only": true,
+            "rejected": {
+              "single_micro_left": "wrong_direction"
+            },
+            "sample_count": 4,
+            "status": "selected",
+            "upper_abs_deg": 9.53318125,
+            "worst_predicted_residual_deg": 22.0
+          },
+          "physical_inflight_angle_limit_guaranteed": false,
+          "reason": "local task cancelled; no automatic resume",
+          "reason_zh": "已收到纠偏动作完成回执，转后航向未确认。",
+          "requested_correction": "single_micro_right",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "55fc84a9bddd49818704976664d63f4c",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2144.349292460646,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 108.0,
+              "raw_heading_deg": 252.0,
+              "raw_norm": 2248.9228532788757,
+              "received_monotonic": 179.535220021,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "correction_interrupted"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "carry_forward",
+          "elapsed_s": 8.284353699000008,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "fall_diagnostic": {
+          "action": "carry_forward",
+          "diagnostic_only": true,
+          "front_back": null,
+          "magnetic_samples": 36,
+          "posture_verified": false,
+          "recovery_dispatched": false,
+          "status": "no_persistent_magnetic_change"
+        }
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "carry_forward",
+          "correction_actions": 0,
+          "fault_diagnostic": true,
+          "read_error": "local task cancelled; no automatic resume"
+        }
+      }
+    ],
+    "exit_code": 1,
+    "expected_blocks_delivered": 0,
+    "native_immediate_stop": false,
+    "ok": false,
+    "reason": "local task cancelled; no automatic resume",
+    "return_started": false,
+    "status": "stopped_no_further_auto_macros"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [
+      "Tag 1 最近一窗 · 检测器报出 3 帧 · 程序接受 3 帧",
+      "连续后退 6 步 · 纠偏前 +10.00° · 余差 +10.00°",
+      "Tag 1 已通过进场确认",
+      "Tag 1 → 2 · MCU 动作回执 8/10 个名义直行步",
+      "人工摆放区未确认方块数量 · 已执行默认双抱，实物件数待确认",
+      "最近航向诊断 · carry_forward · 小右转 · 纠偏前 -23.00° · 已收到纠偏动作完成回执，转后航向未确认。",
+      "纠偏第 1 步 · carry_forward · 中右转 · 纠偏前 -24.00° · 剩余 -24.00° · 实测转角 -0.00° · 转向实测与预期不符，已复测航向，按当前余差重新选择动作。",
+      "纠偏第 2 步 · carry_forward · 小右转 · 纠偏前 -24.00° · 剩余 -23.00° · 实测转角 +1.00°",
+      "纠偏第 3 步 · carry_forward · 小右转 · 纠偏前 -23.00° · 已收到纠偏动作完成回执，转后航向未确认。",
+      "转角候选被排除 · single_micro_left 方向相反",
+      "纠偏次数 · 已用 7 / 16"
+    ],
+    "reason": "自动任务已取消，后续动作未恢复"
+  }
+}
