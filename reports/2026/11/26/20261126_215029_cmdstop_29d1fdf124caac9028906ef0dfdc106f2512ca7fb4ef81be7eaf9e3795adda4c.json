@@ -1,0 +1,14 @@
+{
+  "after_update": false,
+  "command": "stop",
+  "received_at": "2026-11-26T21:50:29.254+08:00",
+  "result": {
+    "accepted": false,
+    "event": "stopped",
+    "exit_code": 0,
+    "native_immediate_stop": false,
+    "ok": true,
+    "status": "stop_requested"
+  },
+  "schema": "r3.console.task-report.v1"
+}
