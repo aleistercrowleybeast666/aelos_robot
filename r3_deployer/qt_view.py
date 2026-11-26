@@ -343,8 +343,13 @@ class ControlView(QWidget):
         log_header = QHBoxLayout()
         log_header.addWidget(_Label_Create("运行日志", role="cardHeading"))
         log_header.addStretch(1)
-        self.clear_log_button = _Button_Create("清理日志")
-        log_header.addWidget(self.clear_log_button)
+        self.open_reports_button = _Button_Create("打开日志文件夹")
+        self.change_reports_button = _Button_Create("更改日志目录")
+        self.share_reports_button = _Button_Create("分享任务报告…")
+        self.clear_log_button = _Button_Create("清空显示")
+        for button in (self.open_reports_button, self.change_reports_button,
+                       self.share_reports_button, self.clear_log_button):
+            log_header.addWidget(button)
         layout.addLayout(log_header)
         self.log = QPlainTextEdit()
         self.log.setObjectName("events")

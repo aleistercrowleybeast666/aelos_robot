@@ -159,6 +159,54 @@ def _redact(value, password):
     return value
 
 
+def _report_path(value):
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError("请选择日志文件夹。")
+    directory = Path(value).expanduser()
+    if not directory.is_absolute() or any(ord(ch) < 32 for ch in str(directory)):
+        raise ValueError("日志文件夹须为绝对路径。")
+    return directory
+
+
+def TaskReport_Directory():
+    """Return the selected folder, including the original location for older installations."""
+    local = settings_path().parent
+    try:
+        data = (local / "report_preferences.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return local / "task_reports"
+    try:
+        return _report_path(json.loads(data)["directory"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("无法读取日志文件夹设置，请重新选择文件夹。") from exc
+
+
+def _write_json(destination, data):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=destination.parent, encoding="utf-8",
+                                         suffix=".tmp", delete=False) as file:
+            temporary = Path(file.name)
+            json.dump(data, file, ensure_ascii=False, indent=2, allow_nan=False)
+            file.write("\n")
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def TaskReport_SetDirectory(directory):
+    """Check that future receipts can be written before committing the selection."""
+    directory = _report_path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=".r3-write-") as probe:
+        probe.write(b"r3")
+        probe.flush()
+    _write_json(settings_path().with_name("report_preferences.json"), {"directory": str(directory)})
+    return directory
+
+
 def TaskReport_Save(outcome, *, command, target, after_update, password=None):
     """Persist the result on Windows before displaying the terminal task state."""
     if isinstance(outcome, RobotControlUncertainError):
@@ -181,19 +229,24 @@ def TaskReport_Save(outcome, *, command, target, after_update, password=None):
     if summary:
         report["summary_zh"] = summary
     report = _redact(report, password)
-    directory = settings_path().parent / "task_reports"
-    directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"{now:%Y%m%d_%H%M%S_%f}_cmd{command}_{uuid4().hex[:8]}.json"
-    temporary = None
+    filename = f"{now:%Y%m%d_%H%M%S_%f}_cmd{command}_{uuid4().hex[:8]}.json"
+    default = settings_path().parent / "task_reports"
+    directory = None
     try:
-        with tempfile.NamedTemporaryFile("w", dir=directory, encoding="utf-8", suffix=".tmp", delete=False) as file:
-            temporary = Path(file.name)
-            json.dump(report, file, ensure_ascii=False, indent=2, allow_nan=False)
-            file.write("\n")
-        os.replace(temporary, destination)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        directory = TaskReport_Directory()
+    except (OSError, ValueError):
+        report["archive_warning_zh"] = "无法读取日志文件夹设置，本次报告已保存到默认目录。"
+    if directory is not None:
+        destination = directory / filename
+        try:
+            _write_json(destination, report)
+            return destination
+        except OSError:
+            if directory == default:
+                raise
+            report["archive_warning_zh"] = "所选日志文件夹暂时无法写入，本次报告已保存到默认目录。"
+    destination = default / filename
+    _write_json(destination, report)
     return destination
 
 

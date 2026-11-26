@@ -42,7 +42,18 @@ class ControlWindowTests(unittest.TestCase):
         camera = patch.object(control_window, "_chest_frames", return_value=())
         camera.start()
         self.addCleanup(camera.stop)
+        self.enterContext(patch.object(control_window, "ReportDispatcher"))
         self.window = control_window._ControlWindow(settings.DEFAULTS)
+        self.receipt_workers = []
+        start_worker = self.window._start_worker
+
+        def track_worker(*args, **kwargs):
+            worker = start_worker(*args, **kwargs)
+            if kwargs.get("receipt") and worker is not None:
+                self.receipt_workers.append(worker)
+            return worker
+
+        self.enterContext(patch.object(self.window, "_start_worker", side_effect=track_worker))
         self.view = self.window.view
         self.window._poll_timer.setInterval(100)
         self.window.show()
@@ -52,6 +63,10 @@ class ControlWindowTests(unittest.TestCase):
         self.window._poll_timer.stop()
         self.window._event_timer.stop()
         self.window._stop_camera()
+        # A terminal SSH reply can reach Qt while its worker still owns a report file.
+        for worker in self.receipt_workers:
+            worker.join(timeout=4)
+            self.assertFalse(worker.is_alive())
         self.window.hide()
         self.window.deleteLater()
         self.application.processEvents()

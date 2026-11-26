@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from r3_deployer import task_report
+from r3_deployer import settings, task_report
 from r3_deployer.control_api import RobotControlUncertainError
 
 
@@ -38,6 +38,52 @@ class TaskReportTests(unittest.TestCase):
     def save(self, outcome, password=None):
         return task_report.TaskReport_Save(outcome, target="192.0.2.35:22", command=0,
                                            after_update=True, password=password)
+
+    def test_switch_directory_after_legacy_report_and_ssh_settings_save(self):
+        original = self.save({"ok": True})
+        self.assertEqual(original.parent, self.settings_path.parent / "task_reports")
+        target = self.settings_path.parent / "队伍日志" / "场次一"
+        self.assertEqual(task_report.TaskReport_SetDirectory(target), target)
+        with patch.object(settings, "settings_path", return_value=self.settings_path):
+            settings.save(settings.load())
+        self.assertEqual(task_report.TaskReport_Directory(), target)
+        self.assertEqual(list(target.iterdir()), [])
+        target.rmdir()
+        self.assertEqual(self.save({"ok": True}).parent, target)
+        self.assertTrue(original.is_file())
+
+    def test_invalid_directory_selection_preserves_previous_choice(self):
+        target = self.settings_path.parent / "reports"
+        task_report.TaskReport_SetDirectory(target)
+        occupied = self.settings_path.parent / "ordinary_file"
+        occupied.touch()
+        with self.assertRaises(OSError):
+            task_report.TaskReport_SetDirectory(occupied)
+        with self.assertRaises(ValueError):
+            task_report.TaskReport_SetDirectory("relative")
+        self.assertEqual(task_report.TaskReport_Directory(), target)
+
+    def test_custom_directory_unavailable_uses_default_and_recovers(self):
+        target = self.settings_path.parent / "custom"
+        task_report.TaskReport_SetDirectory(target)
+        target.rmdir()
+        target.touch()
+        fallback = self.save({"ok": False, "reason": "test"})
+        self.assertEqual(fallback.parent, self.settings_path.parent / "task_reports")
+        contents = json.loads(fallback.read_text(encoding="utf-8"))
+        self.assertIn("默认目录", contents["archive_warning_zh"])
+        self.assertEqual(contents["result"]["reason"], "test")
+        target.unlink()
+        self.assertEqual(self.save({"ok": True}).parent, target)
+
+    def test_malformed_preferences_still_archive_and_allow_selection(self):
+        self.settings_path.with_name("report_preferences.json").write_text("{", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "重新选择"):
+            task_report.TaskReport_Directory()
+        self.assertEqual(self.save({"ok": True}).parent, self.settings_path.parent / "task_reports")
+        target = self.settings_path.parent / "new"
+        task_report.TaskReport_SetDirectory(target)
+        self.assertEqual(task_report.TaskReport_Directory(), target)
 
     def test_composite_receipt_retains_deployment_and_failure_events(self):
         path = self.save({

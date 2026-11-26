@@ -11,9 +11,9 @@ import sys
 from threading import Event, Lock, Thread
 import time
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QImage
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from . import settings, usb_mode
 from .chest_camera import ChestCamera
@@ -23,7 +23,10 @@ from .deploy import SshLinkError, operate
 from .mission_progress import (Command0_LastPassedTag, Command2_LastReturnTag, MissionDelivery_Label,
                                MissionDelivery_Tag5HoldLabel, MissionProgress)
 from .qt_view import ControlView
-from .task_report import TaskReport_Diagnostics, TaskReport_Message, TaskReport_Reason, TaskReport_Save
+from .report_dispatch import ReportDispatcher
+from .report_window import ReportWindow
+from .task_report import (TaskReport_Diagnostics, TaskReport_Directory, TaskReport_Message,
+                          TaskReport_Reason, TaskReport_Save, TaskReport_SetDirectory)
 
 
 _STATUS_INTERVAL_MS = 3000
@@ -190,6 +193,11 @@ class _ControlWindow(QMainWindow):
         self._frame_lock = Lock()
         self._frame = None
         self._last_frame_at = None
+        self._latest_report = None
+        self._report_dialog = None
+        self.report_dispatch = ReportDispatcher(self)
+        self.report_dispatch.message.connect(self._log)
+        self.report_dispatch.ReportDispatch_Retry()
 
         view = self.view
         view.connection_button.clicked.connect(self._toggle_connection)
@@ -201,6 +209,9 @@ class _ControlWindow(QMainWindow):
         view.deployment_source.currentIndexChanged.connect(self._update_buttons)
         view.route_edit_button.clicked.connect(self._edit_action_chain)
         view.clear_log_button.clicked.connect(self._clear_log)
+        view.open_reports_button.clicked.connect(self._open_report_directory)
+        view.change_reports_button.clicked.connect(self._change_report_directory)
+        view.share_reports_button.clicked.connect(self._show_report_sharing)
         view.update_start_button.clicked.connect(
             lambda: self._start_motion(view.update_task.currentData(), after_update=True)
         )
@@ -335,6 +346,49 @@ class _ControlWindow(QMainWindow):
         self._drain()
         self.view.log.clear()
 
+    def _open_report_directory(self):
+        try:
+            directory = TaskReport_Directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+                raise OSError("资源管理器未能打开该目录")
+        except (ValueError, OSError) as exc:
+            self._log(f"打开日志文件夹失败 · {exc}")
+
+    def _change_report_directory(self):
+        try:
+            current = TaskReport_Directory()
+        except (ValueError, OSError):
+            current = Path.home()
+        path = QFileDialog.getExistingDirectory(self, "选择今后保存任务报告的文件夹", str(current))
+        if path:
+            self.view.change_reports_button.setEnabled(False)
+            self._start_worker("report_directory", None, "r3-report-directory",
+                               lambda: TaskReport_SetDirectory(path))
+
+    def _report_directory_finished(self, context, outcome):
+        self.view.change_reports_button.setEnabled(True)
+        if isinstance(outcome, Exception):
+            self._log(f"更改日志目录失败 · {outcome}")
+        else:
+            self._log(f"新任务报告将保存到 {outcome}。已有报告可在原目录查看。")
+
+    def _show_report_sharing(self):
+        if self._report_dialog is None:
+            self._report_dialog = ReportWindow(self, self._start_worker)
+            self._report_dialog.auto_changed.connect(self._report_auto_changed)
+        self._report_dialog.ReportWindow_Show(self._latest_report)
+
+    def _report_auto_changed(self, enabled):
+        if enabled:
+            if self._latest_report:
+                self.report_dispatch.ReportDispatch_Enqueue(self._latest_report)
+            self.report_dispatch.ReportDispatch_Retry()
+        self._log("任务报告自动推送已启用。" if enabled else "任务报告自动推送已关闭。")
+
+    def _report_share_finished(self, dialog, outcome):
+        self._log(dialog.ReportWindow_Finish(outcome))
+
     def _edit_action_chain(self):
         path = settings.ROBOT_WORKSPACE / "offline_validation" / "config" / "route_steps.json"
         if not path.is_file():
@@ -444,19 +498,42 @@ class _ControlWindow(QMainWindow):
     def _post_log(self, request=None):
         return lambda message: self._events.put(("log", None, _safe_text(message, request.password if request else None)))
 
-    def _start_worker(self, kind, context, name, operation):
+    def _save_receipt(self, request, command, outcome, *, after_update=False):
+        path = TaskReport_Save(outcome, command=command, target=request.target,
+                               after_update=after_update, password=request.password)
+        self.report_dispatch.ReportDispatch_Enqueue(path)
+        return path
+
+    def _start_worker(self, kind, context, name, operation, *, receipt=None):
         def run():
             try:
                 outcome = operation()
             except Exception as exc:
                 outcome = exc
             self._events.put((kind, context, outcome))
+            if receipt is not None:
+                request, command = receipt
+                archived = outcome
+                if isinstance(outcome, RobotControlUncertainError):
+                    archived = dict(outcome.as_result(), status=f"{command}_unconfirmed")
+                elif isinstance(outcome, Exception):
+                    archived = {"ok": False, "status": f"{command}_failed",
+                                "exception_type": type(outcome).__name__, "reason": str(outcome)}
+                try:
+                    path = self._save_receipt(request, command, archived)
+                except Exception as exc:
+                    self._post_log(request)(f"本机操作报告保存失败 · {exc}")
+                else:
+                    self._events.put(("ssh_report", None, str(path)))
 
-        worker = Thread(target=run, name=name, daemon=True)
+        # Finish saving explicit receipts if the last window closes just after the reply.
+        worker = Thread(target=run, name=name, daemon=receipt is None)
         try:
             worker.start()
         except RuntimeError as exc:
             self._events.put((kind, context, exc))
+            return None
+        return worker
 
     def _start_probe(self, request, action, *, quiet=True):
         if self._probe is not None:
@@ -478,7 +555,8 @@ class _ControlWindow(QMainWindow):
                 time.sleep(_CONNECT_RETRY_DELAY_S)
                 return api.status()
 
-        self._start_worker("probe", context, "r3-status", read)
+        self._start_worker("probe", context, "r3-status", read,
+                           receipt=(request, "scan") if action == "scan" else None)
         self._update_buttons()
 
     def _request_scan(self):
@@ -652,8 +730,7 @@ class _ControlWindow(QMainWindow):
                             if after_update and isinstance(outcome, dict) and isinstance(outcome.get("start"), dict)
                             else result)
             try:
-                path = TaskReport_Save(archived, command=command, target=request.target,
-                                       after_update=after_update, password=request.password)
+                path = self._save_receipt(request, command, archived, after_update=after_update)
             except Exception as exc:
                 return _MotionCompletion(outcome, diagnostics, report_error=_safe_text(exc, request.password))
             return _MotionCompletion(outcome, diagnostics, report_path=str(path))
@@ -733,6 +810,7 @@ class _ControlWindow(QMainWindow):
         for line in completion.diagnostics:
             self._log(_safe_text(line, task.request.password))
         if completion.report_path:
+            self._latest_report = completion.report_path
             self._log(f"本机任务报告已保存 · {completion.report_path}")
         elif completion.report_error:
             self._log(f"本机任务报告保存失败 · {completion.report_error}")
@@ -765,7 +843,7 @@ class _ControlWindow(QMainWindow):
         self._log(self.view.status_label.text())
         self._update_buttons()
         self._start_worker("stop", (request, retry_candidate), "r3-stop",
-                           lambda: _robot_api(request, self._post_log(request)).stop())
+                           lambda: _robot_api(request, self._post_log(request)).stop(), receipt=(request, "stop"))
 
     def _stop_finished(self, context, outcome):
         request, retry_candidate = context
@@ -853,7 +931,7 @@ class _ControlWindow(QMainWindow):
                 return {"status": "cancelled"}
             return operate("deploy", request.values, request.password, log, mcu_readback=receipt)
 
-        self._start_worker("maintenance", ("deploy", request), "r3-deploy", deploy)
+        self._start_worker("maintenance", ("deploy", request), "r3-deploy", deploy, receipt=(request, "deploy"))
 
     def _start_maintenance(self, action):
         if self._locally_busy() or (action != "check" and self._reported_busy()):
@@ -883,7 +961,7 @@ class _ControlWindow(QMainWindow):
         report = self._post_log(request)
 
         self._start_worker("maintenance", (action, request), "r3-deploy",
-                           lambda: operate(action, values, request.password, report))
+                           lambda: operate(action, values, request.password, report), receipt=(request, action))
 
     def _maintenance_finished(self, context, outcome):
         action, request = context
@@ -982,7 +1060,8 @@ class _ControlWindow(QMainWindow):
         handlers = {"probe": self._probe_finished, "motion": self._motion_finished,
                     "stop": self._stop_finished, "maintenance": self._maintenance_finished,
                     "deployment_usb": self._deployment_usb_finished,
-                    "camera": self._camera_finished}
+                    "camera": self._camera_finished, "report_share": self._report_share_finished,
+                    "report_directory": self._report_directory_finished}
         for _ in range(100):
             try:
                 kind, context, outcome = self._events.get_nowait()
@@ -990,11 +1069,18 @@ class _ControlWindow(QMainWindow):
                 break
             if kind == "log":
                 self._log(outcome)
+            elif kind == "ssh_report":
+                self._latest_report = outcome
+                self._log(f"本机操作报告已保存 · {outcome}")
             else:
                 handlers[kind](context, outcome)
         self._poll_camera()
 
     def closeEvent(self, event):
+        if self._report_dialog and self._report_dialog.busy:
+            QMessageBox.information(self, "正在分享任务报告", "报告传输结束后即可关闭控制台。")
+            event.ignore()
+            return
         if (self._motion and self._link != "offline") or self._stop_request or self._maintenance:
             QMessageBox.information(self, "操作进行中", "请先停止自动任务，或等待部署操作结束。")
             event.ignore()
@@ -1005,6 +1091,7 @@ class _ControlWindow(QMainWindow):
             event.ignore()
             return
         self._stop_camera()
+        self.report_dispatch.ReportDispatch_Close()
         self._poll_timer.stop()
         self._event_timer.stop()
         event.accept()

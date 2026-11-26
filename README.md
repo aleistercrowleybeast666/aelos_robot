@@ -27,7 +27,7 @@
 
 在「控制」页点击「连接机器人」。连接成功后会自动尝试打开胸部相机，也可手动开关。可以分别启动单程搬运原始物资、单程搬运转运物资和连续搬运转运物资。
 
-控制台显示任务状态、回执和最近的扫码或纠偏诊断。停止按钮经独立连接取消后续动作。任务报告保存在 `%LOCALAPPDATA%\AelosR3Deploy\task_reports`。
+控制台显示任务状态、回执和最近的扫码或纠偏诊断。停止按钮经独立连接取消后续动作。收到任务结果后，运行日志会显示本机 JSON 报告的实际保存路径。
 
 比赛部署包在 `app/config/route_steps.json` 中启用了 `continue_estimated_route`。命令 0、1、2 会在当前路段尝试找码和纠偏。仍缺少可靠位姿时，沿该段剩余动作前进，到下一动作边界再看码。报告分别记录实际确认的码和估算进度。命令 1、2 在规定取物点确认只有一块时单抓，数量无法判断时默认双抱，实际件数和落点需现场确认。
 
@@ -51,6 +51,31 @@ Tag 3 右跨转直行时，程序优先用同一站姿新读到的 Tag 3 校准�
 树莓派程序的 `checkpoint_scan.py` 提供共用的读帧和检查点扫码入口。`checkpoint_alignment.py` 负责视觉转向和磁航向参考，`checkpoint_errors.py` 区分相机故障、控制连接异常和漏码。各路段仍在自己的路线文件中决定是否借步、侧跨或继续行进。
 
 可在部署包的 `app/config/route_steps.json` 查看和调整路线。MCU 回执记录完成的动作，实际落点会随负载和地面变化。
+
+## 查找和分享任务报告
+
+| 运行日志按钮 | 用法 |
+| --- | --- |
+| 打开日志文件夹 | 在资源管理器中查看或清理报告。默认目录为 `%LOCALAPPDATA%\AelosR3Deploy\task_reports`。 |
+| 更改日志目录 | 选择新文件夹后，下次收到的报告就保存在那里。以前的文件仍在原目录。所选目录暂时无法写入时，当次报告会保存到默认目录，下次继续尝试所选目录。 |
+| 分享任务报告… | 默认方式为 GitHub。可以启用后续报告自动推送，也可以手选最近一份或多份 JSON 单次分享，包括旧目录中的报告。 |
+
+### 推送到 GitHub
+
+1. 在分享窗口填写日志仓库的 `owner/repo` 或 GitHub 仓库网址。默认是 `aleistercrowleybeast666/aelos_robot`。公开仓库中的日志分支也公开。如仅供队内查看，可新建私有仓库，创建时勾选添加 README，再把这里改为它的仓库名。
+2. 用具有目标仓库写权限的账号创建短期个人访问令牌。仓库所有者或具备写权限的组织成员可使用细粒度令牌，选中目标仓库，授予 **Repository permissions → Contents → Read and write**。在分享窗口输入令牌，或在启动控制台前设置环境变量 `AELOS_GITHUB_TOKEN`。[GitHub 令牌设置说明](https://docs.github.com/zh/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+3. **自动推送**。将完整的 GitHub 访问令牌粘贴到令牌框，即会启用。手动逐字输入时按回车，或点击「启用自动推送」。控制台用当前 Windows 用户的 DPAPI 加密保存令牌，每次收到自动任务、手动扫码、停止、部署检查、部署或回滚的终结回执，就先写本机报告，再从后台发送。定时状态轮询及相机预览不生成报告。本次打开控制台以来若已有报告，启用时也会发送最近一份。网络中断后会在后台重试。关闭自动推送会清除控制台保存的令牌，赛后也可到 GitHub 撤销授权。
+4. **单次推送**。要补传以前的报告，可以手选文件并点击「推送到 GitHub」。控制台将本批新增报告作为一次提交写入独立的 `robot-logs` 分支，队员在该分支的 `reports/年/月/日/` 下查看。相同报告会跳过。两人同时推送时，控制台会基于最新提交重试。若仍提示冲突，可以稍后重传同一批。
+
+GitHub 对外部协作者使用细粒度令牌写入他人仓库有限制。遇到这种情况，可让队员通过下面的共享目录交报告，由仓库所有者或具备权限的组织成员统一推送。[GitHub 对协作者的令牌限制](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens-limitations)
+
+### 导出 ZIP 或写入共享文件夹
+
+在分享窗口切换方式即可。**ZIP** 适合把一场试跑的报告打包带走。**共享文件夹** 支持有写入权限的 Windows 共享路径（如 `\\比赛电脑\机器人日志`），也支持同步盘客户端已设置同步的本地文件夹。共享目录写入中断后可重选同一批报告再发，已写入且内容相同的文件会跳过。
+
+三种方式都从所选任务报告生成分享副本，保留命令、时间、结果和诊断，移除报告顶层的 SSH 目标以及可识别的凭据字段和令牌文本。本机原件保留在保存目录。场地、动作和故障细节仍可供队员排查，选择公开仓库时也会向读者公开。
+
+[控制界面截图](https://raw.githubusercontent.com/aleistercrowleybeast666/aelos_robot/v1.0.3/docs/control-console.png) · [日志分享窗口截图](https://raw.githubusercontent.com/aleistercrowleybeast666/aelos_robot/v1.0.3/docs/report-sharing.png)
 
 ## 命令行
 
