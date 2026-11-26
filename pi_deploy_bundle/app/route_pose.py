@@ -502,8 +502,9 @@ def RoutePose_TrialLateralHint(checkpoint, nav_cfg, tag_id):
     evidence = _trial_lateral_evidence(checkpoint, nav_cfg, tag_id, yaw_limit=12. if tag_id == 2 else 20.)
     if evidence is None:
         return None
-    return {'tag_id': tag_id, **{key: evidence[key] for key in (
-        'lateral_bounds_m', 'distance_m', 'heading_deg', 'latest_stamp_ns')}}
+    return {'tag_id': tag_id, 'camera_fingerprint': checkpoint['camera_info']['fingerprint'],
+            'camera_restart_ns': (checkpoint.get('scan') or {}).get('camera_restart_ns', 0),
+            **{key: evidence[key] for key in ('lateral_bounds_m', 'distance_m', 'heading_deg', 'latest_stamp_ns')}}
 
 
 def RoutePose_Tag3HeadingRecovery(checkpoint, nav_cfg):
@@ -575,7 +576,7 @@ def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_count
     evidence, problem = _trial_ground_depth(checkpoint, nav_cfg, 1)
     if problem:
         return dict(result, reason=problem)
-    result.update(evidence)
+    result.update(evidence, camera_fingerprint=checkpoint['camera_info']['fingerprint'])
     nearest, farthest = evidence['distance_bounds_m']
     projections = evidence['projection_bounds']
     if (evidence['max_abs_yaw_deg'] > 12.0 or farthest - nearest > .025 or projections[0] <= 0

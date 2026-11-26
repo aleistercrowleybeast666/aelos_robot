@@ -856,6 +856,22 @@ def _route_notes(result):
             expired = f" · 其中 {seen-decoded} 帧超出时效" if seen > decoded else ""
             lines.append(f"Tag 3 终点短扫 · 检测器报出 {seen} 帧{expired} · 程序接受 {accepted} 帧")
         side = _as_dict(leg.get("side_plan"))
+        if side.get("status") == "tag2_entry_lateral_fused":
+            lines.append(TaskReport_Reason(side))
+        handoff = _as_dict(leg.get("tag3_straight_heading"))
+        if handoff:
+            turn = _as_dict(handoff.get("turn")).get("action")
+            previous = handoff.get("recent_turn")
+            observed = _angle_label("实测", handoff.get("recent_turn_delta_deg"))
+            repeated = (f"上次{TaskReport_Message(previous)}{observed}，本次略过"
+                        if not turn and isinstance(previous,str) and observed else None)
+            parts = ("Tag 3 侧跨转直行", _angle_label("转前视觉", handoff.get("before_error_deg")), repeated,
+                     TaskReport_Message(turn) if isinstance(turn, str) else None,
+                     _angle_label("复测余差", handoff.get("residual_deg"))
+                     if handoff.get("post_turn_pose_confirmed") is True else None,
+                     "先前进两步再看码" if handoff.get("short_first_forward") is True else None)
+            if any(parts[1:]):
+                lines.append(" · ".join(part for part in parts if part))
         short_groups = _as_dict(leg.get("tag2_cautious_strafes"))
         if short_groups:
             size = short_groups.get("max_group")
@@ -865,7 +881,7 @@ def _route_notes(result):
                         else f"每 {size} 跨复查航向")
             lines.append(" · ".join(filter(None, (f"Tag 2 → 3 {grouping}", observed))))
         hint = _as_dict(side.get("trial_lateral_hint"))
-        if hint.get("tag_id") in (2,3) and side.get("status") not in ("tag3_left_bias_fused", "tag3_right_bias_fused"):
+        if start == 3 and end == 4 and hint.get("tag_id") in (2,3) and side.get("status") not in ("tag3_left_bias_fused", "tag3_right_bias_fused"):
             lines.append(f"Tag 3 → 4 · 根据 Tag {hint['tag_id']} 的可信横向读数减少一步大右跨")
         if side.get("status") in ("tag3_left_bias_fused", "tag3_right_bias_fused",
                                    "tag3_unverified_extra_omitted", "tag3_midpoint_full_right_group"):

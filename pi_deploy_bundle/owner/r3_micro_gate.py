@@ -130,10 +130,18 @@ LEVEL_BACKWARD8_CODE_SHA256 = dict(TRANSFER_STRAFE_CODE_SHA256, **{
     'lua/craic_auto_bridge.lua': '1cf0bf7bcfe7b0511a171373ccda1e8a77233546b5acc4cc9eb68fa9b26b1da5',
     'lua/craic_button_gaits.lua': '0ced4cce313f9c961a1d2f8dfbb52779fcec59a342de8063f41431e00de6e7f9',
 })
+SOFT_PAIR_RETREAT_CODE_SHA256 = dict(LEVEL_BACKWARD8_CODE_SHA256, **{
+    'lua/craic_button_gaits.lua': '19ea709c83ac4305109382e37af6d01f8d8b9c8d00e2f1d6d2afa4b10d18b454',
+    'lua/craic_single_micro.lua': '053c6c9413104e02f0fabce52cf69fb916e704c7295a6217dd0151b792dbd69e',
+})
+RELAXED_CARRY_HIP_CODE_SHA256 = dict(SOFT_PAIR_RETREAT_CODE_SHA256, **{
+    'lua/craic_runtime.lua': '32ef7f457609175edf2b5f53629422dfd5aef09a07a7ea1131b3a2cb5b800352',
+})
 _PICKUP_BACKWARD_CODE_VARIANTS = (PICKUP_BACKWARD4_CODE_SHA256, PICKUP_BACKWARD6_CODE_SHA256,
                                   PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256,
                                   PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256, PICKUP_LEVEL_BACKWARD6_CODE_SHA256,
-                                  EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256, LEVEL_BACKWARD8_CODE_SHA256)
+                                  EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256,
+                                  LEVEL_BACKWARD8_CODE_SHA256, RELAXED_CARRY_HIP_CODE_SHA256)
 _PAIR_ROUTE_CODE_VARIANTS = (PAIR_ROUTE_CODE_SHA256, *_PICKUP_BACKWARD_CODE_VARIANTS)
 _CMD0_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
@@ -487,7 +495,8 @@ class MicroGate:
                     small_strafe_profile=self.small_strafe_profile(epoch),
                     empty_recovery_deployment_readback_ready=(self.deployment_ready()
                         and any(_matches_readback(self.deployment['verified_files_sha256'], code)
-                                for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256,LEVEL_BACKWARD8_CODE_SHA256))),
+                                for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256,
+                                             LEVEL_BACKWARD8_CODE_SHA256,RELAXED_CARRY_HIP_CODE_SHA256))),
                     empty_strafe_group_ready=self.empty_strafe_group_ready(epoch,recovery_ready),
                     correction_profile_probe_supported=True,
                     empty_recovery_ready=self.empty_recovery_ready(epoch,recovery_ready),

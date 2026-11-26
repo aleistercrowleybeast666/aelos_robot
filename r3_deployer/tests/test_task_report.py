@@ -234,6 +234,18 @@ class TaskReportTests(unittest.TestCase):
         self.assertEqual(task_report.TaskReport_Diagnostics(result)[-1],
                          "Tag 2 → 3 · 侧跨偏航 -14.00° · 先后退两步腾出空间，再复测航向")
 
+    def test_tag3_handoff_reports_verified_residual_and_executed_turn(self):
+        handoff = {"before_error_deg":8.36, "turn":{"action":"single_micro_left"},
+                   "post_turn_pose_confirmed":True, "residual_deg":-14.75, "short_first_forward":True}
+        result = {"corridor_trial":{"legs":[{"from_tag":3,"expected_id":4,"tag3_straight_heading":handoff}]}}
+        self.assertIn("Tag 3 侧跨转直行 · 转前视觉 +8.36° · 小左转 · 复测余差 -14.75° · 先前进两步再看码",
+                      task_report.TaskReport_Diagnostics(result))
+        handoff["post_turn_pose_confirmed"] = False
+        self.assertNotIn("复测余差", " ".join(task_report.TaskReport_Diagnostics(result)))
+        del handoff["turn"]
+        handoff.update(recent_turn="single_micro_left", recent_turn_delta_deg=-24)
+        self.assertIn("上次小左转实测 -24.00°，本次略过", " ".join(task_report.TaskReport_Diagnostics(result)))
+
     def test_small_left_wrong_way_is_localized(self):
         reason = "correction verification failed: wrong_direction_or_zero_change; no retry; {\"observed_change_deg\":4}"
         self.assertEqual(task_report.TaskReport_Message(reason), "转向复测未通过 · 实测转向与指令相反或未转动")

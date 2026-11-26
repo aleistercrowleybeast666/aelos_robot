@@ -85,6 +85,12 @@ _MCU_LEVEL_BACKWARD8_SHA256 = {
     'lua/craic_auto_bridge.lua': '1cf0bf7bcfe7b0511a171373ccda1e8a77233546b5acc4cc9eb68fa9b26b1da5',
     'lua/craic_button_gaits.lua': '0ced4cce313f9c961a1d2f8dfbb52779fcec59a342de8063f41431e00de6e7f9',
 }
+_MCU_RELAXED_CARRY_HIP_SHA256 = {
+    **_MCU_LEVEL_BACKWARD8_SHA256,
+    'lua/craic_button_gaits.lua': '19ea709c83ac4305109382e37af6d01f8d8b9c8d00e2f1d6d2afa4b10d18b454',
+    'lua/craic_single_micro.lua': '053c6c9413104e02f0fabce52cf69fb916e704c7295a6217dd0151b792dbd69e',
+    'lua/craic_runtime.lua': '32ef7f457609175edf2b5f53629422dfd5aef09a07a7ea1131b3a2cb5b800352',
+}
 _MCU_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
     'f0e52e82024132ec0c7be7d5aa556e756a7642fd2c489a1172920ea11be78bf1',
@@ -272,7 +278,7 @@ def validate_mcu_readback(receipt, expected):
              {**expected, **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256},
              {**expected, **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256}, {**expected, **_MCU_EMPTY_RECOVERY_SHA256},
              {**expected, **_MCU_INTERMEDIATE_STRAFE_SHA256}, {**expected, **_MCU_TRANSFER_STRAFE_SHA256},
-             {**expected, **_MCU_LEVEL_BACKWARD8_SHA256},
+             {**expected, **_MCU_LEVEL_BACKWARD8_SHA256}, {**expected, **_MCU_RELAXED_CARRY_HIP_SHA256},
              *({**expected, 'lua/craic_single_micro.lua': digest}
                for digest in (_MCU_TUNED_MICRO_SHA256, *_MCU_PRIOR_TUNED_MICRO_SHA256)))
     if (not isinstance(receipt, dict) or receipt.get('robot_id') != 3

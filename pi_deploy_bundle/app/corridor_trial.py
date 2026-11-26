@@ -439,7 +439,9 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
              'residual_deg': initial[0] if initial else None, 'correction_actions': 0}
     leg.setdefault('lateral_heading_checks', []).append(check)
     if tag3_probe_handled:
-        check['compensation_status'] = 'tag3_visual_checked_at_probe'
+        check['compensation_status'] = ('tag3_visual_checked_before_forward'
+            if (leg.get('tag3_straight_heading') or {}).get('checked_before_magnetic_turn')
+            else 'tag3_visual_checked_at_probe')
         return CorridorLateralHeadingResult.PROCEED
     if not allow_turn:
         check['compensation_status'] = 'tag5_heading_monitor_only'
@@ -853,13 +855,27 @@ def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, b
                                           tag3_heading=tag3_heading)
 
 
-def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings):
+def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings, *, profile=None, reserved_actions=0):
     """Handle feedback after this gait's receipt has already been recorded."""
     robot.check()
     report = robot.last_heading_report or {}
     sample = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
     previous = leg.pop('tag4_deferred_heading_deg', None)
     completed_at = getattr(robot, 'last_action_completed_monotonic', None)
+    short_handoff = ((leg.get('tag3_straight_heading') or {}).get('short_first_forward')
+                     and leg.get('completed_forward_steps') == 2 and profile is not None)
+    if short_handoff:
+        # Reuse Tag 3 only from the new two-step stance. Far Tag 4 is a depth
+        # landmark; it must not displace a usable Tag 3 heading at this boundary.
+        _tag3_straight_heading(robot, nav, profile, leg, reserved_actions=reserved_actions,
+                               report_key='tag3_first_forward_heading')
+        visual = leg.get('tag3_first_forward_heading') or {}
+        if visual.get('turn') or visual.get('magnetic_reference') in ('applied','prior_tag3_reference_retained'):
+            if visual.get('short_first_forward'):
+                leg['tag4_deferred_heading_deg'] = visual.get('residual_deg',visual['before_error_deg'])
+            leg.setdefault('tag4_forward_heading', []).append({'action':action, 'measured_deg':sample[0] if sample else None,
+                'decision':'fresh_tag3_after_short_forward'})
+            return
     if (sample is None or getattr(robot, 'magnetic_route_only', False)
             or (type(completed_at) in (int, float) and sample[1] < completed_at)):
         return
@@ -893,6 +909,9 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings):
 def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautious=False, native_five=False):
     """Choose one closed gait. Past depth can shorten a gait but cannot authorise a long one."""
     completed = leg.get('completed_forward_steps', 0)
+    handoff_limited = completed == 0 and (leg.get('tag3_straight_heading') or {}).get('short_first_forward') is True
+    if handoff_limited:
+        cautious = True
     # A four-step run reduced measured depth from 37.0 to 15.4 cm. Reserve the
     # same 12.5 cm per two steps as the Tag 2 approach, including load variation.
     step_upper = max(.125, settings['two_step_distance_m'][1]) / 2
@@ -968,12 +987,14 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
     else:
         cap = 8
     sizes = (8, 5, 4, 2) if native_five else (8, 4, 2)
+    if handoff_limited:
+        cap = min(cap, 2)
     step_count = next((n for n in sizes if n <= min(requested, cap)
                        and (lower is None or lower - step_upper * n >= floor)), 0)
     leg.setdefault('tag4_forward_limits', []).append({
         'completed_steps':completed, 'requested_steps':requested, 'next_steps':step_count,
         'range_source':reason, 'observed_bounds_m':current_range,
-        'same_stance_heading_supports_four':allow_four,
+        'same_stance_heading_supports_four':allow_four, 'tag3_residual_limited':handoff_limited,
         'projected_min_depth_m':lower, 'stride_upper_m':step_upper, 'landing_floor_m':floor})
     plan['scheduled_steps'] = step_count
     return step_count
@@ -2882,7 +2903,7 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
     bearing = hint.get('min_abs_body_bearing_deg', 0.)
     yaw = hint['heading_deg']
     deadband = nav.cfg.get('post_action_heading', {}).get('deadband_deg', 8.)
-    if (bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG or abs(yaw) > deadband
+    if (bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG or abs(yaw) > 2 * deadband
             or (leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
             or getattr(robot, 'magnetic_route_only', False)):
         return None
@@ -2910,10 +2931,37 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
             or sample.get('action_completed_monotonic') != completed or sample.get('received_monotonic') != receipt
             or scope != tuple(sample.get(k) for k in ('capture_session', 'load_epoch', 'calibration_id'))
             or set(guard._target_observation_faults(sample, robot.load_kind)) - {'sample_stale'}
-            or abs(magnetic) > deadband):
+            or abs(magnetic) > 2 * deadband):
         return None
-    return {'body_bearing_min_abs_deg': bearing, 'magnetic_error_deg': magnetic,
-            'magnetic_receipt_age_s': now-receipt}
+    evidence = {'body_bearing_min_abs_deg': bearing, 'magnetic_error_deg': magnetic,
+                'magnetic_receipt_age_s': now-receipt}
+    if max(abs(yaw), abs(magnetic)) <= deadband:
+        return evidence
+    # At the edge of this wide-angle lens a nominal 10-degree turn can look
+    # attractive even immediately after the very same gait turned 24 degrees.
+    # Use current-session measurements to veto a repeat, never to command a turn.
+    gains = nav.cfg.get('visual_micro', {}).get('signed_nominal_delta_deg', {})
+    if abs(wrap(yaw - magnetic)) > deadband:
+        return None
+    for event in reversed(getattr(robot, 'events', ())):
+        report = event.get('post_action_heading', {})
+        for step in reversed(report.get('correction_steps') or [report]):
+            operation = step.get('correction')
+            if gains.get(operation, 0.) * yaw >= 0:
+                continue
+            measured = step.get('correction_diagnostic') or {}
+            sample = (step.get('verification') or {}).get('reference') or {}
+            observed = measured.get('observed_change_deg')
+            when = sample.get('received_monotonic')
+            if (type(when) not in (int,float) or not 0 <= now-when <= 15.
+                    or sample.get('load') != robot.load_kind or not measured.get('post_capture_verified')
+                    or tuple(sample.get(k) for k in ('capture_session', 'load_epoch', 'calibration_id')) != scope):
+                continue
+            if (type(observed) in (int,float) and observed * yaw < 0
+                    and abs(wrap(yaw + observed)) >= abs(yaw)):
+                return dict(evidence, recent_turn=operation, recent_turn_delta_deg=observed)
+            return None  # A newer representative response supersedes older ones.
+    return None
 
 
 def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False,
@@ -2942,6 +2990,11 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
         info['initial_local_zero'] = hint['local_zero']
     peripheral = _tag3_peripheral_heading(robot, nav, leg, hint)
     if peripheral is not None:
+        if 'recent_turn' in peripheral:
+            info.update(peripheral, residual_deg=yaw, residual_stamp_ns=stamp, short_first_forward=True,
+                        magnetic_reference=rebase(3,yaw,stamp).value,
+                        reason_zh='同负载最近一次同向微转会放大当前余差，保留 Tag 3 实测航向，先短进再测。')
+            return hint
         info.update(peripheral, magnetic_reference='prior_tag3_reference_retained',
                     reason_zh='Tag 3 位于视野侧缘，视觉与同站姿磁航向均在直行容差内，沿用本段 Tag 3 航向参考。')
         return
@@ -2954,14 +3007,31 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
         if (hint is None or hint['latest_stamp_ns'] <= max(stamp, robot.last_action_completed_ros_ns)
                 or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
             info['post_turn_pose_confirmed'] = False
+            info['short_first_forward'] = True
             return
         info['post_turn_pose_confirmed'] = True
+        step['after_error_deg'] = hint['heading_deg']
+        info['observed_turn_deg'] = wrap(hint['heading_deg'] - yaw)
+        info['short_first_forward'] = abs(hint['heading_deg']) > nav.cfg['post_action_heading'].get('deadband_deg',8.)
     yaw = hint['heading_deg']
     info.update(residual_deg=yaw, residual_stamp_ns=hint['latest_stamp_ns'],
                 magnetic_reference=rebase(3, yaw, hint['latest_stamp_ns']).value)
     if 'local_zero' in hint:
         info['local_zero'] = hint['local_zero']
     return hint
+
+
+def CorridorTrial_CheckTag3SideEndpoint(robot, nav, profile, leg, magnetic_report, reserved_actions):
+    """Give fresh endpoint vision priority over a magnetic turn at the very same stance."""
+    measured = CorridorTrial_HeadingSnapshot(magnetic_report, after=True, load=robot.load_kind)
+    if not measured or abs(measured[0]) <= nav.cfg['post_action_heading'].get('deadband_deg',8.):
+        return None
+    hint = _tag3_straight_heading(robot, nav, profile, leg, reserved_actions=reserved_actions)
+    visual = leg.get('tag3_straight_heading') or {}
+    if visual.get('turn') or visual.get('magnetic_reference') in ('applied','prior_tag3_reference_retained'):
+        visual['checked_before_magnetic_turn'] = True
+        return robot.last_action_completed_ros_ns, hint
+    return None
 
 
 def _tag3_handoff_window(robot, nav, leg):
@@ -2986,9 +3056,73 @@ def _tag3_handoff_window(robot, nav, leg):
     return {'expected_id':4, 'detected':False, 'scan':scan, 'camera_info':report.get('camera_info') or {}}
 
 
+def _tag2_entry_lateral_plan(robot, nav, leg, nominal, stride):
+    """Use Tag 2's current deviation; an earlier Tag 1 confirms only its direction."""
+    first = leg.get('entry_forward_plan') or {}
+    second = leg.get('tag2_side_hint') or {}
+    first_stamp, stamp = first.get('latest_stamp_ns'), second.get('latest_stamp_ns')
+    restart = second.get('camera_restart_ns', 0)
+    stance = robot.last_action_completed_ros_ns
+    camera = nav.cfg.get('visual_micro', {}).get('camera_info', {})
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    depth = first.get('distance_bounds_m') or ()
+    projection = first.get('projection_bounds') or ()
+    if (len(depth) != 2 or not .08 <= depth[0] <= depth[1] <= .40 or depth[1]-depth[0] > .025
+            or not projection or projection[0] < .85 or first.get('max_heading_deviation_deg', 180.) > 3.):
+        return None
+    if (first.get('source') != 'tag1_forward_trial' or first.get('tag_id') != 1 or second.get('tag_id') != 2
+            or not leg.get('departure_tag_confirmed') or leg.get('tag2_narrow_departure')
+            or leg.get('tag2_lateral_recovery') or leg.get('tag2_close_reframe') or leg.get('tag2_far_reframe')
+            or not leg.get('entry_completed_steps') or leg['entry_completed_steps'] != leg.get('entry_planned_steps')
+            or not all(type(t) is int for t in (first_stamp, stamp, stance, restart))
+            or not 0 <= restart < first_stamp < stance < stamp or stamp-first_stamp > 20_000_000_000
+            or not live or not live(stamp) or camera.get('source_confirmed') is not True
+            or not first.get('camera_fingerprint') or first['camera_fingerprint'] != second.get('camera_fingerprint')
+            or first['camera_fingerprint'] != camera.get('expected_fingerprint')
+            or type(stride) not in (int,float) or not .04 <= stride <= .12 or not 2 <= nominal < 8):
+        return None
+    goals = nav.cfg['legs']['outbound'][:2]
+    if ([point.get('id') for point in goals] != [1,2]
+            or any(type(goal.get(k)) not in (int,float) or not isfinite(goal[k])
+                   for goal in goals for k in ('lateral_m', 'tag_heading_deg', 'route_heading_deg'))):
+        return None
+    axes = [goal['route_heading_deg']-goal['tag_heading_deg'] for goal in goals]
+    if abs(wrap(axes[0]-axes[1])) > 3. or abs(wrap(goals[0]['route_heading_deg']-goals[1]['route_heading_deg'])) > 3.:
+        return None
+    errors = []
+    for hint, goal in zip((first,second), goals):
+        bounds = hint.get('lateral_bounds_m')
+        yaw = hint.get('heading_deg')
+        if (not bounds or len(bounds) != 2 or type(yaw) not in (int,float)
+                or not isfinite(yaw) or abs(wrap(yaw-goal['tag_heading_deg'])) > 12.
+                or not all(type(v) in (int,float) and isfinite(v) for v in bounds)
+                or not 0 <= bounds[1]-bounds[0] <= .025):
+            return None
+        errors.append(tuple(value-goal['lateral_m'] for value in bounds))
+    left = min(e[0] for e in errors)
+    right = max(e[1] for e in errors)
+    if (max(abs(left),abs(right)) > _TAG2_DEPARTURE_LATERAL_M or right-left > stride
+            or not (right < -stride or left > stride)):
+        return None
+    adjustment = 1 if right < 0 else -1
+    before, current = (median(e) for e in errors)
+    return {'status':'tag2_entry_lateral_fused', 'tag_id':2, 'operation':'strafe_right_once',
+            'nominal_count':nominal, 'count':nominal+adjustment, 'adjustment':adjustment,
+            'tag1_lateral_error_m':before, 'tag2_lateral_error_m':current, 'latest_stamp_ns':stamp,
+            'reason_zh':f'Tag 1 横偏 {before*100:+.1f} cm、Tag 2 横偏 {current*100:+.1f} cm，'
+                        f'用 Tag 2 当前横偏将右跨从 {nominal} 调至 {nominal+adjustment} 大步。'}
+
+
 def _tag3_lateral_hint(tag2_leg, nav, deadband, refreshed=None, *, departure_turned=False):
     hint = RoutePose_TrialLateralHint(refreshed if refreshed is not None else tag2_leg, nav.cfg, 3)
-    if hint is not None or departure_turned or (refreshed is not None and refreshed.get('detected')):
+    if hint is not None:
+        target = nav.cfg['legs']['outbound'][2].get('lateral_m', 0.)
+        if target:
+            bounds = hint['lateral_bounds_m']
+            hint = dict(hint, observed_lateral_bounds_m=bounds, lateral_target_m=target,
+                        lateral_bounds_m=tuple(x-target for x in bounds))
+    if (hint is not None or departure_turned or (refreshed is not None and refreshed.get('detected'))
+            or (tag2_leg.get('side_plan') or {}).get('status') == 'tag2_entry_lateral_fused'):
         return hint
     hint = tag2_leg.get('tag2_side_hint') if refreshed is None else None
     projected = tag2_leg.get('tag2_projected_side_hint')
@@ -3016,9 +3150,19 @@ def _tag3_lateral_hint(tag2_leg, nav, deadband, refreshed=None, *, departure_tur
         return None
     if any(check['action'] not in strides for check in checks):
         return None
+    if hint.get('basis') != 'tag2_short_approach_projection' and hint['lateral_bounds_m'][1] < 0:
+        scan = tag2_leg.get('scan') or {}
+        if (tag2_leg.get('detected') is not False or scan.get('camera_healthy') is not True
+                or scan.get('contract_match') is not True or any(c.get('drift_deg') is None for c in checks)):
+            return None
+    goals = nav.cfg['legs']['outbound'][1:3]
+    headings = [g.get('route_heading_deg',0.)-g.get('tag_heading_deg',0.) for g in goals]
+    if abs(wrap(headings[1]-headings[0])) > 3.:
+        return None
+    target = goals[0].get('lateral_m', 0.)
     left, right = hint['lateral_bounds_m']
-    return dict(hint, lateral_bounds_m=(left-_TAG2_CARRIED_LATERAL_MARGIN_M,
-                                      right+_TAG2_CARRIED_LATERAL_MARGIN_M))
+    return dict(hint, lateral_bounds_m=(left-target-_TAG2_CARRIED_LATERAL_MARGIN_M,
+                                       right-target+_TAG2_CARRIED_LATERAL_MARGIN_M))
 
 
 def _tag3_left_bias_count(step, hint):
@@ -3043,7 +3187,8 @@ def _tag3_trial_side_plan(step, hint, *, small_available):
     small = SMALL_SIDE_ACTIONS[operation] if small_available else None
     plan = {'status': 'field_baseline', 'tag_id': 3, 'operation': operation, 'nominal_count': nominal,
             'reason_zh': 'Tag 3 横向位姿未确认，沿用实测基线右跨。'}
-    if hint is not None and hint.get('basis') == 'tag2_short_approach_projection':
+    if hint is not None and (hint.get('basis') == 'tag2_short_approach_projection'
+                             or (hint['tag_id'] == 2 and small and hint['lateral_bounds_m'][1] < 0)):
         stride = step.get('left_bias_stride_m')
         plan['trial_lateral_hint'] = hint
         if stride is not None and hint['lateral_bounds_m'][1] < -stride:
@@ -4121,7 +4266,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         ready = VisualCamera_GetFreshnessCheck(nav.io)
                         if ready is None or not ready(hint['latest_stamp_ns']):
                             _, tag3_refresh = _refresh_checkpoint_pose(robot, nav, profile, 3)
-                            hint = RoutePose_TrialLateralHint(tag3_refresh, nav.cfg, 3)
+                            hint = _tag3_lateral_hint(result['legs'][-2], nav, deadband, tag3_refresh)
                             left_count = (_tag3_left_bias_count(step, hint)
                                           if hint and ready and ready(hint['latest_stamp_ns']) else None)
                     full_stride_trim = left_count is not None
@@ -4262,6 +4407,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         tag5_handoff = None
         tag5_continuation = None
         tag5_wait_at_boundary = False
+        tag3_endpoint = None
         checkpoint_action=getattr(robot,'route_checkpoint_action',None)
         for index, (op, actions, small, replaced_full) in enumerate(planned):
             guarded_forward = False
@@ -4305,10 +4451,15 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         near_marker = bool(depth_bounds and not distant)
                         if settled_tag3:
                             leg['tag3_handoff_scan_policy'] = 'current_cache_after_verified_right_strafe'
-                        tag3_heading = _tag3_straight_heading(robot, nav, profile, leg,
-                            reserved_actions=pending_actions + after_leg,
-                            probe_once=not (near_marker or settled_tag3)
-                            and getattr(robot, 'boundary_visual_observation', None) is not None)
+                        if tag3_endpoint is not None and tag3_endpoint[0] == robot.last_action_completed_ros_ns:
+                            tag3_heading = tag3_endpoint[1]
+                            if tag3_heading and not VisualCamera_IsFresh(nav.io.visual_motion_ready,tag3_heading['latest_stamp_ns']):
+                                tag3_heading = None
+                        else:
+                            tag3_heading = _tag3_straight_heading(robot, nav, profile, leg,
+                                reserved_actions=pending_actions + after_leg,
+                                probe_once=not (near_marker or settled_tag3)
+                                and getattr(robot, 'boundary_visual_observation', None) is not None)
                         handoff = leg.get('tag3_straight_heading') or {}
                         handoff_stable = (settled_tag3 and handoff.get('magnetic_reference') in
                             ('applied','prior_tag3_reference_retained') and handoff.get('observed_ids') == [3]
@@ -4525,10 +4676,28 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             join_tag2_tail = (previous_id == 2 and expected_id == 3 and index == 0 and not small
                               and 'monitor_every' not in steps[index] and leg.get('tag2_cautious_strafes')
                               and tuple(actions) == ('cmd0_strafe_right2', 'cmd0_strafe_right2', 'strafe_right_once'))
-            if join_tag2_tail:
+            entry_lateral = (verify_tag2 and previous_id == 2 and expected_id == 3 and index == 0
+                             and op == 'strafe_right_once' and not small and not replaced_full
+                             and (leg.get('side_plan') or {}).get('status') == 'nominal'
+                             and not leg['side_plan'].get('calibrated_pose_used'))
+            if join_tag2_tail or entry_lateral:
                 actions = list(actions)
             for action_index, action in enumerate(actions):
                 _revalidate_heading(robot, nav)
+                if entry_lateral and action_index == 0:
+                    side = _tag2_entry_lateral_plan(robot, nav, leg, steps[0]['repeat'],
+                        chain['tag3_to_tag4'][0].get('left_bias_stride_m') if chain['tag3_to_tag4'] else None)
+                    if side is not None:
+                        period = min(steps[0].get('monitor_every', 2), 2)
+                        adjusted = CorridorTrial_GroupStrafes(op, side['count'], continuous=continuous,
+                                                              monitor_every=period)
+                        extra = len(adjusted)-len(actions)
+                        if robot.count + pending_actions + extra + after_leg <= robot.cfg['max_body_macros_per_journey']:
+                            actions[:] = adjusted
+                            action = actions[0]
+                            pending_actions += extra
+                            join_tag2_tail = False
+                            leg['side_plan'] = side
                 if index == 0 and action_index == 0 and leg.get('tag4_near_left_start'):
                     live = VisualCamera_GetFreshnessCheck(nav.io)
                     if not live(leg['tag4_near_left_start']['latest_stamp_ns']):
@@ -4616,6 +4785,13 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         visual_checked = bool(visual.get('turn') or visual.get('magnetic_reference') in
                                               ('applied', 'prior_tag3_reference_retained'))
                         probe['heading_source'] = 'tag3_visual' if visual_checked else 'post_strafe_magnetic'
+                    final_before_straight = (estimate and use_tag4_trial and expected_id == 4 and probe is None
+                        and op == 'strafe_right_once' and action_index == len(actions)-1 and not small_strafe_follows
+                        and index+1 < len(planned) and planned[index+1][0] == _FORWARD_GROUP)
+                    if final_before_straight:
+                        tag3_endpoint = CorridorTrial_CheckTag3SideEndpoint(robot, nav, profile, leg,
+                            magnetic_report, pending_actions + after_leg)
+                        visual_checked = tag3_endpoint is not None
                     heading_result = CorridorTrial_CheckLateralHeading(robot, nav, action, before,
                         magnetic_report, leg, pending_actions + after_leg,
                         expected_id if is_boundary else None,
@@ -4711,7 +4887,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     leg['completed_forward_steps'] = (leg.get('completed_forward_steps',0)
                                                        + Cmd0Motion_ForwardStepCount((action,)))
                     if monitor_tag4_group:
-                        _tag4_monitor_towards_next_window(robot, nav, action, leg, tag4_trial)
+                        _tag4_monitor_towards_next_window(robot, nav, action, leg, tag4_trial,
+                                                         profile=profile, reserved_actions=pending_actions+after_leg)
                     tag4_disruption = _tag4_forward_disruption(robot, last_event, previous_report, leg)
                     if tag4_disruption and action_index + 1 < len(actions):
                         pending_actions -= len(actions) - action_index - 1
@@ -4739,9 +4916,14 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                         before = CorridorTrial_HeadingSnapshot(robot.last_heading_report or {}, after=True, load=robot.load_kind)
                         lateral_action(small)
                         if expected_id == 4:
+                            magnetic_report = robot.last_heading_report or {}
+                            if (estimate and use_tag4_trial and index+1 < len(planned)
+                                    and planned[index+1][0] == _FORWARD_GROUP):
+                                tag3_endpoint = CorridorTrial_CheckTag3SideEndpoint(robot, nav, profile, leg,
+                                    magnetic_report, pending_actions + after_leg)
                             CorridorTrial_CheckLateralHeading(robot, nav, small, before,
-                                robot.last_heading_report or {}, leg, pending_actions + after_leg, None,
-                                allow_clearance_translation=False)
+                                magnetic_report, leg, pending_actions + after_leg, None,
+                                allow_clearance_translation=False, tag3_probe_handled=tag3_endpoint is not None)
                     else:
                         robot.action(small)
                     leg['completed_actions'].append(small)
