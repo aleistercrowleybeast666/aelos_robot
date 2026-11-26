@@ -2951,6 +2951,8 @@ def _tag3_likely_overshoot(robot, nav, yaw, scope):
             when = sample.get('received_monotonic')
             if (type(when) not in (int,float) or not 0 <= now-when <= 15.
                     or sample.get('load') != robot.load_kind or not measured.get('post_capture_verified')
+                    or not sample.get('usable_for_heading') or set(measured.get('failures', ())) -
+                    {'observed_target_crossing','observed_step_oversized','observed_angle_budget_exhausted','insufficient_improvement'}
                     or tuple(sample.get(k) for k in ('capture_session', 'load_epoch', 'calibration_id')) != scope):
                 continue
             if (type(observed) in (int,float) and isfinite(observed) and observed * yaw < 0
