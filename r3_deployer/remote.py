@@ -61,6 +61,10 @@ _MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256 = {
     **_MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256,
     'lua/craic_actions.lua': '94e6eb25149bc6e00181997618c3bea54ba28a13af622fc38fa6c15ffddc3989',
 }
+_MCU_PICKUP_LEVEL_BACKWARD6_SHA256 = {
+    **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256,
+    'lua/craic_button_gaits.lua': 'b950f0adb939ced0c38172290c781e5f171882394aec5b8d6c7058ce31017846',
+}
 _MCU_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
     'f0e52e82024132ec0c7be7d5aa556e756a7642fd2c489a1172920ea11be78bf1',
@@ -229,6 +233,7 @@ def validate_mcu_readback(receipt, expected):
              {**expected, **_MCU_PICKUP_BACKWARD8_SHA256},
              {**expected, **_MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256},
              {**expected, **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256},
+             {**expected, **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256},
              *({**expected, 'lua/craic_single_micro.lua': digest}
                for digest in (_MCU_TUNED_MICRO_SHA256, *_MCU_PRIOR_TUNED_MICRO_SHA256)))
     if (not isinstance(receipt, dict) or receipt.get('robot_id') != 3

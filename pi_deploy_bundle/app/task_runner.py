@@ -309,8 +309,12 @@ class Robot:
             raise
         self.count+=1;self.events.append({'action':name,'physical_success':'unobserved'})
 
-    def action(self,name,timeout_s=None,*,monitor_only_as=None,reserved_route_actions=0):
+    def action(self,name,timeout_s=None,*,monitor_only_as=None,reserved_route_actions=0,base_entry=False):
         if name not in BODY_ACTIONS:raise ValueError('unknown/unsupported body action: '+str(name))
+        if base_entry and (name not in ('carry_forward','carry_forward4','carry_forward2',
+                                        'cmd0_carry_forward5','cmd0_carry_forward10','cmd0_carry_forward15')
+                           or self.load_kind not in ('single','double')):
+            raise ValueError('base entry requires a loaded forward gait')
         self.check()
         if self.count>=self.cfg['max_body_macros_per_journey']:raise RuntimeError('journey macro budget exceeded')
         timeout=self.cfg['request_timeout_s'] if timeout_s is None else timeout_s
@@ -322,6 +326,11 @@ class Robot:
         if guard is not None and name in ('left_turn','right_turn'):
             guard.begin_turn_observation(name,self.load_kind,self.clock(),getattr(self.backend,'session',''),getattr(self.backend,'epoch',-1))
         self._complete_body_action(name,timeout)
+        if base_entry:
+            self.last_heading_report = None
+            self.transfer_index += 1
+            if self.selected_boundary_reached():raise BoundaryReached(MACRO_BOUNDARIES[self.transfer_index-1])
+            return
         entry_context=getattr(self,'_entry_forward_context',None)
         if entry_context is not None:entry_context[1].append(name)
         if guard is not None and name in ('left_turn','right_turn'):guard.finish_turn_observation(self.last_action_completed_monotonic)
@@ -345,6 +354,10 @@ class Robot:
             self.boundary_visual_observation(name)
         self.transfer_index+=1
         if self.selected_boundary_reached():raise BoundaryReached(MACRO_BOUNDARIES[self.transfer_index-1])
+
+    def base_entry_forward_action(self, name):
+        """Use a completed gate correction for the whole approach inside the base."""
+        self.action(name, base_entry=True)
 
     def entry_forward_action(self, name, *, next_action, completed_actions):
         self._entry_forward_context=(next_action,completed_actions)

@@ -810,7 +810,10 @@ def _route_notes(result):
         if short_groups:
             size = short_groups.get("max_group")
             observed = _angle_label("出发视觉航向", short_groups.get("visual_heading_deg"))
-            lines.append(" · ".join(filter(None, (f"Tag 2 → 3 每 {size} 跨复查航向", observed))))
+            groups = short_groups.get("groups")
+            grouping = ("先右跨 2 步，航向复查后连续右跨 3 步" if groups == [2, 3]
+                        else f"每 {size} 跨复查航向")
+            lines.append(" · ".join(filter(None, (f"Tag 2 → 3 {grouping}", observed))))
         hint = _as_dict(side.get("trial_lateral_hint"))
         if hint.get("tag_id") in (2,3) and side.get("status") not in ("tag3_left_bias_fused", "tag3_right_bias_fused"):
             lines.append(f"Tag 3 → 4 · 根据 Tag {hint['tag_id']} 的可信横向读数减少一步大右跨")
