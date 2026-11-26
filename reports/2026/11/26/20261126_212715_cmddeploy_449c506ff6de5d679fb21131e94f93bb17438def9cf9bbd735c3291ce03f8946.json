@@ -1,0 +1,13 @@
+{
+  "after_update": false,
+  "command": "deploy",
+  "received_at": "2026-11-26T21:27:15.286+08:00",
+  "result": {
+    "backup": "/home/lemon/.aelos_auto_r3_python.r3-b86982733eb54d4eb8a19e7a79617734/app",
+    "id": "b86982733eb54d4eb8a19e7a79617734",
+    "owner_reloaded": true,
+    "path": "/home/lemon/aelos_auto_r3_python",
+    "status": "deployed"
+  },
+  "schema": "r3.console.task-report.v1"
+}
