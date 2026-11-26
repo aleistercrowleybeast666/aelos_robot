@@ -5,6 +5,7 @@ from math import isfinite, radians, sin
 from statistics import median
 
 from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_IsFresh, VisualCameraUnavailable
+from checkpoint_alignment import Checkpoint_TrackEntryHeading
 from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
@@ -15,7 +16,7 @@ from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePo
                         RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanSideCount, RoutePose_PlanSmallSide, RoutePose_PlanTag2ForwardTrim,
                         RoutePose_PlanTag2ForwardTrial, RoutePose_PlanTag4Longitudinal, RoutePose_PlanTag5EntryLateral,
-                        RoutePose_PlanTag5Passage, RoutePose_Tag3HeadingRecovery, RoutePose_Tag4DepthOnly,
+                        RoutePose_PlanTag5Passage, RoutePose_Tag3HeadingRecovery, RoutePose_Tag3LocalHeading, RoutePose_Tag4DepthOnly,
                         RoutePose_TrialLateralHint)
 
 # Retain the result type exported to existing route extensions.
@@ -422,7 +423,7 @@ def _tag2_can_finish_three(robot, nav, leg):
 
 def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, pending_actions,
                                      expected_tag=None, *, allow_turn=True, allow_clearance_translation=True,
-                                     small_strafe_follows=False):
+                                     small_strafe_follows=False, tag3_probe_handled=False):
     """At a completed lateral boundary, check drift and recover heading where allowed."""
     load = robot.load_kind
     initial = CorridorTrial_HeadingSnapshot(report, after=False, load=load)
@@ -433,6 +434,9 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
              'error_after_strafe_deg': initial[0] if initial else None, 'drift_deg': drift,
              'residual_deg': initial[0] if initial else None, 'correction_actions': 0}
     leg.setdefault('lateral_heading_checks', []).append(check)
+    if tag3_probe_handled:
+        check['compensation_status'] = 'tag3_visual_checked_at_probe'
+        return CorridorLateralHeadingResult.PROCEED
     if not allow_turn:
         check['compensation_status'] = 'tag5_heading_monitor_only'
         return CorridorLateralHeadingResult.PROCEED
@@ -550,6 +554,8 @@ def _tag2_recheck_severe_lateral_drift(robot, nav, profile, leg, *, more_right, 
         recovery['observations'].append(window)
         floor = (observation.get('scan') or {}).get('after_ns')
         hint = RoutePose_TrialLateralHint(observation,nav.cfg,tag_id)
+        if tag_id == 3:
+            hint = RoutePose_Tag3LocalHeading(hint, observation, nav.cfg, profile)
         if (hint is None or live is None or type(stance) is not int or type(floor) is not int or floor < stance
                 or hint['latest_stamp_ns'] <= stance or robot.last_action_completed_ros_ns != stance
                 or not live(hint['latest_stamp_ns'])):
@@ -1906,6 +1912,23 @@ def _tag2_recover_heading_clearance(robot, nav, profile, leg, plan, settings, *,
         heading_clearance=True)
 
 
+def _tag2_can_turn_in_place(robot, plan, settings, live):
+    """A centered marker can leave room to turn even when a retreat would overshoot."""
+    depth = plan.get('distance_bounds_m')
+    lateral = plan.get('lateral_bounds_m')
+    spread = plan.get('max_heading_deviation_deg', float('inf'))
+    stamp = plan.get('latest_stamp_ns')
+    stance = robot.last_action_completed_ros_ns
+    if (plan.get('retreat_before_turn') or not depth or not lateral or live is None
+            or type(stance) is not int or type(stamp) is not int or not stance < stamp or not live(stamp)):
+        return False
+    near, far = settings['distance_window_m']
+    return (near + .10 <= depth[0] <= depth[1] <= far and depth[1] - depth[0] <= .025
+            and -.10 <= lateral[0] <= lateral[1] <= .10 and lateral[1] - lateral[0] <= .025
+            and 0. <= spread <= 3. and abs(plan['heading_deg']) + spread <= 35.
+            and (plan.get('projection_bounds') or (0.,))[0] >= .80)
+
+
 def _tag2_partial_reframe_plan(rows, nav, settings):
     """Use same-stance partial geometry only to choose whether and where to reobserve."""
     geometry = RoutePose_PartialCheckpointGeometry(rows, nav.cfg, 2)
@@ -2249,14 +2272,17 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                 and not (leg.get('tag2_heading_clearance') or leg.get('tag2_close_reframe'))):
             recovered = _tag2_recover_heading_clearance(robot, nav, profile, leg, current, settings,
                                                          reserved_actions=reserved_actions)
-            if recovered is None:
+            if recovered is None and not _tag2_can_turn_in_place(robot, current, settings, live):
                 check['status'] = 'heading_clearance_unconfirmed'
                 break
-            checkpoint = recovered
-            pose = _measure(robot, nav, profile, checkpoint)
-            current = RoutePose_PlanTag2ForwardTrial(checkpoint, nav.cfg, settings, candidate_counts=(2,))
-            check['after_heading_clearance'] = current
-            yaw = current.get('heading_to_correct_deg')
+            if recovered is not None:
+                checkpoint = recovered
+                pose = _measure(robot, nav, profile, checkpoint)
+                current = RoutePose_PlanTag2ForwardTrial(checkpoint, nav.cfg, settings, candidate_counts=(2,))
+                check['after_heading_clearance'] = current
+                yaw = current.get('heading_to_correct_deg')
+            else:
+                check['centered_turn_selected'] = True
         if yaw is not None and turn is not None and live(current['latest_stamp_ns']):
             correction = turn(2, yaw, current['latest_stamp_ns'], reserved_actions=reserved_actions)
             if correction is not None:
@@ -2367,14 +2393,16 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
                     and not (leg.get('tag2_heading_clearance') or leg.get('tag2_close_reframe'))):
                 observation = _tag2_recover_heading_clearance(robot, nav, profile, leg, latest, settings,
                                                                reserved_actions=reserved_actions)
-                if observation is None:
+                if observation is None and not _tag2_can_turn_in_place(robot, latest, settings, live):
                     initial['last_approach_reason_zh'] = 'Tag 2 航向偏差较大，未确认转向前的后退余量。'
                     break
-                pose = _measure(robot, nav, profile, observation)
-                latest = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings,
-                                                        candidate_counts=candidate_counts)
-                leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
-                continue
+                if observation is not None:
+                    pose = _measure(robot, nav, profile, observation)
+                    latest = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings,
+                                                            candidate_counts=candidate_counts)
+                    leg['tag2_side_hint'] = RoutePose_TrialLateralHint(observation, nav.cfg, 2)
+                    continue
+                initial['centered_turn_selected'] = True
             if latest.get('retreat_before_turn'):
                 initial['last_approach_reason_zh'] = '后退后仍未测到可转向的前后余量。'
                 break
@@ -2527,6 +2555,14 @@ def _tag2_current_visual_plan(robot, nav, checkpoint, *, continuous, candidate_c
     return plan
 
 
+def _tag3_route_hint(observation, nav, profile, *, recovery=False):
+    if recovery:
+        hint = RoutePose_Tag3HeadingRecovery(observation, nav.cfg)
+    else:
+        hint = RoutePose_TrialLateralHint(observation, nav.cfg, 3)
+    return RoutePose_Tag3LocalHeading(hint, observation, nav.cfg, profile)
+
+
 def _refresh_tag3_departure(robot, nav, profile, live):
     stance = robot.last_action_completed_ros_ns
     for attempt in range(2):
@@ -2538,9 +2574,9 @@ def _refresh_tag3_departure(robot, nav, profile, live):
         floor = (observation.get('scan') or {}).get('after_ns')
         if type(stance) is not int or type(floor) is not int or floor < stance:
             continue
-        hint = RoutePose_TrialLateralHint(observation, nav.cfg, 3)
+        hint = _tag3_route_hint(observation, nav, profile)
         if hint is None:
-            hint = RoutePose_Tag3HeadingRecovery(observation, nav.cfg)
+            hint = _tag3_route_hint(observation, nav, profile, recovery=True)
         if hint is not None and hint['latest_stamp_ns'] > stance and live(hint['latest_stamp_ns']):
             return pose, observation, hint
     return {}, {'detected': False, 'expected_id': 3, 'scan': {}}, None
@@ -2574,14 +2610,16 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
     floor = (previous_leg.get('scan') or {}).get('after_ns')
     if rebase is None or live is None or type(stance) is not int or type(floor) is not int or floor < stance:
         return None, None
-    hint = RoutePose_TrialLateralHint(previous_leg,nav.cfg,3)
+    hint = _tag3_route_hint(previous_leg, nav, profile)
     if hint is None or abs(hint.get('heading_deg', 0.)) >= _TAG3_CLEARANCE_YAW_DEG:
-        hint = RoutePose_Tag3HeadingRecovery(previous_leg, nav.cfg) or hint
+        hint = _tag3_route_hint(previous_leg, nav, profile, recovery=True) or hint
     if (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
             or not live(hint['latest_stamp_ns'])):
         return None, None
     heading = leg['departure_heading'] = {'status':'prefer_verified_tag3',
                                           'visual_error_deg':hint['heading_deg'],'correction_actions':0}
+    if 'local_zero' in hint:
+        heading['initial_local_zero'] = hint['local_zero']
     turn_from_tag = getattr(robot,'Route_TurnFromTagHeading',None)
     pose = refreshed = None
     direct_turn_fallback = False
@@ -2611,7 +2649,7 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
             if near_recovery:
                 # At the near edge the signed side step only creates room. Measure its
                 # real landing against the turn threshold before allowing any rotation.
-                landing = RoutePose_Tag3HeadingRecovery(refreshed, nav.cfg)
+                landing = _tag3_route_hint(refreshed, nav, profile, recovery=True)
                 if (landing is None or landing['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
                         or not live(landing['latest_stamp_ns']) or landing['distance_bounds_m'][0] < .10):
                     heading.update(status='turn_depth_unconfirmed_after_strafe', clearance_blocked=True)
@@ -2667,6 +2705,8 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
             and live(hint['latest_stamp_ns'])):
         heading.update(residual_deg=hint['heading_deg'],
             magnetic_reference=rebase(3,hint['heading_deg'],hint['latest_stamp_ns']).value)
+        if 'local_zero' in hint:
+            heading['local_zero'] = hint['local_zero']
     if heading['correction_actions'] and heading.get('magnetic_reference') != 'applied':
         if nav.mag.anchor is not None:
             heading['magnetic_reference'] = 'prior_route_reference_retained'
@@ -2714,25 +2754,28 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
             'magnetic_receipt_age_s': now-receipt}
 
 
-def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False):
+def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False,
+                           report_key='tag3_straight_heading'):
     """Use the current lateral-end Tag 3 for straight heading when visible."""
     turn = getattr(robot, 'Route_TurnFromTagHeading', None)
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     if turn is None or rebase is None:
         return
     checkpoint = _corridor_boundary_checkpoint(robot, nav, 3)
-    hint = RoutePose_Tag3HeadingRecovery(checkpoint, nav.cfg) if checkpoint else None
+    hint = _tag3_route_hint(checkpoint, nav, profile, recovery=True) if checkpoint else None
     if probe_once and (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
                        or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         _, observed = _refresh_checkpoint_pose(robot, nav, profile, 3, quick_id=True,
                                                reuse_settled_cache=True, advisory_windows=1)
-        hint = RoutePose_Tag3HeadingRecovery(observed, nav.cfg)
+        hint = _tag3_route_hint(observed, nav, profile, recovery=True)
     if (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
             or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         return
     yaw = hint['heading_deg']
     stamp = hint['latest_stamp_ns']
-    info = leg['tag3_straight_heading'] = {'before_error_deg': yaw, 'stamp_ns': stamp}
+    info = leg[report_key] = {'before_error_deg': yaw, 'stamp_ns': stamp}
+    if 'local_zero' in hint:
+        info['initial_local_zero'] = hint['local_zero']
     peripheral = _tag3_peripheral_heading(robot, nav, leg, hint)
     if peripheral is not None:
         info.update(peripheral, magnetic_reference='prior_tag3_reference_retained',
@@ -2743,7 +2786,7 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
         info['turn'] = step
         _, fresh = _refresh_checkpoint_pose(robot, nav, profile, 3, boundary_first=True,
                                             quick_id=True, reuse_settled_cache=True, advisory_windows=1)
-        hint = RoutePose_Tag3HeadingRecovery(fresh, nav.cfg)
+        hint = _tag3_route_hint(fresh, nav, profile, recovery=True)
         if (hint is None or hint['latest_stamp_ns'] <= max(stamp, robot.last_action_completed_ros_ns)
                 or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
             info['post_turn_pose_confirmed'] = False
@@ -2752,6 +2795,8 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
     yaw = hint['heading_deg']
     info.update(residual_deg=yaw, residual_stamp_ns=hint['latest_stamp_ns'],
                 magnetic_reference=rebase(3, yaw, hint['latest_stamp_ns']).value)
+    if 'local_zero' in hint:
+        info['local_zero'] = hint['local_zero']
     return hint
 
 
@@ -3016,7 +3061,7 @@ def _tag5_small_strafe_feedback(before, after, operation, settings):
             'before_stamp_ns': before['latest_stamp_ns'], 'after_stamp_ns': after['latest_stamp_ns']}
 
 
-def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False):
+def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False, competition=False):
     """Check a single two-step retreat from the existing outside stance."""
     if not plan['geometry_valid'] or plan.get('entering'):
         return False
@@ -3026,7 +3071,8 @@ def _tag5_retreat_clearance(plan, settings, *, stalled_small_step=False):
     min_depth, max_depth = settings.get('passage_depth_window_m', (.075, .45))
     if (depth is None or lateral is None or yaw is None
             or not min_depth <= depth[0] <= depth[1] < _TAG5_OUTSIDE_RECOVERY_DEPTH_M
-            or depth[1] + _TAG5_RETREAT_TRAVEL_UPPER_M > max_depth or abs(yaw) > 25.):
+            or depth[1] + _TAG5_RETREAT_TRAVEL_UPPER_M > max_depth
+            or abs(yaw) > (45. if competition and _tag5_has_heading_bounds(plan) else 25.)):
         return False
     measured = _tag5_has_heading_bounds(plan)
     heading_bounds = plan['heading_bounds_deg'] if measured else (-yaw, yaw)
@@ -3052,7 +3098,7 @@ def _tag5_heading_clearance(robot, nav, plan, settings):
     yaw = plan.get('heading_deg')
     spread = plan.get('max_abs_heading_deg')
     if (not plan['geometry_valid'] or bounds is None or depth is None or yaw is None or spread is None
-            or not settings.get('max_heading_deg', 12.) < abs(yaw) <= 35.):
+            or not settings.get('max_heading_deg', 12.) < abs(yaw) <= _tag5_turn_range(robot, depth)):
         return None
     goal = next((point for point in nav.cfg['legs']['outbound'] if point['id'] == 5), {})
     live = VisualCamera_GetFreshnessCheck(nav.io)
@@ -3238,7 +3284,8 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
             last_side = operation, error, plan
             idle_windows = 0
         elif ('entry_retreat' not in alignment and alignment.get('entry_retreat_available', True)
-              and _tag5_retreat_clearance(plan,settings,stalled_small_step=stalled_small_step)
+              and _tag5_retreat_clearance(plan,settings,stalled_small_step=stalled_small_step,
+                    competition=robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True)
               and robot.count + reserve + 1 + extra_retreat_macros <= robot.cfg['max_body_macros_per_journey']):
             retreat = {'operation':'cmd0_carry_backward2','completed_steps':0,
                        'reason_zh':'Tag 5 门前纠偏余量不足，先退两步拉开距离，再用新位姿对门。'}
@@ -3307,11 +3354,20 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                                                    reuse_settled_cache=idle_windows == 0, quick_id=True)
 
 
+def _tag5_turn_range(robot, depth):
+    # A single, measured micro turn can reduce a larger yaw when the entire
+    # observed marker depth is still outside the entrance.
+    if (robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
+            and depth and depth[0] >= _TAG5_OUTSIDE_RECOVERY_DEPTH_M):
+        return 55.
+    return 35.
+
+
 def _try_tag5_visual_turn(robot, plan, turns, *, reserved_actions, settings=None, translations=0, last_stance=None):
     turn = getattr(robot, 'Corridor_TurnAtTag5', None)
     if (turn is None or not plan['geometry_valid']
             or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']
-            or not 12. < abs(plan['heading_deg']) <= 35.):
+            or not 12. < abs(plan['heading_deg']) <= _tag5_turn_range(robot, plan.get('depth_bounds_m'))):
         return False
     yaw = plan['heading_deg']
     depth = plan['depth_bounds_m'][0]
@@ -3382,10 +3438,12 @@ def _tag5_continuous_entry(robot, nav, settings, plan):
             'reason_zh': 'Tag 5 新位姿确认整段进场有余量，合并为连续前进 8 步。'}
 
 
-def _tag5_native_groups(steps, pair_ops=None):
+def _tag5_native_groups(steps, pair_ops=None, *, max_group_steps=None):
     """Fewest acknowledged native gaits adding up to exactly the remaining distance."""
     choices = ((15,'cmd0_carry_forward15'), (10,'cmd0_carry_forward10'), (8,'carry_forward'),
                (5,'cmd0_carry_forward5'), (4,'carry_forward4'), (2,'carry_forward2'))
+    if max_group_steps is not None:
+        choices = tuple((count, op) for count, op in choices if count <= max_group_steps)
     if pair_ops is not None:
         choices = tuple((count, op) for count, op in choices if 'double_' + op in pair_ops)
     plans = [()] + [None] * steps
@@ -3561,6 +3619,23 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 detail = tag4_trim.get('retreat_reason_zh', 'Tag 4 进近复查后仍未确认左跨起点。')
                 if not resume_nominal(4, detail):
                     return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, detail)
+                issue = _tag4_observed_clearance_problem(tag4_trim, nav) or leg.get('tag4_forward_disruption') or {}
+                yaw = issue.get('heading_error_deg')
+                if type(yaw) in (float, int) and abs(yaw) >= _TAG4_CLEARANCE_YAW_DEG:
+                    cautious = leg['tag4_cautious_left_start'] = {'heading_deg': yaw,
+                        'reason_zh': 'Tag 4 让位纠偏后尚未确认已回正，先检查航向，再单跨一步。'}
+                    stamp = tag4_trim.get('latest_stamp_ns')
+                    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+                    live = VisualCamera_GetFreshnessCheck(nav.io)
+                    if (rebase is not None and live is not None and type(stamp) is int
+                            and tag4_trim.get('heading_authority') not in ('prior_route_reference', 'current_tag3')
+                            and tag4_trim.get('heading_deg') == yaw
+                            and _tag4_observed_clearance_problem(tag4_trim, nav) and live(stamp)):
+                        cautious['magnetic_reference'] = rebase(4, yaw, stamp).value
+                        cautious['outside_for_turn'] = (
+                            tag4_trim['distance_bounds_m'][0] >= tag4_departure.get('target_distance_m', .175)
+                            and max(map(abs, tag4_trim['lateral_bounds_m'])) <= .12
+                            and tag4_trim.get('projection_bounds', (0.,))[0] >= .75)
                 pose = {}
             if tag4_trim.get('depth_confirmed') or tag4_trim.get('approach_confirmed'):
                 leg.update(departure_tag_confirmed=True,last_confirmed_tag=4)
@@ -3574,10 +3649,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 reserved_actions=required_macros[name]+after_leg)
             if refreshed_pose is not None:
                 pose = refreshed_pose
-            if ((leg.get('departure_heading') or {}).get('clearance_blocked')
-                    and not resume_nominal(3, '已尝试恢复 Tag 3 航向，保留名义右跨。')):
-                return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
-                                  'Tag 3 大偏航恢复后未确认右跨余量，保留持物。')
+            if (leg.get('departure_heading') or {}).get('clearance_blocked'):
+                if not resume_nominal(3, 'Tag 3 大偏航尚未恢复，先右跨一步，在新站姿复查。'):
+                    return set_status(CorridorTrialResult.DEPARTURE_UNSAFE,
+                                      'Tag 3 大偏航恢复后未确认右跨余量，保留持物。')
+                leg['tag3_clearance_probe'] = {'first_group': 1}
         if tag2_trial_plan is not None:
             leg['departure_heading'] = {'status': 'prefer_verified_tag2',
                                         'visual_error_deg': tag2_trial_plan['heading_deg'], 'correction_actions': 0}
@@ -3586,7 +3662,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 and nav.cfg['post_action_heading'].get('execute')
                 and not getattr(robot, 'magnetic_route_only', False)):
             robot.last_heading_report = None
-            if use_tag5_passage and expected_id == 5:
+            cautious_left = leg.get('tag4_cautious_left_start') or {}
+            if (use_tag5_passage and expected_id == 5 and
+                    not (cautious_left.get('magnetic_reference') == 'applied' and cautious_left.get('outside_for_turn'))):
                 robot.monitor_heading('corridor_departure', allow_correction=False)
             else:
                 robot.monitor_heading('corridor_departure')
@@ -3845,7 +3923,13 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 # A single closed stride gives the first feedback boundary sooner.
                 actions = (op, *CorridorTrial_GroupStrafes(op, count - 1, continuous=continuous, monitor_every=2))
                 leg['tag2_cautious_strafes']['first_group'] = 1
-            if previous_id == 4 and index == 0 and op == 'strafe_left_once' and leg.get('tag4_near_left_start'):
+            if index == 0 and op == 'strafe_right_once' and count and 'tag3_clearance_probe' in leg:
+                remainder = CorridorTrial_GroupStrafes(op, count-1, continuous=continuous,
+                                                       monitor_every=min(2, monitor_every or 2))
+                actions = (op, *remainder)
+                leg['tag3_clearance_probe']['scheduled_large_steps'] = count
+            if (previous_id == 4 and index == 0 and op == 'strafe_left_once'
+                    and (leg.get('tag4_near_left_start') or leg.get('tag4_cautious_left_start'))):
                 actions = (op, *CorridorTrial_GroupStrafes(op, count - 1, continuous=continuous, monitor_every=2))
             planned.append((op, actions, small, restore_large_step))
         pending_actions = sum(len(actions) + bool(small) for _, actions, small, _ in planned)
@@ -4181,13 +4265,23 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                             and action_index == len(actions) - 1
                                             and small == 'single_small_strafe_right' and small_ready is not None
                                             and not getattr(robot, 'magnetic_route_only', False) and small_ready())
+                    probe = leg.get('tag3_clearance_probe') if index == action_index == 0 else None
+                    magnetic_report = robot.last_heading_report or {}
+                    visual_checked = False
+                    if probe is not None and op == 'strafe_right_once':
+                        _tag3_straight_heading(robot, nav, profile, leg, reserved_actions=pending_actions + after_leg,
+                                               report_key='tag3_probe_heading')
+                        visual = leg.get('tag3_probe_heading') or {}
+                        visual_checked = bool(visual.get('turn') or visual.get('magnetic_reference') in
+                                              ('applied', 'prior_tag3_reference_retained'))
+                        probe['heading_source'] = 'tag3_visual' if visual_checked else 'post_strafe_magnetic'
                     heading_result = CorridorTrial_CheckLateralHeading(robot, nav, action, before,
-                        robot.last_heading_report or {}, leg, pending_actions + after_leg,
+                        magnetic_report, leg, pending_actions + after_leg,
                         expected_id if is_boundary else None,
                         allow_turn=not gate_approach or (not is_boundary and
                                                         (midpoint is None or not midpoint['geometry_valid'])),
                         allow_clearance_translation=not gate_approach and not steps[index].get('left_bias_stride_m'),
-                        small_strafe_follows=small_strafe_follows)
+                        small_strafe_follows=small_strafe_follows, tag3_probe_handled=visual_checked)
                     if heading_result is CorridorLateralHeadingResult.DEFERRED_TO_SMALL_STRAFE:
                         deferred_side_heading = leg['lateral_heading_checks'][-1]
                     if (join_tag2_tail and action_index == 0 and heading_result is CorridorLateralHeadingResult.PROCEED
@@ -4481,12 +4575,43 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         drive = getattr(robot, 'base_entry_forward_action', None)
         if drive is None:
             drive = robot.action
+        unresolved_heading = (alignment.get('current_visual_heading') or {}).get('error_deg') if use_tag5_passage else None
+        disturbed = (aligned is None and type(unresolved_heading) in (float, int)
+                     and abs(unresolved_heading) > tag5_alignment.get('max_heading_deg', 12.))
+        if disturbed:
+            remaining = Cmd0Motion_ForwardStepCount(base_actions)
+            slots = robot.cfg['max_body_macros_per_journey'] - robot.count - 1
+            for maximum in (2, 4, 5):
+                short = _tag5_native_groups(remaining, pair_ops, max_group_steps=maximum)
+                if short and len(short) <= slots:
+                    break
+            else:
+                return set_status(CorridorTrialResult.ROUTE_UNAVAILABLE,
+                    'Tag 5 偏航仍大，当前 MCU 回执或剩余动作额度不足以执行短步进场。')
+            base_actions = short
+            cautious = delivery['tag5_cautious_entry'] = {'last_visual_error_deg': unresolved_heading,
+                'heading_checks': [], 'reason_zh': 'Tag 5 入口仍有已观测的偏航，按短段进场并在段间校向。'}
+            monitor = getattr(robot, 'monitor_heading', None)
+            tag_target = entry_reference == 'applied'
+            relative_target = not tag_target and Checkpoint_TrackEntryHeading(robot, nav).value == 'applied'
+            cautious['magnetic_basis'] = 'current_tag5' if tag_target else 'relative_drift' if relative_target else 'unavailable'
+            def check_entry_heading(pending, may_turn):
+                if monitor is not None:
+                    monitor('corridor_departure', allow_correction=may_turn and (tag_target or relative_target),
+                            reserved_route_actions=pending + 1)
+                    cautious['heading_checks'].append(getattr(robot, 'last_heading_report', None))
+            last_pose = (alignment.get('observations') or [{}])[-1]
+            outside = (last_pose.get('geometry_valid') and last_pose.get('depth_bounds_m', (0.,))[0]
+                       >= _TAG5_OUTSIDE_RECOVERY_DEPTH_M)
+            check_entry_heading(len(base_actions), bool(outside and tag_target))
         delivery['entry_plan'] = {'steps': Cmd0Motion_ForwardStepCount(base_actions), 'actions': list(base_actions),
                                   'visual_aligned': aligned is not None}
-        for action in base_actions:
+        for index, action in enumerate(base_actions):
             robot.check()
             drive(action)
             delivery['completed_actions'].append(action)
+            if disturbed and index + 1 < len(base_actions):
+                check_entry_heading(len(base_actions) - index - 1, True)
     else:
         for index, action in enumerate(base_actions):
             if index:

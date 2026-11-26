@@ -64,6 +64,23 @@ def validate(cfg):
             raise ValueError('turn directions must oppose')
 
 
+def _attach_heading_history(exc, name, reports):
+    failed = getattr(exc, 'report', None)
+    if failed is None:
+        if isinstance(exc, MicroTrialStopped):
+            failed = dict(status='correction_locked', action=name, reason=str(exc), correction_actions=0)
+        else:
+            failed = dict(status='correction_interrupted', action=name, reason=str(exc), correction_actions=0,
+                          reason_zh='当前航向检查中断，最终姿态待确认。')
+    if getattr(exc, 'error_details', None):
+        failed.update(exc.error_details)
+    if reports and 'correction_steps' not in failed:
+        steps = [*reports, dict(failed)]
+        failed = dict(failed, correction_steps=steps,
+                      correction_actions=sum(step.get('correction_actions', 0) for step in steps))
+    exc.report = failed
+
+
 class MicroTrialStopped(RuntimeError):
     pass
 
@@ -1063,15 +1080,8 @@ class HeadingGuard:
                     report['stationary_recheck']={'first_error_deg':first['error_deg'],'reason':first.get('reason')}
                     self._allow_short_transfer_segment(first,report)
                     self._allow_entry_followup(first,report,entry_followup)
-            except MicroTrialStopped as exc:
-                if exc.report is None:
-                    exc.report=dict(status='correction_locked',action=name,reason=str(exc),correction_actions=0)
-                if getattr(exc,'error_details',None):
-                    exc.report.update(exc.error_details)
-                if reports:
-                    failed=copy.deepcopy(exc.report)
-                    exc.report['correction_steps']=reports+[failed]
-                    exc.report['correction_actions']=sum(r.get('correction_actions',0) for r in reports)+failed.get('correction_actions',0)
+            except Exception as exc:
+                _attach_heading_history(exc, name, reports)
                 raise
             reports.append(report)
             if report.get('correction_actions',0)!=1:break
@@ -1097,9 +1107,13 @@ class HeadingGuard:
                           or (name in CORRIDOR_HEADING_ACTIONS and self._allow_corridor_heading_followup(last,load)))
             if residual is None or (abs(residual)>self.c['deadband_deg'] and not continuation):
                 if not self._allow_configured_carry_followup(last,entry_followup,load):
-                    recovered = self._wait_carry_boundary(name, load, correct, reports, count,
-                        entry_followup=entry_followup,excluded_turns=excluded_turns,
-                        tag2_clearance_on_worsening=tag2_clearance_on_worsening,prefer_visual_followup=prefer_visual_followup)
+                    try:
+                        recovered = self._wait_carry_boundary(name, load, correct, reports, count,
+                            entry_followup=entry_followup,excluded_turns=excluded_turns,
+                            tag2_clearance_on_worsening=tag2_clearance_on_worsening,prefer_visual_followup=prefer_visual_followup)
+                    except Exception as exc:
+                        _attach_heading_history(exc, name, reports)
+                        raise
                     if recovered is not None:
                         return recovered
                     if not self._retain_route_heading_residual(name,load,last,entry_followup):
@@ -1138,14 +1152,36 @@ class HeadingGuard:
 
     def _after_action_once(self, name, load, correct, allow_correction=True, sample_override=None,action_completed_monotonic=None,
                            *,excluded_turns=None,prefer_visual_followup=None):
-        """Exactly one optional finite turn. Its verification is sampled, not recursively hooked."""
+        """Preserve this step's evidence even when the backend interrupts a turn or its measurement."""
+        report = {'status': 'monitor_only', 'action': name, 'correction_actions': 0}
+        try:
+            return self._observe_and_correct(report, name, load, correct, allow_correction, sample_override,
+                action_completed_monotonic, excluded_turns=excluded_turns, prefer_visual_followup=prefer_visual_followup)
+        except MicroTrialStopped:
+            raise  # These errors already carry sensor-specific diagnostics.
+        except Exception as exc:
+            if getattr(exc, 'report', None) is None:
+                if 'requested_correction' in report and not report['correction_actions']:
+                    report.update(correction=report['requested_correction'],
+                                  reason_zh='此次纠偏动作未确认完成，最终姿态待确认。')
+                elif report['correction_actions'] and 'after_error_deg' not in report:
+                    report['reason_zh'] = '已收到纠偏动作完成回执，转后航向未确认。'
+                else:
+                    report['reason_zh'] = '当前航向检查中断，已保留本次实测记录。'
+                exc.report = dict(report, status='correction_interrupted', reason=str(exc))
+                if 'requested_correction' in report:
+                    exc.report['correction_completion_confirmed'] = bool(report['correction_actions'])
+            raise
+
+    def _observe_and_correct(self, report, name, load, correct, allow_correction, sample_override,
+                             action_completed_monotonic, *, excluded_turns, prefer_visual_followup):
         if sample_override is None and name=='planned_turn_complete' and self._confirmed_coarse_response is not None:
             completed,result,confirmed=self._confirmed_coarse_response
             self._confirmed_coarse_response=None
             if completed==action_completed_monotonic and not self._target_observation_faults(confirmed,load):
                 sample_override=result,confirmed
         result, sample = sample_override if sample_override is not None else self.sample(load,action_completed_monotonic=action_completed_monotonic)
-        report = {'status': 'monitor_only', 'action': name, 'sample': result, 'correction_actions': 0}
+        report['sample'] = result
         anchor = self.reference.anchor
         recovery=self.boundary_recovery_enabled(name,load) and allow_correction
         route_feedback=self._uses_route_feedback(name,load)
@@ -1378,6 +1414,7 @@ class HeadingGuard:
                 report['budget']=self.budget.status()
                 return report
             turn_started=self.clock()
+            report['requested_correction'] = chosen
             accepted=correct(chosen)
             turn_completed=self.clock()
         finally:self.pending_decision=None

@@ -2,12 +2,12 @@
 
 import json
 from enum import Enum
-from math import atan2, degrees, radians, sin, tan
+from math import acos, atan2, degrees, radians, sin, sqrt, tan
 from pathlib import Path
 from statistics import median
 
 from cmd0_motion import COMMAND0_ENTRY_FORWARD_STEPS, SMALL_SIDE_ACTIONS
-from entry_camera import finite
+from entry_camera import finite, rotate
 from nav_observation import Observation_DistinctTagRows, circular_median, ground_pose, summarize, wrap
 from pixel_diagnostics import load_entrance_reference
 
@@ -55,9 +55,26 @@ def RoutePose_Load(project):
         profile = json.loads((Path(project) / 'config' / 'route_pose.json').read_text(encoding='utf-8'))
         if profile['schema'] != _SCHEMA or not isinstance(profile['outbound'], dict):
             raise ValueError('unsupported route pose schema')
-        return dict(profile, pose_template=template, config_status='loaded')
+        profile = dict(profile, pose_template=template, config_status='loaded')
     except (OSError, KeyError, ValueError, TypeError):
-        return {'outbound': {}, 'pose_template': template, 'config_status': 'missing_or_invalid'}
+        profile = {'outbound': {}, 'pose_template': template, 'config_status': 'missing_or_invalid'}
+    try:
+        local = json.loads((Path(project) / 'config' / 'tag3_outbound_heading.json').read_text(encoding='utf-8'))
+        if (local['schema'] == 'r3.tag3-outbound-heading.v1' and local['reference_frame'] == '/map'
+                and local.get('topic') == '/chest/ar_pose_marker'
+                and local.get('publisher') == '/chest/ar_track_alvar'
+                and isinstance(local.get('camera_fingerprint'), str) and len(local['camera_fingerprint']) == 64
+                and type(local['use_raw_chest_distortion']) is bool
+                and finite(local['reference_heading_deg']) and abs(local['reference_heading_deg']) <= 8.
+                and all(len(local[key]) == 3 and all(map(finite,local[key])) for key in
+                        ('reference_position_m','reference_tag_normal','support_radii_m'))
+                and all(0. < r <= .25 for r in local['support_radii_m'])
+                and abs(sum(v*v for v in local['reference_tag_normal']) - 1.) < .001
+                and all(finite(local[key]) and 0. < local[key] <= 45. for key in ('support_normal_deg','support_heading_deg'))):
+            profile['tag3_local_heading'] = local
+    except (OSError, KeyError, TypeError, ValueError):
+        pass
+    return profile
 
 
 def _tag_profile(profile, tag_id, direction='outbound'):
@@ -491,6 +508,47 @@ def RoutePose_TrialLateralHint(checkpoint, nav_cfg, tag_id):
 def RoutePose_Tag3HeadingRecovery(checkpoint, nav_cfg):
     """Keep a wider, coherent Tag 3 pose only for one clearance recovery."""
     return _trial_lateral_evidence(checkpoint, nav_cfg, 3, yaw_limit=30.)
+
+
+def RoutePose_Tag3LocalHeading(hint, checkpoint, nav_cfg, profile):
+    """Express outbound Tag 3 yaw relative to the operator-taught zero near that view only."""
+    local = profile.get('tag3_local_heading') if profile else None
+    if (not hint or not local or 'local_zero' in hint or hint.get('tag_id', 3) != 3
+            or checkpoint.get('direction', 'outbound') != 'outbound'):
+        return hint
+    camera = checkpoint.get('camera_info') or {}
+    contract = nav_cfg['pose_contract']
+    if (camera.get('use_raw_chest_distortion') is not local['use_raw_chest_distortion']
+            or camera.get('fingerprint') != local.get('camera_fingerprint')
+            or contract.get('publisher') != local.get('publisher') or nav_cfg.get('topic') != local.get('topic')
+            or contract.get('tag_forward') != '+y' or contract.get('tag_up_sign') != 1):
+        return hint
+    rows, poses, problem = _trial_ground_samples(checkpoint, nav_cfg, 3)
+    if problem or max(rows) != hint['latest_stamp_ns']:
+        return hint
+    xyz = [median(row['position_raw_m'][k] for row in rows.values()) for k in 'xyz']
+    normals = [rotate([row['quaternion_raw'][k] for k in 'xyzw'], (0.,0.,1.)) for row in rows.values()]
+    normal = [median(values) for values in zip(*normals)]
+    reference = local['reference_tag_normal']
+    dot = sum(a*b for a,b in zip(reference, normal))
+    scale = sqrt(sum(a*a for a in reference) * sum(b*b for b in normal))
+    angle = degrees(acos(max(-1.,min(1.,dot/scale)))) if scale > 1e-8 else 180.
+    raw = hint['heading_deg']
+    distance = sqrt(sum(((x-c)/r)**2 for x,c,r in zip(xyz, local['reference_position_m'], local['support_radii_m'])))
+    radius = max(distance, angle/local['support_normal_deg'],
+                 abs(wrap(raw-local['reference_heading_deg']))/local['support_heading_deg'])
+    # A small plateau covers the natural scatter within the taught three-frame window.
+    fraction = max(0., min(1., (radius-.02)/.98))
+    weight = (1.-fraction)**2 * (1.+2.*fraction)
+    bias = weight * local['reference_heading_deg']
+    corrected = wrap(raw-bias)
+    audit = {'raw_heading_deg':raw, 'applied_bias_deg':bias, 'corrected_heading_deg':corrected,
+             'weight':weight, 'position_m':xyz, 'normal_difference_deg':angle,
+             'reference_report':local.get('source_report')}
+    result = dict(hint, heading_deg=corrected, local_zero=audit)
+    if 'max_abs_yaw_deg' in result:
+        result['max_abs_yaw_deg'] = max(abs(wrap(p['heading_deg']-bias)) for p in poses)
+    return result
 
 
 def _trial_lateral_evidence(checkpoint, nav_cfg, tag_id, *, yaw_limit):

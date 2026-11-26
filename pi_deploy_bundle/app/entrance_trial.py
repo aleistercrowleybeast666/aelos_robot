@@ -80,6 +80,39 @@ def EntranceTrial_PlanForward(target_steps, *, continuous, legacy):
     return tuple(segments(planned_steps, 'single')), planned_steps
 
 
+def _tag1_unresolved_entry_heading(original, current, recovery, deadband, completed_ns):
+    initial = (original or {}).get('decision_fusion') or {}
+    initial_error = initial.get('error_deg') if EntranceTrial_IsEntryAccepted(original) else None
+    large = any(type(yaw) in (int, float) and isfinite(yaw) and abs(yaw) >= TAG1_CLEARANCE_YAW_DEG
+                for yaw in (initial_error, recovery.get('initial_heading_deg')))
+    if not large:
+        return False
+    if not EntranceTrial_IsEntryAccepted(current):
+        return True
+    stamp = current['scan'].get('latest_stamp_ns')
+    yaw = (current.get('decision_fusion') or {}).get('error_deg')
+    return not (type(stamp) is int and type(completed_ns) is int and stamp > completed_ns
+                and type(yaw) in (int, float) and isfinite(yaw) and abs(yaw) <= deadband)
+
+
+def _tag1_short_start_actions(operations, continuous, available):
+    """Start with two steps. Retain the exact distance and existing MCU capability."""
+    steps = Cmd0Motion_ForwardStepCount(operations)
+    odd_tail = ()
+    if steps % 2:
+        odd_tail = ('cmd0_carry_forward5',) if continuous else ('carry_forward7',)
+    even = steps - Cmd0Motion_ForwardStepCount(odd_tail)
+    if even < 2:
+        return operations
+    fours, twos = divmod(even-2, 4)
+    tail = ('carry_forward4',)*fours + ('carry_forward2',)*(twos//2) + odd_tail
+    if 1+len(tail) > available:
+        # Consolidate only the remaining path if the journey has few slots.
+        eights, rest = divmod(even-2, 8)
+        tail = ('carry_forward',)*eights + ('carry_forward4',)*(rest//4) + ('carry_forward2',)*((rest%4)//2) + odd_tail
+    return ('carry_forward2',) + tail
+
+
 def _tag1_recovery_geometry(robot, nav, scan):
     """Return current Tag 1 geometry when the signed position is consistent."""
     stance = robot.last_action_completed_ros_ns
@@ -178,9 +211,21 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
         return alignment
     recovery = {'initial_heading_deg': error, 'reobservations': []}
     result['tag1_heading_recovery'] = recovery
-    if abs(error) >= TAG1_CLEARANCE_YAW_DEG:
-        side = getattr(robot, 'corridor_side_action', None)
+    needs_clearance_check = abs(error) >= TAG1_CLEARANCE_YAW_DEG
+    centered = False
+    if needs_clearance_check:
         geometry = _tag1_recovery_geometry(robot, nav, alignment['scan'])
+        if geometry is not None:
+            left, right = geometry['lateral_bounds_m']
+            near, far = geometry['distance_bounds_m']
+            depth_min, depth_max = _TAG1_CLEARANCE_DEPTH_M
+            centered = (-_TAG1_CLEARANCE_SIDE_M <= left <= right <= _TAG1_CLEARANCE_SIDE_M
+                        and depth_min <= near <= far <= depth_max)
+            if centered:
+                recovery['centered_turn_geometry'] = geometry
+                recovery['reason_zh'] = 'Tag 1 横向与前后位置均在原地转向范围内，先按视觉航向转正。'
+    if needs_clearance_check and not centered:
+        side = getattr(robot, 'corridor_side_action', None)
         operation = (_tag1_clearance_strafe(geometry) if geometry is not None and side is not None
                      and goal.get('allow_strafe') is True else None)
         if (operation is None or robot.count+reserved_actions+2 > robot.cfg['max_body_macros_per_journey']
@@ -220,13 +265,15 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
                     and not (0 <= low_after <= high_after < low and gain >= max(.002, spread))):
                 recovery['reason_zh'] = 'Tag 1 让位后仍偏航较大，新画面未能区分横偏改善和帧间波动，保留视觉余差。'
                 return alignment
-    if abs(error) > deadband and (not already_turned or 'clearance_action' in recovery):
+    if abs(error) > deadband and (not already_turned or 'clearance_action' in recovery or centered):
         correction = turn(1, error, stamp, reserved_actions=reserved_actions)
         if correction is not None:
             recovery['visual_turn'] = correction
             alignment = _tag1_observe_after_recovery(robot, nav, goal, recovery)
             if alignment is not None:
                 correction['after_error_deg'] = alignment['error_deg']
+        elif centered:
+            recovery['reason_zh'] = 'Tag 1 可原地转向，但本次未发出微转，保留实测余差并先走短段。'
     return alignment
 
 
@@ -560,6 +607,11 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         if grouped and robot.count+len(grouped) <= robot.cfg['max_body_macros_per_journey']:
             operations = grouped
             result['entry_forward_grouping'] = list(grouped)
+    if _tag1_unresolved_entry_heading(original_alignment, entry_alignment, result.get('tag1_heading_recovery') or {},
+                                      nav.cfg.get('visual_micro', {}).get('deadband_deg', 8.), robot.last_action_completed_ros_ns):
+        operations = _tag1_short_start_actions(operations, continuous, robot.cfg['max_body_macros_per_journey']-robot.count)
+        result['entry_forward_grouping'] = list(operations)
+        result['entry_heading_grouping_reason_zh'] = 'Tag 1 大偏航尚未确认转正，先走短段并在动作回执处检查当前航向。'
     result['initial_estimated_steps'] = result['planned_steps']
     set_status(CheckpointScanResult.MOVING_TO_CHECKPOINT, 'executing estimated Tag 1 to Tag 2 segment')
     _report_progress(robot, 'cmd0_next_leg', result)

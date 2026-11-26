@@ -40,6 +40,13 @@ class RosNavigationIO:
         try:
             self.parameters_ok=get_param('/chest/ar_track_alvar/output_frame',None)==cfg['pose_contract']['frame'] and float(get_param('/chest/ar_track_alvar/marker_size',-1))==cfg['pose_contract']['marker_size_cm']
         except Exception:self.parameters_ok=False
+        # The stock solver and the optional raw-pixel solver share a CameraInfo.
+        # Read their private switch once per navigation IO, outside the frame callback.
+        try:
+            mode=get_param('/chest/ar_track_alvar/use_raw_chest_distortion',False)
+            self.use_raw_chest_distortion=mode if type(mode) is bool else None
+        except Exception:
+            self.use_raw_chest_distortion=None
         try:
             self.subs.append(subscribe('ar',self.on_ar))
             health=cfg.get('camera_health',{})
@@ -80,7 +87,8 @@ class RosNavigationIO:
     def visual_camera_status(self):
         with self.lock:
             c=self.cfg.get('visual_micro',{}).get('camera_info')
-            return camera_status(self.latest_camera_info,self.latest_image_metadata,c,self.clock()) if c else {'ready':False,'reason':'not configured'}
+            status=camera_status(self.latest_camera_info,self.latest_image_metadata,c,self.clock()) if c else {'ready':False,'reason':'not configured'}
+            return dict(status,use_raw_chest_distortion=self.use_raw_chest_distortion)
 
     def preflight_health_snapshot(self):
         """Read source and stream health together at a pre-motion boundary."""

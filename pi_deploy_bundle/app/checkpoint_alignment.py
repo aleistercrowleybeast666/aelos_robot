@@ -66,7 +66,10 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     if abs(abs(error)-selection_response)>abs(error)-improvement:
         return None
     timeout=robot.cfg['request_timeout_s']
-    route_feedback = tag_id in (2, 3, 4) and robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
+    stance = getattr(robot, 'last_action_completed_ros_ns', None)
+    current_stance = type(stance) is int and type(observed_at_ns) is int and observed_at_ns > stance
+    route_feedback = (robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
+                      and (tag_id in (2, 3, 4) or current_stance))
     if (robot.count+reserved_actions+1>robot.cfg['max_body_macros_per_journey']
             or (not route_feedback and robot.nav_count>=cfg['max_extra_actions_per_journey'])
             or robot.deadline-robot.clock()<=timeout+cfg['settle_s']+cfg['observe_s']):
@@ -75,8 +78,7 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     checker=getattr(robot.backend,'check_micro',None)
     live=VisualCamera_GetFreshnessCheck(nav.io)
     if (checker is None or live is None or type(observed_at_ns) is not int
-            or (tag_id in (2, 3, 4) and type(robot.last_action_completed_ros_ns) is int
-                and observed_at_ns <= robot.last_action_completed_ros_ns)):
+            or (type(stance) is int and observed_at_ns <= stance)):
         return None
     checker()
     if not live(observed_at_ns) or not robot.micro_budget().reserve(
@@ -287,8 +289,9 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
         # is usable if the pre/post yaw intervals no longer overlap.
         progress = previous is None or (previous['error_deg']*error > 0 and stamp > previous['latest_stamp_ns']
             and abs(previous['error_deg']) - abs(error) > min(3., previous['spread_deg'] + reading['spread_deg']))
+        route_feedback = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
         if (attempt == 2 or not progress or goal.get('allow_turn') is not True
-                or robot.nav_count >= nav.cfg['max_extra_actions_per_journey']
+                or (not route_feedback and robot.nav_count >= nav.cfg['max_extra_actions_per_journey'])
                 or robot.count >= robot.cfg['max_body_macros_per_journey']):
             heading['status'] = 'retain_measured_residual'
             return

@@ -1,0 +1,16 @@
+{
+  "schema": "r3.tag3-outbound-heading.v1",
+  "source_report": "20261126_212845_104029_cmdscan_78549423.json",
+  "reference_load": "not_reported",
+  "reference_frame": "/map",
+  "camera_fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+  "topic": "/chest/ar_pose_marker",
+  "publisher": "/chest/ar_track_alvar",
+  "use_raw_chest_distortion": false,
+  "reference_heading_deg": -2.628169675325779,
+  "reference_position_m": [0.1868176267718221, 0.25962366931273617, -0.053281069234340284],
+  "reference_tag_normal": [-0.046973498947739056, 0.06290726383664225, 0.9969480055288467],
+  "support_radii_m": [0.07, 0.09, 0.045],
+  "support_normal_deg": 8,
+  "support_heading_deg": 25
+}
