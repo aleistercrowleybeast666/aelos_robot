@@ -1,0 +1,391 @@
+{
+  "after_update": false,
+  "command": "scan",
+  "received_at": "2026-11-26T21:30:09.814+08:00",
+  "result": {
+    "UART_used": false,
+    "accepted": false,
+    "begin_sent": false,
+    "body_commands": 0,
+    "capture_history": [
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 236716423,
+            "secs": 1794230473,
+            "seq": 1819,
+            "stamp_ns": 1794230473236716423,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 236716423,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473236716423,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 4,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.182598817138276,
+          "y": -0.013819663905171056,
+          "z": -0.04626946014735678
+        },
+        "quaternion_raw": {
+          "w": 0.6753100820840191,
+          "x": 0.015921728373650534,
+          "y": -0.07706577323314949,
+          "z": -0.7333237062834176
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473236716423,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -95.03083442606781
+      },
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 348474960,
+            "secs": 1794230473,
+            "seq": 1820,
+            "stamp_ns": 1794230473348474960,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 348474960,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473348474960,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 4,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.18297291826260667,
+          "y": -0.013884146620055025,
+          "z": -0.04678615245091561
+        },
+        "quaternion_raw": {
+          "w": 0.6756649889754803,
+          "x": 0.017711241206320644,
+          "y": -0.08078496968698315,
+          "z": -0.7325550650158449
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473348474960,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -94.9695757243322
+      },
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 1821,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 4,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.18293241513494723,
+          "y": -0.013850426323807851,
+          "z": -0.04676017289871984
+        },
+        "quaternion_raw": {
+          "w": 0.6759397309904464,
+          "x": 0.018945302764866064,
+          "y": -0.07748019589599074,
+          "z": -0.7326277191149878
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473571712738,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -94.91901517883778
+      },
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 236716423,
+            "secs": 1794230473,
+            "seq": 1819,
+            "stamp_ns": 1794230473236716423,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 236716423,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473236716423,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 5,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.3279933905565865,
+          "y": 0.5391125391893987,
+          "z": -0.10990038384646036
+        },
+        "quaternion_raw": {
+          "w": 0.6436998007158693,
+          "x": 0.035189446130908686,
+          "y": -0.1037959496931028,
+          "z": -0.7573893782372823
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473236716423,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -99.7512958057783
+      },
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 1821,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 5,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.32963017204365797,
+          "y": 0.5417365355227681,
+          "z": -0.11136887399133305
+        },
+        "quaternion_raw": {
+          "w": 0.6421560858563539,
+          "x": 0.036819934241749404,
+          "y": -0.10467536132651346,
+          "z": -0.7585004433559971
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473571712738,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -99.96781496843457
+      }
+    ],
+    "distinct_declared_captures": 5,
+    "elapsed_s": 0.44963418400004684,
+    "exit_code": 0,
+    "ids": [
+      4
+    ],
+    "minimum_report_frames": 3,
+    "observations": [
+      {
+        "confidence_raw": 0,
+        "confidence_semantics": "publisher specific/unknown; not used as a probability",
+        "frame_id": "/map",
+        "headers": {
+          "array": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 1821,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "marker": {
+            "frame_id": "/map",
+            "nsecs": 571712738,
+            "secs": 1794230473,
+            "seq": 0,
+            "stamp_ns": 1794230473571712738,
+            "stamp_valid": true
+          },
+          "pose": {
+            "frame_id": "",
+            "nsecs": 0,
+            "secs": 0,
+            "seq": 0,
+            "stamp_ns": 0,
+            "stamp_valid": true
+          }
+        },
+        "headers_disagree": false,
+        "id": 4,
+        "pose_for_control_verified": false,
+        "position_raw_m": {
+          "x": 0.18293241513494723,
+          "y": -0.013850426323807851,
+          "z": -0.04676017289871984
+        },
+        "quaternion_raw": {
+          "w": 0.6759397309904464,
+          "x": 0.018945302764866064,
+          "y": -0.07748019589599074,
+          "z": -0.7326277191149878
+        },
+        "source_seq": 0,
+        "stamp_ns": 1794230473571712738,
+        "stamp_source": "marker.header",
+        "timestamp_capture_semantics_field_verified": false,
+        "yaw_raw_deg": -94.91901517883778
+      }
+    ],
+    "ok": true,
+    "scan_only": true,
+    "status": "recognized",
+    "summary_note": "位置为消息原始frame下的米；不是已验证相机坐标/机器人位置。方差小不等于标定或物理成功。",
+    "tag_position_summary": [
+      {
+        "declared_distinct_frames": 3,
+        "expected_load": "unknown",
+        "frame_id": "/map",
+        "header_conflicts": false,
+        "id": 4,
+        "image_center": "unknown_without_pixels_or_verified_camera_transform",
+        "minimum_frames_met": true,
+        "physical_load_sensor_confirmation": false,
+        "pose_for_control_verified": false,
+        "position_raw_m_max": {
+          "x": 0.18297291826260667,
+          "y": -0.013819663905171056,
+          "z": -0.04626946014735678
+        },
+        "position_raw_m_median": {
+          "x": 0.18293241513494723,
+          "y": -0.013850426323807851,
+          "z": -0.04676017289871984
+        },
+        "position_raw_m_min": {
+          "x": 0.182598817138276,
+          "y": -0.013884146620055025,
+          "z": -0.04678615245091561
+        },
+        "position_unit": "m",
+        "reference_comparison": "not_set; first observation is not a reference",
+        "stability": "spread_report_only_no_calibrated_tolerance"
+      },
+      {
+        "declared_distinct_frames": 2,
+        "expected_load": "unknown",
+        "frame_id": "/map",
+        "header_conflicts": false,
+        "id": 5,
+        "image_center": "unknown_without_pixels_or_verified_camera_transform",
+        "minimum_frames_met": false,
+        "physical_load_sensor_confirmation": false,
+        "pose_for_control_verified": false,
+        "position_raw_m_max": {
+          "x": 0.32963017204365797,
+          "y": 0.5417365355227681,
+          "z": -0.10990038384646036
+        },
+        "position_raw_m_median": {
+          "x": 0.32881178130012223,
+          "y": 0.5404245373560834,
+          "z": -0.11063462891889671
+        },
+        "position_raw_m_min": {
+          "x": 0.3279933905565865,
+          "y": 0.5391125391893987,
+          "z": -0.11136887399133305
+        },
+        "position_unit": "m",
+        "reference_comparison": "not_set; first observation is not a reference",
+        "stability": "spread_report_only_no_calibrated_tolerance"
+      }
+    ],
+    "topic": "/chest/ar_pose_marker",
+    "type": "AR_TAG_ALVAR",
+    "window_after_ns": 1794230473200284719,
+    "window_now_ns": 1794230473603097438
+  },
+  "schema": "r3.console.task-report.v1"
+}
