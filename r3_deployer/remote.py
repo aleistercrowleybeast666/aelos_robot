@@ -65,6 +65,14 @@ _MCU_PICKUP_LEVEL_BACKWARD6_SHA256 = {
     **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256,
     'lua/craic_button_gaits.lua': 'b950f0adb939ced0c38172290c781e5f171882394aec5b8d6c7058ce31017846',
 }
+_MCU_EMPTY_RECOVERY_SHA256 = {
+    **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256,
+    'lua/craic_auto_bridge.lua': '8d96ece61e0d817a03c112983ed573755fa309ff739c64334faeef10b482fb53',
+}
+_MCU_INTERMEDIATE_STRAFE_SHA256 = {
+    **_MCU_EMPTY_RECOVERY_SHA256,
+    'lua/craic_auto_bridge.lua': 'c696f17ca3be1da5a11c21046db433c2849ba54451ddf6c8cd739a5cf2382d13',
+}
 _MCU_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
     'f0e52e82024132ec0c7be7d5aa556e756a7642fd2c489a1172920ea11be78bf1',
@@ -233,7 +241,8 @@ def validate_mcu_readback(receipt, expected):
              {**expected, **_MCU_PICKUP_BACKWARD8_SHA256},
              {**expected, **_MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256},
              {**expected, **_MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256},
-             {**expected, **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256},
+             {**expected, **_MCU_PICKUP_LEVEL_BACKWARD6_SHA256}, {**expected, **_MCU_EMPTY_RECOVERY_SHA256},
+             {**expected, **_MCU_INTERMEDIATE_STRAFE_SHA256},
              *({**expected, 'lua/craic_single_micro.lua': digest}
                for digest in (_MCU_TUNED_MICRO_SHA256, *_MCU_PRIOR_TUNED_MICRO_SHA256)))
     if (not isinstance(receipt, dict) or receipt.get('robot_id') != 3
@@ -447,7 +456,9 @@ def _commit(root, ticket, mcu_readback=None):
                 if (bridge_hash in (_MCU_PAIR_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_PICKUP_BACKWARD4_SHA256['lua/craic_auto_bridge.lua'],
                                     _MCU_PICKUP_BACKWARD6_SHA256['lua/craic_auto_bridge.lua'],
-                                    _MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'])
+                                    _MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
                         and not all(micro.get(key) is True for key in (
                             'pair_deployment_readback_ready', 'cmd0_right5_deployment_readback_ready',
                             'medium_turn_deployment_readback_ready'))):
@@ -458,7 +469,13 @@ def _commit(root, ticket, mcu_readback=None):
                 if (bridge_hash == _MCU_PICKUP_BACKWARD6_SHA256['lua/craic_auto_bridge.lua']
                         and micro.get('pickup_backward6_deployment_readback_ready') is not True):
                     raise RuntimeError('The reloaded owner did not accept the registered six-step backward MCU record.')
-                if (bridge_hash == _MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua']
+                if (bridge_hash in (_MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
+                        and micro.get('empty_recovery_deployment_readback_ready') is not True):
+                    raise RuntimeError('The reloaded owner did not accept the registered empty-return MCU record.')
+                if (bridge_hash in (_MCU_PICKUP_BACKWARD8_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_EMPTY_RECOVERY_SHA256['lua/craic_auto_bridge.lua'],
+                                    _MCU_INTERMEDIATE_STRAFE_SHA256['lua/craic_auto_bridge.lua'])
                         and micro.get('pickup_backward8_deployment_readback_ready') is not True):
                     raise RuntimeError('The reloaded owner did not accept the registered eight-step backward MCU record.')
         if _json(_regular(root/MARKER)) != receipt:

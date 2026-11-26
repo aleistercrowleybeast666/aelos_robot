@@ -17,14 +17,18 @@ import threading
 import time
 import uuid
 
-from r3_micro_gate import (CMD0_ROUTE_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
-                           PICKUP_BACKWARD6_OPS, PROBE_OPS, RIGHT5_ROUTE_PROBE, SMALL_STRAFE_PROBE)
+from r3_micro_gate import (CMD0_ROUTE_PROBE, EMPTY_RECOVERY_PROBE, MEDIUM_TURN_PROBE, MicroGate_IsRobot3Identity, PAIR_PROBE, PICKUP_BACKWARD4_PROBE,
+                           PICKUP_BACKWARD6_OPS, PROBE_OPS, RIGHT5_ROUTE_PROBE, SMALL_PROFILE_PROBE, SMALL_STRAFE_PROBE)
 
 PROTOCOL='r3.warm.v1'
 DEFAULT_PROJECT=Path('/home/lemon/aelos_auto_r3_python')
 DEFAULT_STATE=Path('/home/lemon/.local/state/r3_simple')
 MCU_IDLE_CONTACT_GRACE_S=1.25
 PAIR_PROBE_TIMEOUT_S=4.
+
+
+class EmptyRecoveryUnavailable(RuntimeError):
+    """Unknown optional alias returned ERROR before START and then ordered idle."""
 
 
 class PairProbeUnavailable(RuntimeError):
@@ -76,6 +80,7 @@ class GateBackend:
     def __init__(self,gate):
         self.gate=gate;self.session=None;self.epoch=None
         self.cancelled=threading.Event();self.progress=None
+        self.empty_recovery_attempt=None
     def snapshot(self, *, require_mcu=True):
         r=self.gate.status()
         if r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5':raise RuntimeError('R3 owner mismatch')
@@ -120,13 +125,15 @@ class GateBackend:
             self.cancelled.wait(min(0.05,remaining))
             state=self.current(require_mcu=False)
     def call(self,op,timeout):
-        manual_only=op in ('begin','begin_align','stand') or op in PROBE_OPS
+        manual_only=op in ('begin','begin_align','stand') or (op in PROBE_OPS and op != EMPTY_RECOVERY_PROBE)
         if manual_only:
             if self.session is None:self.ready()
             else:
                 r=self.current()
                 if r['mode']!='manual' or r['in_flight']:raise RuntimeError('owner became busy before begin')
         else:self.check()
+        if op in ('begin', 'begin_align'):
+            self._verify_small_strafe_profile(timeout)
         before=self.current(require_mcu=manual_only);sequence=before.get('operation_seq',0);nonce=uuid.uuid4().hex
         text='R3AUTO|{}|{}|{}|{}'.format(self.session,self.epoch,op,nonce)
         if op=='grab_single' and getattr(self,'usage_file',None) is not None:
@@ -152,13 +159,18 @@ class GateBackend:
                 self.check()
                 from cmd0_motion import PickupRetreatUnavailable
                 raise PickupRetreatUnavailable('当前 MCU 未注册连续后退六步动作')
-            if (op==PAIR_PROBE and result.get('op')==op and result.get('request_nonce')==nonce
+            if (op in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) and result.get('op')==op and result.get('request_nonce')==nonce
                     and result.get('probe_unavailable') is True and result.get('drained') is True
+                    and result.get('started') is False and result.get('cancelled') is False
                     and not detail.get('in_flight')):
                 self.current()
+                if op == EMPTY_RECOVERY_PROBE:
+                    raise EmptyRecoveryUnavailable('MCU 未提供空载回程微调能力')
+                if op == SMALL_PROFILE_PROBE:
+                    return  # The ordered idle receipt selected the legacy gait.
                 raise PairProbeUnavailable('MCU 未确认双抱能力')
             raise RuntimeError('operation {} failed; reason={}; last_result={}; last_rejection={}; in_flight={}'.format(op,detail.get('reason'),detail.get('last_result'),detail.get('last_rejection'),detail.get('in_flight')))
-        r=self.current(require_mcu=False);expected='manual' if op in ('finish','stand') or op in PROBE_OPS else 'auto'
+        r=self.current(require_mcu=False);expected='manual' if op in ('finish','stand') or (op in PROBE_OPS and op != EMPTY_RECOVERY_PROBE) else 'auto'
         result=r.get('last_result') or {}
         if (result.get('request_nonce')!=nonce or result.get('op')!=op or
                 type(result.get('operation_seq')) is not int or result['operation_seq']<=sequence or
@@ -187,6 +199,15 @@ class GateBackend:
         state=self.current()
         if not state.get('micro_trial',{}).get('ready'):
             raise RuntimeError('micro capability/guarded trial/recovery not ready BEFORE cleanup: '+json.dumps({k:state.get(k) for k in ('session','epoch','recovery_gate','micro_trial')}))
+    def small_strafe_profile(self):
+        return self.current(require_mcu=False).get('micro_trial', {}).get('small_strafe_profile')
+
+    def _verify_small_strafe_profile(self,timeout):
+        micro = self.current().get('micro_trial',{})
+        if ('small_strafe_profile' in micro and micro['small_strafe_profile'] is None
+                and micro.get('small_strafe_ready') is True):
+            self.call(SMALL_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
+
     def verify_mission_v5(self,timeout):
         self.verify_micro(timeout)
         if self.current().get('mission_v5_ready') is not True:
@@ -245,6 +266,27 @@ class GateBackend:
     def cmd0_continuous_ready(self):
         state=self.current()
         return state.get('mode')=='auto' and state.get('micro_trial',{}).get('cmd0_route_ready') is True
+    def empty_recovery_ready(self):
+        state = self.current(require_mcu=False)
+        return state['mode'] == 'auto' and state.get('micro_trial', {}).get('empty_recovery_ready') is True
+
+    def ensure_empty_recovery(self):
+        if self.empty_recovery_ready():
+            return True
+        state = self.current(require_mcu=False)
+        if (state['mode'] != 'auto' or state.get('mission_v5_ready') is not True
+                or 'empty_recovery_ready' not in state.get('micro_trial', {})):
+            return False
+        scope = (self.session, self.epoch)
+        if self.empty_recovery_attempt == scope:
+            return False
+        self.empty_recovery_attempt = scope
+        try:
+            self.call(EMPTY_RECOVERY_PROBE, PAIR_PROBE_TIMEOUT_S)
+        except EmptyRecoveryUnavailable:
+            return False
+        return self.empty_recovery_ready()
+
     def medium_turn_ready(self):
         state=self.current()
         return state.get('mode')=='auto' and state.get('micro_trial',{}).get('medium_turn_ready') is True

@@ -10,7 +10,7 @@ import time
 import uuid
 import re
 from r3_recovery_gate import RecoveryGate
-from r3_micro_gate import MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS
+from r3_micro_gate import EMPTY_RECOVERY_OPS, EMPTY_RECOVERY_PROBE, MicroGate, NAMES as MICRO_NAMES, PAIR_BODY_OPS, PAIR_PROBE, PICKUP_BACKWARD6_OPS, PROBE_OPS, SMALL_PROFILE_PROBE, SMALL_STRAFE_OPS
 
 WIRE_BASE=0x2A00
 CANCELLED_BOUNDARY=WIRE_BASE+0xFE
@@ -26,7 +26,11 @@ NAMES.update({op:'r3_simple_'+op for op in ('empty_forward2', 'empty_left_turn',
 MISSION_OPS=frozenset(('empty_forward2', 'empty_left_turn', 'empty_right_turn', 'empty_strafe_left', 'empty_strafe_right', 'place_single', 'carry_forward7', 'carry_forward9'))
 NAMES.update(MICRO_NAMES)
 HASHES={op:'leju_'+hashlib.md5(name.encode()).hexdigest() for op,name in NAMES.items()}
-OWNED=frozenset(HASHES.values())
+INTERMEDIATE_STRAFE_HASHES = {
+    op: 'leju_' + hashlib.md5(('r3_lateral_v2_' + op).encode()).hexdigest()
+    for op in (*SMALL_STRAFE_OPS, *('double_' + name for name in SMALL_STRAFE_OPS))
+}
+OWNED=frozenset(HASHES.values()) | frozenset(INTERMEDIATE_STRAFE_HASHES.values())
 _ACQUIRE_LOAD=frozenset(('grab_single','grab_double','begin_align'))
 _RELEASE_LOAD=frozenset(('stand','place_single','cmd0_place_single','place_double'))
 _RESET_REQUIRED='previous automatic task may still hold a block; explicitly restore empty stand before starting again'
@@ -70,7 +74,7 @@ class Gate:
     def cancel(self,reason,key=0,force_epoch=False):
         with self.cv:
             c=self.current
-            if (reason==_MCU_ERROR and c and (c['op']==PAIR_PROBE or c['op'] in PICKUP_BACKWARD6_OPS)
+            if (reason==_MCU_ERROR and c and (c['op'] in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) or c['op'] in PICKUP_BACKWARD6_OPS)
                     and c['dispatched'] and not c['started'] and not c['cancelled']):
                 # Installed UART owners report unknown aliases through cancel.
                 # Defer classification until the next ordered idle REQ.
@@ -161,7 +165,7 @@ class Gate:
                     elif now-first>=_IDLE_DRAIN_MIN_S:
                         c.update(drained=True,drain_source='ordered_idle_requests_after_cancel')
                         self.cv.notify_all()
-                elif (c['op']==PAIR_PROBE and bridge_idle and not c['complete'] and not c['cancelled']
+                elif (c['op'] in (PAIR_PROBE, EMPTY_RECOVERY_PROBE, SMALL_PROFILE_PROBE) and bridge_idle and not c['complete'] and not c['cancelled']
                         and c.get('mcu_error_before_start') and not c['started']):
                     # Older Lua reports an unknown alias via ERROR, then returns to idle.
                     # A repeated REQ alone is not a verdict on the dispatched probe.
@@ -241,7 +245,10 @@ class Gate:
             if self.queue:return reject('existing_queue_not_empty')
             if type(timeout) not in (float,int) or not 1<=timeout<=120:return reject('invalid_timeout')
             if op=='begin' and self._may_hold_load:return reject('previous_load_requires_explicit_empty_reset')
-            if op in PROBE_OPS:
+            if op == EMPTY_RECOVERY_PROBE or op in EMPTY_RECOVERY_OPS:
+                if self.mode != 'auto' or self._may_hold_load:
+                    return reject('empty_automatic_return_required')
+            elif op in PROBE_OPS:
                 if self.mode!='manual':return reject('manual_idle_required_for_capability')
             denial=self.micro.admit(op,nonce,self.epoch,self.recovery.status(self.epoch)['ready'])
             if denial:return reject(denial)
@@ -253,7 +260,10 @@ class Gate:
             elif op not in PROBE_OPS and self.mode!='auto':return reject('automatic_mode_required')
             self.operation_seq+=1
             if nonce is not None:self._accepted_nonces.add(nonce)
-            c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':HASHES[op],'epoch':self.epoch,'op':op,'dispatched':False,
+            native = HASHES[op]
+            if op in INTERMEDIATE_STRAFE_HASHES and self.micro.small_strafe_profile(self.epoch) == 'intermediate_v2':
+                native = INTERMEDIATE_STRAFE_HASHES[op]
+            c={'operation_seq':self.operation_seq,'request_nonce':nonce,'native':native,'epoch':self.epoch,'op':op,'dispatched':False,
                 'started':False,'complete':False,'cancelled':False,'drained':False,
                 'ignored_predispatch_start':0,'ignored_predispatch_complete':0,'waiter_active':True}
             self.current=c;self.queue.append(c['native']);deadline=self.clock()+timeout
@@ -263,11 +273,17 @@ class Gate:
                 self.cv.wait(left)
             ok=(c['complete'] and not c['cancelled'] and not c.get('probe_unavailable')
                 and not c.get('retreat_unavailable') and c['epoch']==self.epoch)
-            self.last_result={'op':op,'request_nonce':nonce,'operation_seq':c['operation_seq'],'protocol_completed':bool(ok),'reason':self.reason,
+            self.last_result={'op':op,'native':c['native'],'request_nonce':nonce,'operation_seq':c['operation_seq'],'protocol_completed':bool(ok),'reason':self.reason,
                 **{k:c[k] for k in ('dispatched','started','complete','cancelled','drained',
                                     'ignored_predispatch_start','ignored_predispatch_complete')}}
             if c.get('probe_unavailable'):
-                self.micro.capability=None
+                if op == EMPTY_RECOVERY_PROBE:
+                    self.micro.empty_recovery_receipt = None
+                elif op == SMALL_PROFILE_PROBE:
+                    self.micro.small_profile_receipt = dict(session=self.session,epoch=self.epoch,
+                        boot_id=self.micro.boot_id, profile='legacy_v1')
+                else:
+                    self.micro.capability = None
                 self.last_result['probe_unavailable']=True
             if c.get('retreat_unavailable'):
                 self.last_result['retreat_unavailable']=True

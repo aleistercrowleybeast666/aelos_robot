@@ -6,7 +6,7 @@ from math import acos, atan2, degrees, radians, sin, sqrt, tan
 from pathlib import Path
 from statistics import median
 
-from cmd0_motion import COMMAND0_ENTRY_FORWARD_STEPS, SMALL_SIDE_ACTIONS
+from cmd0_motion import COMMAND0_ENTRY_FORWARD_STEPS, SMALL_SIDE_ACTIONS, LEGACY_SMALL_STRAFE_LIMIT_M
 from entry_camera import finite, rotate
 from nav_observation import Observation_DistinctTagRows, circular_median, ground_pose, summarize, wrap
 from pixel_diagnostics import load_entrance_reference
@@ -182,6 +182,7 @@ def _departure_lateral_step(pose, tag, observed, soft_limit):
     small = side.get('small_step') if isinstance(side, dict) else None
     projection = pose.get('body_right_in_tag_right')
     if (not isinstance(small, dict) or small.get('verified') is not True
+            or not _small_strafe_calibration_matches(pose, small)
             or small.get('allow_departure') is not True or pose.get('goal_allows_strafe') is not True
             or not finite(projection) or not 0 < abs(projection) <= 1 + 1e-8):
         return None
@@ -773,7 +774,8 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
     return dict(plan, reason=reason)
 
 
-def RoutePose_PlanTag5EntryLateral(checkpoint, nav_cfg, settings, *, small_ready):
+def RoutePose_PlanTag5EntryLateral(checkpoint, nav_cfg, settings, *, small_ready,
+                                  small_travel_upper_m=LEGACY_SMALL_STRAFE_LIMIT_M):
     """Try to center the entry trajectory on Tag 5 using the chest-camera body frame."""
     result = {'status': RoutePosePlanResult.NOMINAL.value, 'operation': None}
     goal = next((goal for goal in nav_cfg['legs']['outbound'] if goal['id'] == 5), {})
@@ -799,13 +801,16 @@ def RoutePose_PlanTag5EntryLateral(checkpoint, nav_cfg, settings, *, small_ready
     if distance < settings['large_move_error_m']:
         if not small_ready:
             return dict(result, reason='small strafe unavailable for the measured Tag 5 offset')
+        if (2*distance < small_travel_upper_m or min(forward)-small_travel_upper_m < .075):
+            return dict(result, small_strafe_upper_m=small_travel_upper_m,
+                        reason='small strafe sweep exceeds current position or wall clearance')
         operation = SMALL_SIDE_ACTIONS[side]
     return dict(result, status=RoutePosePlanResult.ADJUSTED.value, operation=operation,
                 reason='move toward the center of Tag 5 and verify the new offset')
 
 
 def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, entering=False,
-                             current_group_distance_m=0.15):
+                             current_group_distance_m=0.15, small_travel_upper_m=LEGACY_SMALL_STRAFE_LIMIT_M):
     """Use fresh Tag 5 ground poses to check the next straight and plan a side trim."""
     result = {'geometry_valid': False, 'ready_for_forward': False, 'operation': None,
               'distance_m': None, 'lateral_error_m': None, 'heading_deg': None,
@@ -889,7 +894,18 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
         if residual >= large_error:
             result['operation'] = side
         elif residual > small_cutoff and small_ready:
-            result['operation'] = SMALL_SIDE_ACTIONS[side]
+            # A completed gait can shift anywhere from zero to the trial upper estimate.
+            # Check the opposite jamb and the wall even when the trajectory is skewed.
+            sign = -1 if side == 'strafe_left_once' else 1
+            lateral_tips = [x + sign * small_travel_upper_m for x in
+                            (projected_bounds if projected_bounds is not None else lateral_bounds)]
+            depth_tips = [d + sign * small_travel_upper_m * sin(radians(yaw))
+                          for d, yaw in zip(depths, headings)]
+            fits_opposite_edge = min(lateral_tips) >= -limit if sign < 0 else max(lateral_tips) <= limit
+            result['small_strafe_upper_m'] = small_travel_upper_m
+            if (fits_opposite_edge and min(depth_tips) >= depth_window[0] and max(depth_tips) <= depth_window[1]
+                    and residual >= small_travel_upper_m / 2):
+                result['operation'] = SMALL_SIDE_ACTIONS[side]
     return dict(result, reason=reason)
 
 
@@ -976,6 +992,11 @@ def RoutePose_PlanSideCount(pose, profile, tag_id, op, nominal):
                 conservative_improvement_m=gain, worst_landing_x_error_m=landing)
 
 
+def _small_strafe_calibration_matches(pose, small):
+    profile = small.get('gait_profile', 'legacy_v1')
+    return profile in ('legacy_v1', 'intermediate_v2') and pose.get('small_strafe_profile', 'legacy_v1') == profile
+
+
 def RoutePose_PlanSmallSide(pose, profile, tag_id, op, nominal):
     """Append or substitute one measured same-direction small side step."""
     result, context = _side_plan_context(pose, profile, tag_id, op, nominal)
@@ -985,6 +1006,7 @@ def RoutePose_PlanSmallSide(pose, profile, tag_id, op, nominal):
     side = context['side']
     small = side.get('small_step')
     if (not isinstance(small, dict) or small.get('verified') is not True
+            or not _small_strafe_calibration_matches(pose, small)
             or small.get('operation') != SMALL_SIDE_ACTIONS[op]):
         return dict(result, reason='same-load small-step displacement and clearance unverified')
     distance = small.get('body_right_displacement_m')

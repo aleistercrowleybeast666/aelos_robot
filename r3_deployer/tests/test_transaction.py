@@ -325,10 +325,10 @@ class DeploymentTransactionTests(unittest.TestCase):
                 remote._commit(self.target, self.ticket, readback)
         self.assertFalse((self.target/remote.MARKER).exists())
 
-    def test_six_step_pickup_overlay_registers_the_exact_manifest_and_owner_gate(self):
+    def test_current_empty_return_overlay_registers_the_exact_manifest_and_owner_gate(self):
         baseline = self._mcu_receipt()
         files = self._private_mcu_manifest(settings.DEFAULT_MCU_OVERLAY)
-        self.assertEqual(files, {**baseline['files'], **remote._MCU_PICKUP_LEVEL_BACKWARD6_SHA256})
+        self.assertEqual(files, {**baseline['files'], **remote._MCU_INTERMEDIATE_STRAFE_SHA256})
         readback = dict(baseline, files=files)
         self.assertEqual(remote.validate_mcu_readback(readback,baseline['files']),readback)
         boot = 'ae8ca915-435e-4481-a85d-b097ed2a2f14'
@@ -336,7 +336,7 @@ class DeploymentTransactionTests(unittest.TestCase):
         self.mocks['_reload'].return_value = {'owner': {'micro_trial': {
             'cmd0_route_deployment_readback_ready': True, 'medium_turn_deployment_readback_ready': True,
             'cmd0_right5_deployment_readback_ready': True, 'pair_deployment_readback_ready': True,
-            'pickup_backward8_deployment_readback_ready': True}}}
+            'pickup_backward8_deployment_readback_ready': True, 'empty_recovery_deployment_readback_ready': True}}}
         with patch.object(remote,'_boot_id',return_value=boot):
             result = remote._commit(self.target,self.ticket,readback)
         self.assertTrue(result['mcu_readback_registered'])
@@ -345,7 +345,8 @@ class DeploymentTransactionTests(unittest.TestCase):
         baseline = self._mcu_receipt()
         expected = baseline['files']
         for variant in (remote._MCU_PICKUP_BACKWARD8_TUNED_LEFT_SHA256,
-                        remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256, remote._MCU_PICKUP_LEVEL_BACKWARD6_SHA256):
+                        remote._MCU_PICKUP_BACKWARD8_LOW_RELEASE_SHA256, remote._MCU_PICKUP_LEVEL_BACKWARD6_SHA256,
+                        remote._MCU_EMPTY_RECOVERY_SHA256, remote._MCU_INTERMEDIATE_STRAFE_SHA256):
             with self.subTest(actions=variant['lua/craic_actions.lua']):
                 receipt = dict(baseline, files={**expected, **variant})
                 self.assertEqual(remote.validate_mcu_readback(receipt, expected), receipt)

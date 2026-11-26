@@ -25,6 +25,8 @@ VERSION='r3-visual-pickup-20261109-v5'
 OPS={
     'free_forward':('empty','empty'), 'empty_forward2':('empty','empty'),
     'empty_left_turn':('empty','empty'), 'empty_right_turn':('empty','empty'),
+    'empty_micro_left':('empty','empty'), 'empty_micro_right':('empty','empty'),
+    'empty_backward2':('empty','empty'),
     'empty_strafe_left':('empty','empty'), 'empty_strafe_right':('empty','empty'),
     'grab_single':('empty','single'), 'place_single':('single','empty'),
     'grab_double':('empty','double'), 'place_double':('double','empty'),
@@ -38,10 +40,10 @@ SINGLE_CHAINS=('transfer_to_entry','outbound_obstacles','base_approach','start_t
 EMPTY_CHAINS=('pickup_search','pickup_left','pickup_right','pickup_advance','base_to_return','return_obstacles','return_to_transfer')
 _LOAD_TRANSITIONS=('grab_single','grab_double','place_single','place_double')
 PAIR_MOTION_OPS={op:'double_'+op for op,loads in OPS.items() if loads==('single','single')}
-_TURN_OPS=('left_turn','right_turn','empty_left_turn','empty_right_turn')
+_TURN_OPS=('left_turn','right_turn','empty_left_turn','empty_right_turn','empty_micro_left','empty_micro_right')
 _CARRY_FORWARD_OPS=('carry_forward','carry_forward2','carry_forward4','carry_forward7','carry_forward9')
 _TRANSLATION_OPS=_CARRY_FORWARD_OPS+(
-    'strafe_left_once','strafe_right_once','free_forward','empty_forward2','empty_strafe_left','empty_strafe_right',
+    'strafe_left_once','strafe_right_once','free_forward','empty_forward2','empty_backward2','empty_strafe_left','empty_strafe_right',
 )
 _GRAB_OPS=('grab_single','grab_double')
 VISUAL_PICKUP_OPS=frozenset((*_GRAB_OPS,'free_forward','empty_forward2','empty_strafe_left','empty_strafe_right'))
@@ -365,6 +367,10 @@ class MissionRobot(Robot):
             native_op=PAIR_MOTION_OPS[op]
         if self.load_kind!=required_load:
             raise RuntimeError('V5 finite op/load mismatch '+op)
+        if op in ('empty_micro_left', 'empty_micro_right', 'empty_backward2'):
+            ready = getattr(self.backend, 'empty_recovery_ready', None)
+            if not callable(ready) or not ready():
+                raise NotReady('当前 MCU 会话未确认空载回程微调动作')
         if required_load=='double' or next_load=='double':
             if not self.supports_pair() or native_op not in self.backend.mission_pair_ops():
                 raise RuntimeError('V5 double-load native capability unavailable before '+native_op)

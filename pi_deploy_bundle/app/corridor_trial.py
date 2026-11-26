@@ -8,6 +8,7 @@ from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_IsFre
 from checkpoint_alignment import Checkpoint_TrackEntryHeading
 from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
+                         Cmd0Motion_SmallStrafeProfile, LEGACY_SMALL_STRAFE_LIMIT_M,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
 from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime, CheckpointScanResult
 from entrance_trial import EntranceTrial_PlanForward
@@ -38,7 +39,7 @@ _TAG4_NEAR_LEFT_MARGIN_M = .015
 _TAG4_LEFT_PROBE_DEPTH_M = .15
 _TAG4_LEFT_CLEARANCE_FLOOR_M = .125
 _TAG4_PARALLEL_DEPTH_DRIFT_M = .005
-_TAG4_RECOVERY_STRAFE_UPPER_M = .10  # A field cycle shifted roughly 9 cm.
+_RECOVERY_STRAFE_UPPER_M = .10  # A field cycle shifted roughly 9 cm.
 _LARGE_STRAFE_TRAVEL_UPPER_M = .075
 _TAG3_RIGHT_OFFSET_M = .075
 _TAG3_TRIAL_MAX_RIGHT_STRIDES = 7
@@ -61,7 +62,7 @@ _TAG5_OUTSIDE_SIDE_DEPTH_M = .18
 _TAG5_ALIGNED_SIDE_DEPTH_M = .16
 _TAG5_TIGHT_SIDE_DEPTH_M = .14
 _TAG5_TIGHT_TURN_MARGIN_M = .025
-_SMALL_SIDE_TRAVEL_UPPER_M = .035
+_TAG4_TAUGHT_LATERAL_TOLERANCE_M = .035
 _TAG5_CLEARANCE_YAW_DEG = 22.
 _TAG5_RETREAT_TRAVEL_UPPER_M = .125
 _TAG5_SIDE_PROGRESS_M = .005
@@ -343,8 +344,11 @@ def _checkpoint_raw_pose(scan, tag_id, min_frames):
 
 def _measure(robot, nav, profile, checkpoint):
     observation = dict(checkpoint.get('scan') or {}, expected_load=robot.load_kind)
-    return RoutePose_Measure(observation, nav.cfg, profile, checkpoint['expected_id'],
+    pose = RoutePose_Measure(observation, nav.cfg, profile, checkpoint['expected_id'],
                              camera_info=checkpoint.get('camera_info', {}))
+    if pose.get('position_usable') and checkpoint['expected_id'] in (2, 3, 4):
+        return dict(pose, small_strafe_profile=Cmd0Motion_SmallStrafeProfile(robot.backend)[0])
+    return pose
 
 
 def _revalidate_heading(robot, nav):
@@ -918,6 +922,7 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
             and (not anchor or stamp > anchor['stamp_ns']) and not plan.get('camera_contract_fault')):
         current_range = tuple(bounds)
     reason = 'fresh_range'
+    allow_four = False
     if current_range is not None:
         # Slip can consume an entire stride. A forward gait cannot, however,
         # explain the marker moving substantially further away than before.
@@ -938,6 +943,9 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
                 # Stable corners in a single distant window can still overestimate
                 # depth. Keep ten cm in reserve until a second stance agrees.
                 range_margin = .10
+                allow_four = (not cautious and plan['distance_verified'] and
+                              current_range[0] - range_margin - 4*step_upper >= floor and
+                              _tag4_confirmed_straight_heading(robot, nav, leg))
                 cautious = True
                 reason = 'uncorroborated_long_range'
             leg['tag4_range_anchor'] = {'bounds_m':current_range, 'stamp_ns':stamp, 'range_margin_m':range_margin,
@@ -946,9 +954,17 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
     else:
         reason = 'previous_range_minus_travel' if anchor else 'no_range_yet'
     if reason == 'no_range_yet':
-        cap = 4 if completed == 0 and not cautious else 2
+        # Only join the two middle two-step gaits inside the measured eight-step
+        # corridor segment. A later miss, partial detection or yaw drift stays short.
+        allow_four = (completed == 4 and not cautious and
+                      plan.get('healthy_miss_stance_ns') == getattr(robot, 'last_action_completed_ros_ns', None)
+                      and plan.get('healthy_miss_stance_ns') is not None
+                      and not any(p.get('partial_pose') or p.get('distance_bounds_m') or p.get('camera_contract_fault')
+                                  for p in leg.get('tag4_approach', ()))
+                      and _tag4_confirmed_straight_heading(robot, nav, leg))
+        cap = 4 if (completed == 0 and not cautious) or allow_four else 2
     elif reason == 'previous_range_minus_travel' or cautious or not plan['distance_verified']:
-        cap = 2
+        cap = 4 if allow_four else 2
     else:
         cap = 8
     sizes = (8, 5, 4, 2) if native_five else (8, 4, 2)
@@ -957,9 +973,37 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
     leg.setdefault('tag4_forward_limits', []).append({
         'completed_steps':completed, 'requested_steps':requested, 'next_steps':step_count,
         'range_source':reason, 'observed_bounds_m':current_range,
+        'same_stance_heading_supports_four':allow_four,
         'projected_min_depth_m':lower, 'stride_upper_m':step_upper, 'landing_floor_m':floor})
     plan['scheduled_steps'] = step_count
     return step_count
+
+
+def _tag4_confirmed_straight_heading(robot, nav, leg):
+    """Check the current completed gait against the Tag 3 straight reference."""
+    handoff = leg.get('tag3_straight_heading') or {}
+    if (handoff.get('magnetic_reference') not in ('applied','prior_tag3_reference_retained')
+            or leg.get('tag3_clearance_probe') or leg.get('tag4_forward_disruption')
+            or getattr(robot, 'magnetic_route_only', False) or not getattr(nav.io, 'motion_capture_verified', False)):
+        return False
+    report = getattr(robot, 'last_heading_report', None) or {}
+    snapshot = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
+    anchor = nav.mag.anchor or {}
+    owner = (getattr(robot.backend,'session',''), getattr(robot.backend,'epoch',-1))
+    if (not snapshot or report.get('correction_actions',0) or not anchor.get('capture_verified')
+            or not anchor.get('absolute_route_heading_known') or anchor.get('tag_id') != 3
+            or anchor.get('load') != robot.load_kind or not owner[0] or anchor.get('owner_observation_scope') != owner):
+        return False
+    yaw, receipt, scope = snapshot
+    completed = getattr(robot, 'last_action_completed_monotonic', None)
+    capture = getattr(nav.io, 'capture_stream', None)
+    now = robot.clock()
+    return (type(completed) in (int,float) and completed < receipt <= now
+            and now - receipt <= nav.cfg['max_age_s']
+            and scope == tuple(anchor.get(k) for k in ('capture_session','load_epoch','calibration_id'))
+            and scope == (getattr(capture,'session',None),getattr(nav.io,'magnetic_load_epoch',None),
+                          getattr(capture,'calibration_digest',None))
+            and abs(yaw) <= nav.cfg['post_action_heading'].get('deadband_deg',8.))
 
 
 def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approach_steps=None, tag3_heading=None):
@@ -970,6 +1014,19 @@ def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approac
     plan = RoutePose_PlanTag4Longitudinal(observation, nav.cfg, settings, approach_steps=approach_steps, **options)
     if observation.get('reused_boundary_frames'):
         plan['reused_boundary_frames'] = True
+    scan = observation.get('scan') or {}
+    stance = getattr(robot, 'last_action_completed_ros_ns', None)
+    camera = observation.get('camera_info') or {}
+    if (approach_steps is not None and type(stance) is int and type(scan.get('after_ns')) is int
+            and type(scan.get('now_ns')) is int and stance <= scan['after_ns'] < scan['now_ns']
+            and scan.get('camera_healthy') and scan.get('contract_match') and camera.get('ready')
+            and scan.get('status') == 'no_tag' and not observation.get('partial_pose_rows')
+            and not scan.get('observed_ids') and not scan.get('samples')
+            and not any(w.get('decoded_since_boundary') or w.get('decoded_expected_frames')
+                        for w in observation.get('quick_scan_windows', ()))
+            and camera.get('fingerprint') and camera['fingerprint'] ==
+                nav.cfg.get('visual_micro',{}).get('camera_info',{}).get('expected_fingerprint')):
+        plan['healthy_miss_stance_ns'] = stance
     ready = VisualCamera_GetFreshnessCheck(nav.io)
     if plan['distance_verified'] and (ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(distance_verified=False, reason='Tag 4 depth expired before dispatch')
@@ -982,7 +1039,7 @@ def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approac
             and plan.get('heading_authority') not in ('prior_route_reference', 'current_tag3')
             and all(k in taught for k in ('distance_m', 'distance_deadband_m', 'heading_deg', 'lateral_m'))
             and max(abs(d - taught['distance_m']) for d in depth) <= taught['distance_deadband_m'] + _TAG4_NEAR_LEFT_MARGIN_M
-            and max(abs(y - taught['lateral_m']) for y in lateral) <= _SMALL_SIDE_TRAVEL_UPPER_M
+            and max(abs(y - taught['lateral_m']) for y in lateral) <= _TAG4_TAUGHT_LATERAL_TOLERANCE_M
             and plan.get('max_abs_yaw_deg', float('inf')) <= 12.
             and abs(wrap(plan['heading_deg'] - taught['heading_deg'])) + plan.get('max_heading_deviation_deg', float('inf')) <= 3.):
         plan['matches_taught_left_heading'] = True
@@ -1108,7 +1165,8 @@ def _tag4_centering_progress(plan, last_center):
             and old_outer - new_outer >= max(.001, old_outer - old_inner, new_outer - new_inner))
 
 
-def _tag4_recovery_strafe(plan, recovery, settings, *, small_available=False, stalled_turn=False):
+def _tag4_recovery_strafe(plan, recovery, settings, *, small_available=False, stalled_turn=False,
+                          small_travel_upper_m=LEGACY_SMALL_STRAFE_LIMIT_M):
     """Choose a single turn-clearance stride or a measured move back toward the route."""
     near, far = plan['distance_bounds_m']
     left, right = plan['lateral_bounds_m']
@@ -1125,21 +1183,21 @@ def _tag4_recovery_strafe(plan, recovery, settings, *, small_available=False, st
     turn_depth = clearance.get('minimum_turn_depth_m')
     retry_at_wall = (turn_depth is not None and near < turn_depth
                      and 'clearance_strafe_retry' not in recovery)
-    travel = _TAG4_RECOVERY_STRAFE_UPPER_M
+    travel = _RECOVERY_STRAFE_UPPER_M
     if (stalled_turn and small_available and not recovery.get('turn_reposition')
             and outside <= _TAG4_STRAIGHT_LATERAL_M):
         # A measured ineffective turn may have slipped at the foot. Shift the
         # support point once, then choose the next turn from the new stance.
         purpose = 'turn_reposition'
-        travels = (_SMALL_SIDE_TRAVEL_UPPER_M,)
+        travels = (small_travel_upper_m,)
     elif (_TAG4_CLEARANCE_YAW_DEG <= abs(yaw)
             and (not clearance or retry_at_wall) and not centers and outside <= .22):
         purpose = 'clearance_strafe'
-        travels = (travel, _SMALL_SIDE_TRAVEL_UPPER_M) if small_available else (travel,)
+        travels = (travel, small_travel_upper_m) if small_available else (travel,)
     elif (inward and abs(yaw) < _TAG4_CLEARANCE_YAW_DEG and outside <= .30
             and (not centers or _tag4_centering_progress(plan, centers[-1]))):
         purpose = 'centering_strafes'
-        travels = (travel, _SMALL_SIDE_TRAVEL_UPPER_M) if small_available else (travel,)
+        travels = (travel, small_travel_upper_m) if small_available else (travel,)
     else:
         return None
 
@@ -1160,7 +1218,7 @@ def _tag4_recovery_strafe(plan, recovery, settings, *, small_available=False, st
                 (near, far), (yaw - spread, yaw + spread), shift, (min_depth, max_depth), target - band)
             if floor <= sweep_near and sweep_far <= max_depth:
                 operation = 'strafe_left_once' if direction < 0 else 'strafe_right_once'
-                if travel == _SMALL_SIDE_TRAVEL_UPPER_M:
+                if travel == small_travel_upper_m:
                     operation = SMALL_SIDE_ACTIONS[operation]
                 return operation, purpose
     return None
@@ -1234,7 +1292,9 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
             bounds = issue['lateral_bounds_m']
             stalled_turn = bool(turns and abs(error) > min(abs(t['before_error_deg']) for t in turns) - 1.)
             small_ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
+            gait, small_limit = Cmd0Motion_SmallStrafeProfile(robot.backend)
             side = (_tag4_recovery_strafe(plan, recovery, settings, small_available=small_ready(),
+                                          small_travel_upper_m=small_limit,
                                           stalled_turn=stalled_turn)
                     if strafe is not None and goal.get('allow_strafe') is True else None)
             # The 20:14 window spanned 15.81–16.09 cm. A window
@@ -1283,6 +1343,8 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
                     leg['completed_actions'].append(operation)
                     record = {'action': operation, 'before_error_deg': error,
                               'before_lateral_m': median(bounds), 'reason_zh': reason}
+                    if operation in SMALL_SIDE_ACTIONS.values():
+                        record.update(small_strafe_profile=gait, small_strafe_upper_m=small_limit)
                     if purpose == 'clearance_strafe':
                         if near_wall_clearance:
                             record['minimum_turn_depth_m'] = turn_depth
@@ -1438,6 +1500,48 @@ def _tag4_left_start_ready(plan, settings):
             and not _tag4_taught_close(plan, settings))
 
 
+def _tag4_grouped_left_route(robot, nav, leg, steps, planned, settings):
+    """Combine plain left strides only from a fresh, near-parallel Tag 4 departure."""
+    left = 'strafe_left_once'
+    if (leg.get('tag4_cautious_left_start') or not planned
+            or any(set(step) != {'op', 'repeat'} or step['op'] != left for step in steps)
+            or any(small or replaced for _, _, small, replaced in planned)):
+        return None
+    plan = leg.get('tag4_near_left_recheck') or leg.get('tag4_forward_trim') or {}
+    ref = leg.get('tag4_left_heading_reference') or {}
+    stamp = plan.get('latest_stamp_ns')
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if (ref.get('status') != 'applied' or not stamp or ref.get('stamp_ns') != stamp
+            or not plan.get('distance_verified') or not plan.get('depth_confirmed')
+            or not live or not live(stamp) or plan.get('max_abs_yaw_deg', 180.) > 8.
+            or max(map(abs, plan.get('lateral_bounds_m') or (1.,))) > .10):
+        return None
+    sizes = {action: count for (op, count), action in SIDE_ACTIONS.items() if op == left}
+    sizes[left] = 1
+    count = sum(sizes[action] for _, batch, _, _ in planned for action in batch)
+    if not 4 <= count <= 8:
+        return None
+    first = (count + 1) // 2
+    groups = [SIDE_ACTIONS[left, first], SIDE_ACTIONS[left, count-first]]
+    if robot.load_kind == 'double':
+        supported = getattr(robot.backend, 'mission_pair_ops', lambda: ())()
+        if not all('double_' + action in supported for action in groups):
+            return None
+    # Include a deadband's worth of slip as well as the observed yaw spread.
+    yaw = ref['heading_deg']
+    spread = 8. + plan.get('max_heading_deviation_deg', 180.)
+    depth = plan.get('distance_bounds_m')
+    if not depth or spread > 11.:
+        return None
+    window = settings.get('distance_window_m', (.045, .55))
+    taught_near = settings.get('target_distance_m', .175) - settings.get('deadband_m', .035)
+    near, far, floor = _side_step_depth_sweep(depth, (yaw-spread, yaw+spread),
+        -first * _RECOVERY_STRAFE_UPPER_M, window, taught_near)
+    if near < floor or far > window[1]:
+        return None
+    return groups
+
+
 def _anchor_tag4_left_departure(robot, leg, plan):
     """Carry the yaw measured at the final stance into the left-strafe controller."""
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
@@ -1482,7 +1586,7 @@ def _tag4_authorize_near_left(robot, nav, settings, plan, leg, *, reserved_actio
             or type(stamp) is not int or live is None or not live(stamp)):
         return False
 
-    travel = _TAG4_RECOVERY_STRAFE_UPPER_M
+    travel = _RECOVERY_STRAFE_UPPER_M
     min_depth, max_depth = settings.get('distance_window_m', (.045, .55))
     shifts = [0., *(-travel * sin(radians(yaw)) for yaw in (heading - spread, heading + spread))]
     lower_target = settings.get('target_distance_m', .175) - settings.get('deadband_m', .035)
@@ -1607,6 +1711,13 @@ def _tag4_retreat_before_left(robot, nav, profile, pose, leg, settings, plan, *,
 
 def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoint,
                           reserved_actions, monitor_only=False, initial_plan=None):
+    if initial_plan is None:
+        cached = Checkpoint_FromBoundary(robot, nav, 4)
+        if cached:
+            boundary_plan = _tag4_longitudinal_observation(robot, nav, cached, settings)
+            if boundary_plan.get('distance_verified'):
+                initial_plan = boundary_plan
+                leg['tag4_departure_reused_boundary'] = True
     plan = initial_plan if initial_plan is not None else _tag4_position_plan(robot, nav, profile, settings)
     partial = plan.get('partial_pose') or {}
     if (not plan['distance_verified'] and not plan.get('camera_contract_fault')
@@ -2767,13 +2878,15 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
                        or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         _, observed = _refresh_checkpoint_pose(robot, nav, profile, 3, quick_id=True,
                                                reuse_settled_cache=True, advisory_windows=1)
+        checkpoint = observed
         hint = _tag3_route_hint(observed, nav, profile, recovery=True)
     if (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
             or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         return
     yaw = hint['heading_deg']
     stamp = hint['latest_stamp_ns']
-    info = leg[report_key] = {'before_error_deg': yaw, 'stamp_ns': stamp}
+    info = leg[report_key] = {'before_error_deg': yaw, 'stamp_ns': stamp,
+        'observed_ids': (checkpoint.get('scan') or {}).get('observed_ids', [])}
     if 'local_zero' in hint:
         info['initial_local_zero'] = hint['local_zero']
     peripheral = _tag3_peripheral_heading(robot, nav, leg, hint)
@@ -2798,6 +2911,28 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
     if 'local_zero' in hint:
         info['local_zero'] = hint['local_zero']
     return hint
+
+
+def _tag3_handoff_window(robot, nav, leg):
+    """Reuse a healthy, fresh Tag-4 miss if the final strafe actually decoded only Tag 3."""
+    if ((leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
+            or leg.get('tag3_clearance_probe') or getattr(robot, 'magnetic_route_only', False)):
+        return None
+    report = getattr(robot, 'last_boundary_visual', None) or {}
+    stance = robot.last_action_completed_ros_ns
+    scan = report.get('scan') or {}
+    if (report.get('target_id') != 4 or report.get('fault_diagnostic') or report.get('stance_completed_ns') != stance
+            or not all(report.get(k) is True for k in ('boundary_valid','camera_healthy','camera_info_ready','contract_match'))
+            or scan.get('status') != 'no_tag' or scan.get('observed_ids') != [3] or scan.get('samples') != 0
+            or (report.get('row_counts') or {}).get('current_rows', 0) < nav.cfg['min_frames']):
+        return None
+    floor, captured, restart = report.get('after_ns'), report.get('now_ns'), report.get('camera_restart_ns', 0)
+    now = Checkpoint_OptionalScanTime(nav.io, robot.check)
+    if (not all(type(t) is int for t in (stance, floor, captured, restart, now))
+            or not 0 < stance <= floor < captured <= now or restart > floor
+            or now - captured > min(.25, nav.cfg['max_age_s'])*1e9):
+        return None
+    return {'expected_id':4, 'detected':False, 'scan':scan, 'camera_info':report.get('camera_info') or {}}
 
 
 def _tag3_lateral_hint(tag2_leg, nav, deadband, refreshed=None, *, departure_turned=False):
@@ -2899,10 +3034,15 @@ def _trim_tag5_entry(robot, nav, profile, settings, checkpoint, delivery, *, res
     for index in range(_TAG5_ENTRY_TRIMS + 1):
         _revalidate_heading(robot, nav)
         has_small = not getattr(robot, 'magnetic_route_only', False) and ready()
-        plan = RoutePose_PlanTag5EntryLateral(checkpoint, nav.cfg, settings, small_ready=has_small)
+        gait, small_limit = Cmd0Motion_SmallStrafeProfile(robot.backend)
+        def current_plan():
+            plan = RoutePose_PlanTag5EntryLateral(checkpoint, nav.cfg, settings, small_ready=has_small,
+                                                  small_travel_upper_m=small_limit)
+            return dict(plan, small_strafe_profile=gait, small_strafe_upper_m=small_limit)
+        plan = current_plan()
         if index == 0 and plan['operation'] and live is not None and not live(plan['latest_stamp_ns']):
             _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5)
-            plan = RoutePose_PlanTag5EntryLateral(checkpoint, nav.cfg, settings, small_ready=has_small)
+            plan = current_plan()
         alignment['observations'].append(plan)
         error = plan.get('map_y_error_m')
         movement = plan['operation']
@@ -2940,9 +3080,12 @@ def _tag5_passage_plan(robot, nav, settings, checkpoint, *, approach_distance_m=
     if type(completed) is int and type(after) is int and after < completed:
         settled = completed + int(nav.cfg['settle_s'] * 1e9)
         checkpoint = dict(checkpoint, scan=dict(scan, after_ns=settled))
+    gait, small_limit = Cmd0Motion_SmallStrafeProfile(robot.backend)
     plan = RoutePose_PlanTag5Passage(
         checkpoint, nav.cfg, settings, current_group_distance_m=approach_distance_m,
-        small_ready=not getattr(robot, 'magnetic_route_only', False) and small_ready())
+        small_ready=not getattr(robot, 'magnetic_route_only', False) and small_ready(), small_travel_upper_m=small_limit)
+    plan['small_strafe_profile'] = gait
+    plan['small_strafe_upper_m'] = small_limit
     ready = VisualCamera_GetFreshnessCheck(nav.io)
     if plan['geometry_valid'] and (type(completed) is not int or ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(geometry_valid=False, ready_for_forward=False, operation=None,
@@ -3020,6 +3163,37 @@ def _tag5_wider_side_recovery(plan, settings, operation):
     return None
 
 
+def _tag5_group_centering(robot, settings, plan, side):
+    """Combine two full strides when even the faster measured gait ends near the same side."""
+    if (side not in _SIDE_ACTIONS or plan.get('operation') != side or not plan.get('geometry_valid')
+            or plan.get('entering') or not plan.get('lateral_recovery_allowed')
+            or not _tag5_has_heading_bounds(plan)
+            or plan['max_abs_heading_deg'] > settings.get('max_heading_deg', 12.)
+            or not robot.cfg.get('route_steps', {}).get('continue_estimated_route')
+            or not Cmd0Motion_ContinuousReady(robot.backend)):
+        return side
+    grouped = SIDE_ACTIONS[side, 2]
+    if (robot.load_kind not in ('single', 'double') or (robot.load_kind == 'double'
+            and 'double_' + grouped not in getattr(robot.backend, 'mission_pair_ops', lambda: ())())):
+        return side
+    lateral = plan.get('lateral_bounds_m')
+    projected = plan.get('projected_lateral_bounds_m')
+    if not lateral or not projected:
+        return side
+    direction = 1 if side == 'strafe_left_once' else -1
+    inner = min(direction * x for x in (*lateral, *projected))
+    # The Nov 26 gate run moved 9.3 cm in one stride. Even after the first
+    # stride the whole body/path estimate must still need a second one.
+    stride = _RECOVERY_STRAFE_UPPER_M
+    if (inner - stride <= settings.get('lateral_clearance_m', .075)
+            or inner - 2 * stride < -min(.025, settings.get('deadband_m', .05))):
+        return side
+    window = settings.get('passage_depth_window_m', (.075, .45))
+    near, far, floor = _side_step_depth_sweep(plan['depth_bounds_m'], plan['heading_bounds_deg'],
+                                            -direction * 2 * stride, window, _TAG5_OUTSIDE_SIDE_DEPTH_M)
+    return grouped if near >= floor and far <= window[1] else side
+
+
 def _tag5_has_heading_bounds(plan):
     bounds = plan.get('heading_bounds_deg')
     return (isinstance(bounds, (list, tuple)) and len(bounds) == 2
@@ -3046,7 +3220,7 @@ def _tag5_small_strafe_feedback(before, after, operation, settings):
     depth = after.get('depth_bounds_m')
     if not _tag5_has_heading_bounds(after) or not depth:
         return None
-    travel = _SMALL_SIDE_TRAVEL_UPPER_M
+    travel = after.get('small_strafe_upper_m', LEGACY_SMALL_STRAFE_LIMIT_M)
     window = settings.get('passage_depth_window_m', (.075, .45))
     sweep_near, sweep_far, floor = _side_step_depth_sweep(depth, yaw, -direction * travel,
                                                           window, _TAG5_TIGHT_SIDE_DEPTH_M)
@@ -3113,7 +3287,8 @@ def _tag5_heading_clearance(robot, nav, plan, settings):
                    and getattr(robot.backend, 'small_strafe_ready', lambda: False)())
     moves = [(side, _LARGE_STRAFE_TRAVEL_UPPER_M, _TAG5_OUTSIDE_SIDE_DEPTH_M)]
     if small_ready:
-        moves.insert(0, (SMALL_SIDE_ACTIONS[side], _SMALL_SIDE_TRAVEL_UPPER_M, _TAG5_TIGHT_SIDE_DEPTH_M))
+        moves.insert(0, (SMALL_SIDE_ACTIONS[side], Cmd0Motion_SmallStrafeProfile(robot.backend)[1],
+                         _TAG5_TIGHT_SIDE_DEPTH_M))
     measured = _tag5_has_heading_bounds(plan)
     heading_bounds = plan['heading_bounds_deg'] if measured else (-spread, spread)
     direction = -1 if side == 'strafe_left_once' else 1
@@ -3132,6 +3307,12 @@ def _tag5_unseen_left_step(robot, settings, alignment, plan):
     """Resume only the skipped part of the lateral route, accounting for subsequent motion."""
     route = alignment.get('remaining_left_actions')
     if not route or plan['geometry_valid']:
+        return None
+    if (any(op in SMALL_SIDE_ACTIONS.values() for op in alignment['completed_actions'])
+            and Cmd0Motion_SmallStrafeProfile(robot.backend)[0] != 'legacy_v1'):
+        # An uncalibrated small gait may slip or move most of a full stride. A
+        # lost target cannot turn that receipt into a count of unpaid full steps.
+        plan['small_strafe_distance_unverified'] = True
         return None
     near = settings.get('large_move_error_m', .10)
     partial = plan.get('partial_pose') or {}
@@ -3177,11 +3358,33 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
     idle_windows = 0
     partial_recheck_stance = None
     last_turn_stance = {}
+    pending_small = None
+    def record_small(operation, before):
+        if operation not in SMALL_SIDE_ACTIONS.values() or not before.get('lateral_bounds_m'):
+            return None
+        gait, upper = Cmd0Motion_SmallStrafeProfile(robot.backend)
+        item = {'operation':operation, 'load':robot.load_kind, 'gait_profile':gait, 'trial_upper_m':upper,
+                'before_bounds_m':before['lateral_bounds_m'], 'before_stamp_ns':before.get('latest_stamp_ns'),
+                'completed_ros_ns':robot.last_action_completed_ros_ns}
+        alignment.setdefault('small_strafe_measurements', []).append(item)
+        return item
+
     while True:
         robot.check()
         extra_retreat_macros = alignment.get('entry_retreat_reserve', 1)
         reserve = reserved_actions + (extra_retreat_macros if 'entry_retreat' in alignment else 0)
         plan = _tag5_passage_plan(robot, nav, settings, checkpoint, approach_distance_m=approach_distance_m)
+        if (pending_small and plan['geometry_valid'] and plan.get('lateral_bounds_m') and
+                type(plan.get('latest_stamp_ns')) is int and type(pending_small['before_stamp_ns']) is int and
+                type(pending_small['completed_ros_ns']) is int and
+                robot.last_action_completed_ros_ns == pending_small['completed_ros_ns'] and
+                plan['latest_stamp_ns'] > max(pending_small['before_stamp_ns'], pending_small['completed_ros_ns'])):
+            sign = 1 if pending_small['operation'] == SMALL_SIDE_ACTIONS['strafe_left_once'] else -1
+            before = sorted(sign*x for x in pending_small['before_bounds_m'])
+            after = sorted(sign*x for x in plan['lateral_bounds_m'])
+            pending_small.update(after_stamp_ns=plan['latest_stamp_ns'], after_bounds_m=plan['lateral_bounds_m'],
+                                 observed_inward_bounds_m=(before[0]-after[1], before[1]-after[0]))
+            pending_small = None
         if not plan['geometry_valid']:
             partial = _corridor_partial_geometry(robot, nav, checkpoint, 5)
             if partial is not None:
@@ -3219,6 +3422,7 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                                                    'reason_zh': '双抱贴近门边，补一次小跨再决定进场步幅。'}
                     robot.corridor_side_action(movement)
                     alignment['completed_actions'].append(movement)
+                    pending_small = record_small(movement, centered)
                     last_side = movement, abs(centered['alignment_error_m']), centered
                     _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5, reuse_settled_cache=True)
                     idle_windows = 0
@@ -3277,8 +3481,12 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 alignment['heading_clearance'] = {'operation': operation, 'reason_zh': reason,
                                                   'before_heading_deg': plan['heading_deg'],
                                                   'before_lateral_m': plan['lateral_error_m']}
-            robot.corridor_side_action(operation)
-            alignment['completed_actions'].append(operation)
+            dispatched = operation if clearance or ineffective else _tag5_group_centering(robot, settings, plan, operation)
+            if dispatched != operation:
+                plan['grouped_centering_action'] = dispatched
+            robot.corridor_side_action(dispatched)
+            alignment['completed_actions'].append(dispatched)
+            pending_small = record_small(dispatched, plan)
             if recovery_from is not None:
                 plan.update(side_recovery_from=recovery_from, side_recovery_operation=operation)
             last_side = operation, error, plan
@@ -3309,7 +3517,7 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5, reuse_settled_cache=True,
                                                            quick_id=True, advisory_windows=2)
                 continue
-            resume = _tag5_unseen_left_step(robot, settings, alignment, plan)
+            resume = None if pending_small else _tag5_unseen_left_step(robot, settings, alignment, plan)
             if resume and robot.count + reserve < robot.cfg['max_body_macros_per_journey']:
                 _report_progress(robot, 'cmd0_tag5_entry_wait', 5, 5,
                                  reason_zh='Tag 5 暂不可见，扣除已走侧跨后继续剩余左跨，本组结束再读码。')
@@ -3932,6 +4140,13 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     and (leg.get('tag4_near_left_start') or leg.get('tag4_cautious_left_start'))):
                 actions = (op, *CorridorTrial_GroupStrafes(op, count - 1, continuous=continuous, monitor_every=2))
             planned.append((op, actions, small, restore_large_step))
+        grouped_left = None
+        if estimate and use_tag5_passage and previous_id == 4 and lateral_action is not None:
+            grouped_left = _tag4_grouped_left_route(robot, nav, leg, steps, planned, tag4_departure)
+            if grouped_left:
+                original_left = planned
+                planned = [('strafe_left_once', grouped_left, None, False)]
+                leg['tag4_left_groups'] = list(grouped_left)
         pending_actions = sum(len(actions) + bool(small) for _, actions, small, _ in planned)
         guarded_tag4_leg = use_tag4_trial and estimate and expected_id == 4
         if guarded_tag4_leg:
@@ -3948,6 +4163,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         tag4_disruption = None
         tag5_handoff = None
         tag5_continuation = None
+        tag5_wait_at_boundary = False
         checkpoint_action=getattr(robot,'route_checkpoint_action',None)
         for index, (op, actions, small, replaced_full) in enumerate(planned):
             guarded_forward = False
@@ -3968,14 +4184,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     group_start = leg.get('completed_forward_steps',0)
                     _revalidate_heading(robot, nav)
                     scan_group = next(n for n in (2,4,8) if n >= min(count, 8))
-                    plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group, boundary_first=True)
-                    leg.setdefault('tag4_approach', []).append(plan)
-                    depth_bounds = plan.get('distance_bounds_m') or (plan.get('partial_pose') or {}).get('distance_bounds_m')
-                    distant = RoutePose_Tag4DepthOnly(depth_bounds, tag4_trial)
-                    if previous_op in _SIDE_ACTIONS and not plan.get('camera_contract_fault'):
-                        # A near Tag 4 already supplies guidance if Tag 3 is absent.
-                        # Only inspect the zero-wait boundary cache for a co-visible Tag 3 then.
-                        near_marker = bool(depth_bounds and not distant)
+                    side_window = None
+                    if previous_op in _SIDE_ACTIONS:
                         last_yaw = CorridorTrial_HeadingSnapshot(
                             getattr(robot, 'last_heading_report', None) or {}, after=True, load=robot.load_kind)
                         completed_at = getattr(robot, 'last_action_completed_monotonic', None)
@@ -3983,16 +4193,34 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                         and last_yaw and type(completed_at) in (float, int) and last_yaw[1] >= completed_at
                                         and abs(last_yaw[0]) <= nav.cfg['post_action_heading'].get('deadband_deg', 8.))
                         if settled_tag3:
+                            side_window = _tag3_handoff_window(robot, nav, leg)
+                    if side_window is None:
+                        plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group, boundary_first=True)
+                    else:
+                        plan = _tag4_longitudinal_observation(robot, nav, side_window, tag4_trial, approach_steps=scan_group)
+                    leg.setdefault('tag4_approach', []).append(plan)
+                    depth_bounds = plan.get('distance_bounds_m') or (plan.get('partial_pose') or {}).get('distance_bounds_m')
+                    distant = RoutePose_Tag4DepthOnly(depth_bounds, tag4_trial)
+                    if previous_op in _SIDE_ACTIONS and not plan.get('camera_contract_fault'):
+                        # A near Tag 4 already supplies guidance if Tag 3 is absent.
+                        # Only inspect the zero-wait boundary cache for a co-visible Tag 3 then.
+                        near_marker = bool(depth_bounds and not distant)
+                        if settled_tag3:
                             leg['tag3_handoff_scan_policy'] = 'current_cache_after_verified_right_strafe'
                         tag3_heading = _tag3_straight_heading(robot, nav, profile, leg,
                             reserved_actions=pending_actions + after_leg,
                             probe_once=not (near_marker or settled_tag3)
                             and getattr(robot, 'boundary_visual_observation', None) is not None)
                         handoff = leg.get('tag3_straight_heading') or {}
-                        if handoff.get('turn') or (near_marker and tag3_heading is not None):
+                        handoff_stable = (settled_tag3 and handoff.get('magnetic_reference') in
+                            ('applied','prior_tag3_reference_retained') and handoff.get('observed_ids') == [3]
+                            and abs(handoff['before_error_deg']) <= nav.cfg['post_action_heading'].get('deadband_deg',8.))
+                        if handoff.get('turn') or (near_marker and tag3_heading is not None) or (side_window and not handoff_stable):
                             plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group,
                                                        boundary_first=True, tag3_heading=tag3_heading)
                             leg['tag4_approach'].append(plan)
+                        elif side_window:
+                            leg['tag3_handoff_scan_policy'] = 'settled_tag3_and_current_tag4_miss'
                         if tag3_heading is not None:
                             leg['straight_heading_source'] = 'current_tag3'
                         elif plan.get('distance_bounds_m') and not RoutePose_Tag4DepthOnly(plan['distance_bounds_m'], tag4_trial):
@@ -4226,6 +4454,16 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                 updated.get('retreat_reason_zh', 'Tag 4 左跨前新位姿未确认足够的前后余量。'))
                         if recovery_leg.get('tag4_near_left_start'):
                             leg['tag4_near_left_start'] = recovery_leg['tag4_near_left_start']
+                if grouped_left and index == action_index == 0:
+                    # The motion revalidation above can outlive the departure image.
+                    if not _tag4_grouped_left_route(robot, nav, leg, steps, original_left, tag4_departure):
+                        fallback = [name for _, batch, _, _ in original_left for name in batch]
+                        pending_actions += len(fallback) - len(actions)
+                        actions[:] = fallback
+                        action = actions[0]
+                        leg['tag4_left_groups'] = list(fallback)
+                        grouped_left = None
+                licensed_group = tag5_continuation is not None
                 if tag5_continuation is not None:
                     midpoint, checkpoint = tag5_continuation
                     tag5_continuation = None
@@ -4308,12 +4546,37 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             sum(sizes.get(name, 1) for name in actions[:action_index+1]), action)
                     elif not gate_approach and not is_boundary and not tag3_midpoint:
                         _corridor_boundary_checkpoint(robot, nav, expected_id, action)
+                    if licensed_group and not is_boundary and not (midpoint and midpoint['geometry_valid']):
+                        # This observation paid for exactly one group. Scan at its endpoint;
+                        # a missing window cannot authorize the old route tail past the door.
+                        leg['tag5_group_endpoint_recheck'] = {'action': action,
+                            'reason_zh': '本组已走完，先在当前站姿找 Tag 5，再决定剩余横移。'}
+                        tag5_wait_at_boundary = True
+                        break
+                    if grouped_left and not is_boundary and not (midpoint and midpoint['geometry_valid']):
+                        residual = leg['lateral_heading_checks'][-1].get('residual_deg')
+                        if residual is None or abs(residual) > 15.:
+                            tail = actions[action_index + 1:]
+                            sizes = {name: n for (kind, n), name in SIDE_ACTIONS.items() if kind == op}
+                            tail_count = sum(sizes.get(name, 1) for name in tail)
+                            short = CorridorTrial_GroupStrafes(op, tail_count, continuous=True, monitor_every=2)
+                            pending_actions += len(short) - len(tail)
+                            actions[action_index + 1:] = short
                     if midpoint is not None:
                         if midpoint['geometry_valid']:
                             remaining_group = actions[action_index+1:action_index+2]
                             if not remaining_group and not small and index+1 < len(planned):
                                 remaining_group = planned[index+1][1][:1]
                             group = _tag5_continuous_left_group(midpoint, remaining_group, robot.load_kind)
+                            if grouped_left and group is None and remaining_group:
+                                size = next((n for n in (3, 4) if SIDE_ACTIONS[op, n] == remaining_group[0]), 0)
+                                for n in range(size - 1, 1, -1):
+                                    candidate = SIDE_ACTIONS[op, n]
+                                    group = _tag5_continuous_left_group(midpoint, (candidate,), robot.load_kind)
+                                    if group:
+                                        pending_actions -= len(actions) - action_index - 2
+                                        actions[action_index+1:] = [candidate]
+                                        break
                             if group is not None:
                                 midpoint.update(decision='keep_continuous_left_group', **group)
                                 tag5_continuation = midpoint, checkpoint
@@ -4350,6 +4613,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     if tag4_disruption and action_index + 1 < len(actions):
                         pending_actions -= len(actions) - action_index - 1
                         break
+            if tag5_wait_at_boundary:
+                break
             if tag5_handoff:
                 if estimate and op == 'strafe_left_once':
                     skipped = list(actions[first_unwalked:])
@@ -4640,18 +4905,18 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
 
 def _tag5_continuous_left_group(plan, remaining, load):
     """Keep a planned group while its estimated travel stays short of the center."""
-    if load != 'single' or plan['ready_for_forward'] or plan['operation'] != 'strafe_left_once':
+    if load not in ('single', 'double') or plan['ready_for_forward'] or plan['operation'] != 'strafe_left_once':
         return None
     if len(remaining) != 1:
         return None
-    strides = next((count for count in (2, 3)
+    strides = next((count for count in (2, 3, 4)
                     if remaining[0] == SIDE_ACTIONS['strafe_left_once', count]), None)
-    if strides is None or plan['max_abs_heading_deg'] > 30.:
+    if strides is None or plan['max_abs_heading_deg'] > (15. if load == 'double' else 30.):
         return None
     # The 20:28 single-load trial reduced x by 21 cm across four full
     # steps and one small step. Use 7.5 cm per full step as a trial upper
     # estimate, plus a separate 2.5 cm reserve before reaching the center.
-    travel_upper = strides * _LARGE_STRAFE_TRAVEL_UPPER_M
+    travel_upper = strides * (_RECOVERY_STRAFE_UPPER_M if load == 'double' else _LARGE_STRAFE_TRAVEL_UPPER_M)
     remaining_lower = plan['lateral_bounds_m'][0] - travel_upper
     depth_lower = plan['depth_bounds_m'][0] - travel_upper * sin(radians(plan['max_abs_heading_deg']))
     if remaining_lower < .025 or depth_lower < .075:

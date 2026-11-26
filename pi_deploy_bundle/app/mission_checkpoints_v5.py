@@ -214,9 +214,14 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
     robot.check()
     cfg=nav.cfg
     measured = robot.load_kind == 'single' and error is None and 'target_offsets' in sweep
+    anchor = getattr(getattr(nav, 'mag', None), 'anchor', None) or {}
+    anchored_return = (accept_verified_angle and error is not None and robot.load_kind == 'empty'
+                       and getattr(robot, 'route_command', None) == '2'
+                       and anchor.get('load') == 'empty' and anchor.get('absolute_route_heading_known') is True
+                       and anchor.get('tag_id') in (5, 6, 7, 1) and bool(anchor.get('tag_departure')))
     if sweep['blocked'] or sweep.get('limit_reached') or (not measured and sweep['turns'] >= len(_SWEEP_ORDER)):
         return False
-    if (robot.nav_count >= cfg['max_extra_actions_per_journey']
+    if ((not anchored_return and robot.nav_count >= cfg['max_extra_actions_per_journey'])
             or robot.count >= robot.cfg['max_body_macros_per_journey']):
         if measured:
             sweep.update(status='motion_budget_reached', reason='no body motion remains for Tag search')
@@ -232,6 +237,19 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
         sweep.update(status='heading_unavailable', reason='search heading is unverified or stale')
         return False
     angle=sign*before['raw_heading_deg']
+    empty_fine = False
+    if anchored_return:
+        if (tuple(anchor.get(key) for key in _MAGNETIC_WINDOW_SCOPE) != scope or sign not in (-1,1)
+                or not _verified_search_heading(robot, cfg, before, scope)
+                or not robot.heading_guard.corridor_motion_sample_ready('empty', before['received_monotonic'],
+                                                                       robot.last_action_completed_monotonic)):
+            return False
+        error = wrap(angle + anchor['offset_deg'] - anchor['route_heading_deg'])
+        from checkpoint_alignment import Checkpoint_EmptyTurnAction
+        chosen = Checkpoint_EmptyTurnAction(robot, nav, error, 0.)
+        if chosen is None:
+            return False
+        empty_fine = chosen.startswith('empty_micro_')
     if sweep['origin'] is None:
         sweep['origin']=angle
         sweep['scope']=scope
@@ -267,16 +285,24 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
         signed=deltas(h)[native] if is_micro else (-30.,30.)[index]
         bound=response_limit(h) if is_micro else 45.
         limit=25. if is_micro else 50.
+        if empty_fine:
+            native = chosen
+            signed = -8. if error > 0 else 8.
+            bound = 16.  # Estimated response for scheduling; checked against the settled observation.
     direction=-1 if signed<0 else 1
     if signed==0 or abs(offset+direction*bound)>limit:
         return False
-    if error is not None and (signed*error>=0 or bound>=2*(abs(error)-3.)):
+    if error is not None and (signed*error>=0 or (not empty_fine and bound>=2*(abs(error)-3.))):
         return False
     if check_action is not None and check_action() is False:
         if measured:
             sweep.update(status='camera_unavailable', reason='search requires a current calibrated camera view')
         return False
     (check_capture or robot.check_magnetic_before_motion)()
+    if anchored_return and (not robot.heading_guard.corridor_motion_sample_ready(
+            'empty', before['received_monotonic'], robot.last_action_completed_monotonic)
+            or (empty_fine and not robot.backend.empty_recovery_ready())):
+        return False
     if is_micro:
         robot.backend.check_micro()
         source = 'magnetic' if measured and native.startswith('single_medium_') else 'visual'
@@ -319,6 +345,9 @@ def Checkpoint_TrySweepTurn(robot, nav, sweep, *, read_heading, error=None, pair
                     or direction * (settled_offset - target) >= 0):
                 sweep['target_index'] += 1
             sweep.update(status='turn_measured', reason='search turn measured with fresh same-load heading')
+    elif empty_fine and actual is not None and (direction*actual < _SEARCH_MIN_TURN_DEG
+            or abs(wrap(error+actual)) >= abs(error)):
+        sweep['blocked']=True
     elif actual is None:
         sweep['blocked']=True
         if measured:

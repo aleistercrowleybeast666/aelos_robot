@@ -19,6 +19,8 @@ SIDE_ACTIONS = {
 }
 SMALL_SIDE_ACTIONS = {'strafe_left_once': 'single_small_strafe_left',
                       'strafe_right_once': 'single_small_strafe_right'}
+LEGACY_SMALL_STRAFE_LIMIT_M = .035
+INTERMEDIATE_SMALL_STRAFE_LIMIT_M = .060
 PLACE_ACTION = 'cmd0_place_single'
 PICKUP_BACKWARD4_ACTION = 'cmd1_carry_backward4'
 PICKUP_BACKWARD6_ACTION = 'cmd1_carry_backward6'
@@ -32,6 +34,14 @@ _PICKUP_EXIT_AVAILABLE = frozenset((*PICKUP_EXIT_ACTIONS, *SIDE_ACTIONS.values()
 
 class PickupRetreatUnavailable(RuntimeError):
     """The MCU returned an unsupported action before entering the retreat."""
+
+
+def Cmd0Motion_SmallStrafeProfile(backend):
+    """Only use the old, narrower sweep when this MCU session identified that gait."""
+    profile = getattr(backend, 'small_strafe_profile', lambda: None)()
+    if profile == 'legacy_v1':
+        return profile, LEGACY_SMALL_STRAFE_LIMIT_M
+    return ('intermediate_v2' if profile == 'intermediate_v2' else None), INTERMEDIATE_SMALL_STRAFE_LIMIT_M
 
 
 def _validate_transfer_chain(chain):

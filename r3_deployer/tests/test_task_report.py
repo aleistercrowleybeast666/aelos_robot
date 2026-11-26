@@ -9,6 +9,14 @@ from r3_deployer.control_api import RobotControlUncertainError
 
 
 class TaskReportTests(unittest.TestCase):
+    def test_cancelled_return_keeps_observed_marker_and_completed_motions(self):
+        leg = {"expected_id":6, "empty_heading":{"observations":[{"error_deg":15.46},{"error_deg":4.1}],
+                 "actions":["empty_micro_left"]},
+               "backward_search":{"groups":[{"completed_ros_ns":123},{}]}}
+        lines = task_report.TaskReport_Diagnostics({"events":[{"return_trial":{"legs":[leg]}}]})
+        self.assertIn("返程 Tag 6 已识别 · 视觉航向 +15.46° · 空载小左转 · 转后余差 +4.10°",lines)
+        self.assertIn("返程 Tag 6 找码 · 已空载后退 2 步",lines)
+
     def test_nominal_release_and_default_pair_reports_do_not_claim_a_visual_detection(self):
         result = {"ok":True, "pickup":{"default_pair_station":"tag1_handoff","observed_count":None,
                   "grip_count":2,"vision_reason":"block camera has no fresh post-settle stream"},

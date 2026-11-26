@@ -530,6 +530,29 @@ def _route_notes(result):
     blocks = result.get("expected_blocks_delivered")
     if type(deliveries) is int and deliveries > 0 and type(blocks) is int:
         lines.append(f"已完成 {deliveries} 趟放物动作 · 预计合计 {blocks} 块")
+    return_turns = {"empty_micro_left": "空载小左转", "empty_micro_right": "空载小右转",
+                    "empty_left_turn": "空载左转", "empty_right_turn": "空载右转"}
+    for raw_leg in returned.get("legs") or ():
+        leg = _as_dict(raw_leg)
+        tag = leg.get("expected_id")
+        heading = _as_dict(leg.get("empty_heading"))
+        if type(tag) is not int:
+            continue
+        retreat_groups = _as_dict(leg.get("backward_search")).get("groups") or ()
+        completed_retreats = sum(type(_as_dict(group).get("completed_ros_ns")) is int for group in retreat_groups)
+        if completed_retreats:
+            lines.append(f"返程 Tag {tag} 找码 · 已空载后退 {2 * completed_retreats} 步")
+        readings = heading.get("observations") or ()
+        if readings:
+            turns = [return_turns[op] for op in heading.get("actions") or () if op in return_turns]
+            pieces = [f"返程 Tag {tag} 已识别", _angle_label("视觉航向", _as_dict(readings[0]).get("error_deg"))]
+            if turns:
+                pieces.append("、".join(turns))
+                if len(readings) > len(turns):
+                    pieces.append(_angle_label("转后余差", _as_dict(readings[-1]).get("error_deg")))
+            else:
+                pieces.append(heading.get("reason_zh") or "本窗未执行转向")
+            lines.append(" · ".join(piece for piece in pieces if piece))
     for missing_tag in returned.get("missing_checkpoints") or ():
         tag = _as_dict(missing_tag).get("tag_id")
         if type(tag) is int:

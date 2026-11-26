@@ -5,7 +5,7 @@ from enum import Enum
 from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_AlignEmptyMarker,
                                   Checkpoint_MeasureEmptyMarker as _empty_marker_geometry,
                                   Checkpoint_EmptyMarkerCurrent as _empty_marker_current,
-                                  EMPTY_VISUAL_TURN_TRIGGER_DEG as _EMPTY_VISUAL_TURN_TRIGGER_DEG)
+                                  Checkpoint_EmptyTurnAction)
 from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
 from nav_observation import summarize, wrap
 from route_pose import (RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
@@ -160,16 +160,19 @@ def _return_camera_snapshot(robot, snapshot, tag, after):
         return VisualCamera_Read(lambda check:snapshot(after,check), robot.check)
     except VisualCameraUnavailable as exc:
         robot.events.append({'return_camera_read_error': {'tag_id': tag, 'reason': str(exc)}})
-        return {}
+        return {'camera_read_failed': True}
 
 
-def _return_boundary_geometry(robot, nav, tag):
+def _return_boundary_geometry(robot, nav, tag, *, health=None):
     """Keep an early glimpse only as an advisory in a recovery decision."""
     snapshot = getattr(nav.io, 'boundary_visual_snapshot', None)
     after = robot.last_action_completed_ros_ns
     if snapshot is None or type(after) is not int or after <= 0:
         return None
     scan = _return_camera_snapshot(robot, snapshot, tag, after)
+    if health is not None:
+        health['fault'] = (scan.get('camera_read_failed') or scan.get('camera_healthy') is False
+                           or scan.get('contract_match') is False)
     if (scan.get('boundary_valid') is False or scan.get('camera_healthy') is not True
             or scan.get('contract_match') is not True):
         return None
@@ -209,8 +212,9 @@ def _return_travel(robot, nav, leg, actions):
         geometry = _empty_marker_geometry(robot, nav, candidate)
         if geometry is None:
             continue
-        angle = abs(wrap(geometry['heading_deg'] - goal['tag_heading_deg']))
-        if not early_heading and angle - geometry['max_heading_deviation_deg'] > _EMPTY_VISUAL_TURN_TRIGGER_DEG:
+        residual = wrap(geometry['heading_deg'] - goal['tag_heading_deg'])
+        angle = abs(residual)
+        if not early_heading and Checkpoint_EmptyTurnAction(robot, nav, residual, geometry['max_heading_deviation_deg']):
             early_heading = True
             ReturnTrial_AlignEmptyMarker(robot, nav, candidate)
             leg['approach_heading'] = candidate['empty_heading']
@@ -277,6 +281,121 @@ def _return_recovery_decision(robot, nav, leg, miss, boundary, *, forward_reserv
                 and max(map(abs, geometry['lateral_bounds_m'])) <= lateral_limit):
             decision.update(reason='partial_tag_far_enough', view_change_allowed=forward_reserved)
     return decision
+
+
+def _return_retreat_basis(robot, nav, leg, *, repeat, prior_boundary=None):
+    """Evaluate the expected empty-load marker at this stance, including a healthy blank view."""
+    tag = leg['expected_id']
+    miss = leg.get('checkpoint_not_seen') or {}
+    if (miss.get('tag_id') != tag or not miss.get('healthy_windows')
+            or miss['healthy_windows'] != miss.get('observation_windows')
+            or miss.get('temporary_camera_gaps') or set(miss.get('seen_tags', ())) - {tag}):
+        return None
+    stamp = robot.last_action_completed_ros_ns
+    partial = leg.get('partial_pose_rows', ())
+    current = (RoutePose_PartialCheckpointGeometry(partial, nav.cfg, tag)
+               if leg.get('partial_pose_same_stance_ns') == stamp else None)
+    health = {}
+    boundary = _return_boundary_geometry(robot, nav, tag, health=health)
+    if health.get('fault'):
+        return None
+    candidates = [p for p in (current, boundary, prior_boundary) if p is not None]
+    if candidates:
+        if any(p['body_forward_bounds_m'][1] >= _RETURN_FORWARD_PROBE_DEPTH_M[0] for p in candidates):
+            return None
+        for pose in sorted(candidates, key=lambda p:p['latest_stamp_ns'], reverse=True):
+            low, high = pose['body_forward_bounds_m']
+            depth_limit = .12 if repeat else _RETURN_FORWARD_PROBE_DEPTH_M[0]
+            if (stamp < pose['latest_stamp_ns'] and 0. < low <= high < depth_limit and high-low <= .035
+                    and (not repeat or pose['samples'] >= 2)
+                    and callable(getattr(nav.io, 'visual_motion_ready', None))
+                    and _empty_marker_current(robot, nav, tag, pose['latest_stamp_ns'])):
+                return {'reason':'expected_tag_near', 'geometry':pose}
+        return None
+    if (not repeat and not partial and miss.get('cause') == 'tag_not_visible'
+            and not miss.get('seen_tags')):
+        return {'reason':'healthy_view_without_tag'}
+    return None
+
+
+def _return_retreat_scan(robot, nav, profile, leg, previous, reserved, prior_boundary=None):
+    """One two-step retreat on a miss, a second only on new near-marker evidence."""
+    ready = getattr(robot.backend, 'empty_recovery_ready', None)
+    if ready is None or ready() is not True or robot.load_kind != 'empty':
+        return None
+    tag = leg['expected_id']
+    scan_result = None
+    for attempt in range(2):
+        robot.check()
+        basis = _return_retreat_basis(robot, nav, leg, repeat=attempt > 0,
+                                      prior_boundary=prior_boundary if attempt == 0 else None)
+        # Leave space to undo every acknowledged retreat in addition to the remaining route.
+        if (not basis or ready() is not True or
+                robot.count + reserved + attempt + 2 > robot.cfg['max_body_macros_per_journey']):
+            break
+        recovery = leg.setdefault('backward_search', {'groups':[], 'restored_actions':[]})
+        group = dict(basis, before_stance_ns=robot.last_action_completed_ros_ns)
+        recovery['groups'].append(group)
+        _report_progress(robot, 'cmd2_return_leg', expected_tag=tag, last_passed_tag=previous,
+                         return_step='empty_backward_reobserve', reason_zh=f'返程寻找 Tag {tag}，空载后退两步再扫码。')
+        _move(robot, nav, ('empty_backward2',), leg['completed_actions'], scan_follows=True)
+        group['completed_ros_ns'] = robot.last_action_completed_ros_ns
+        robot.nav_count += 1
+        observation = {'expected_id':tag, 'direction':'return', 'detected':False, 'scan':None,
+                       'observation_windows':0, 'departure_reobservations':0}
+        scan_result = _observe_departure(robot, nav, profile, observation, previous, try_transfer_probe=True)
+        group.update(result=scan_result[0].value, windows=observation['observation_windows'])
+        for key in ('checkpoint_not_seen','camera_info','scan','partial_pose_rows','partial_pose_same_stance_ns'):
+            leg.pop(key, None)
+        total_windows = leg['observation_windows'] + observation['observation_windows']
+        leg.update(observation)
+        leg['observation_windows'] = total_windows
+        if scan_result[0] is not CheckpointScanResult.CHECKPOINT_NOT_SEEN:
+            break
+    return scan_result
+
+
+def _return_repay_search(robot, nav, leg, *, camera_ok):
+    """A search is extra motion. Preserve a measured waypoint, or repay the search before the next leg."""
+    recovery = leg.get('backward_search')
+    if not recovery:
+        return
+    tag = leg['expected_id']
+    target = getattr(robot, 'mission', {}).get('checkpoint_forward_windows_m', {}).get('return', {}).get(str(tag))
+    if not camera_ok:
+        recovery['resolution'] = 'camera_unavailable_no_additional_search_motion'
+        return
+    heading = leg.get('empty_heading') or {}
+    readings = heading.get('observations') or ()
+    if (heading.get('status') in ('marker_lost_after_turn', 'orientation_inconsistent')
+            or readings and abs(readings[-1]['error_deg']) > 15.):
+        recovery['resolution'] = 'retain_reacquired_stance_after_heading_change'
+        return
+    for _ in recovery['groups']:
+        pose = _empty_marker_geometry(robot, nav, leg)
+        if pose:
+            low, high = pose['body_forward_bounds_m']
+            recovery['last_body_forward_bounds_m'] = (low,high)
+            # Use the expected marker in front of the robot. The stored route windows
+            # have opposite signs for opposite printed orientations.
+            far = max(map(abs, target)) if target else _RETURN_FORWARD_PROBE_DEPTH_M[0]
+            if low <= far + .035:
+                recovery['resolution'] = 'use_reacquired_waypoint'
+                return
+        else:
+            partial = _return_retreat_basis(robot, nav, leg, repeat=False)
+            if partial and partial['reason'] == 'expected_tag_near':
+                recovery['resolution'] = 'hold_measured_near_depth'
+                return
+        _move(robot, nav, ('empty_forward2',), leg['completed_actions'], scan_follows=True)
+        robot.nav_count += 1
+        recovery['restored_actions'].append('empty_forward2')
+        if len(recovery['restored_actions']) < len(recovery['groups']):
+            current = _return_boundary_geometry(robot, nav, tag)
+            if current and current['body_forward_bounds_m'][0] <= _RETURN_FORWARD_PROBE_DEPTH_M[0]:
+                recovery['resolution'] = 'use_new_boundary_depth'
+                return
+    recovery['resolution'] = 'restored_nominal_route_depth'
 
 
 def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe=False, early=None):
@@ -453,6 +572,10 @@ def ReturnTrial_Run(robot):
         return set_status(ReturnTrialResult.ROUTE_UNAVAILABLE, 'insufficient body macro budget for empty return')
     if not getattr(robot.backend, 'is_simulation', False):
         robot.backend.check_mission_v5()
+        probe = getattr(robot.backend, 'ensure_empty_recovery', None)
+        if probe is not None:
+            ready = probe()
+            result['empty_recovery_ready'] = ready is True
     profile = RoutePose_Load(robot.project)
 
     set_status(ReturnTrialResult.RETURNING, 'moving through the estimated empty return')
@@ -476,10 +599,18 @@ def ReturnTrial_Run(robot):
         # Tag 6 and Tag 7 precede lateral moves and do not have a forward probe.
         upcoming = route_actions[index+1]
         can_probe = tag in (5, 1) and len(upcoming) > 1 and upcoming[0] == 'empty_forward2'
-        boundary = _return_boundary_geometry(robot, nav, tag) if can_probe else None
+        check_retreat = estimate and getattr(robot.backend, 'empty_recovery_ready', lambda: False)() is True
+        boundary = _return_boundary_geometry(robot, nav, tag) if can_probe or check_retreat else None
         observed, reason = _observe_departure(robot, nav, profile, leg, previous,
                                                try_transfer_probe=can_probe and tag == 1, early=early)
-        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
+        if (check_retreat and not leg.get('detected') and leg.get('checkpoint_not_seen')
+                and observed in (CheckpointScanResult.CHECKPOINT_NOT_SEEN, CheckpointScanResult.MOTION_NOT_STARTED)):
+            reserved = (sum(len(group) for group in route_actions[index+1:]) + chain['transfer_turn']['repeat']
+                        + len(_actions(chain['station_side'])))
+            rescanned = _return_retreat_scan(robot, nav, profile, leg, previous, reserved, boundary)
+            if rescanned:
+                observed, reason = rescanned
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN and not leg.get('backward_search'):
             miss = leg['checkpoint_not_seen']
             decision = _return_recovery_decision(robot, nav, leg, miss, boundary, forward_reserved=can_probe)
             leg['checkpoint_recovery'] = decision
@@ -504,6 +635,10 @@ def ReturnTrial_Run(robot):
                 leg.pop('checkpoint_not_seen', None)
                 observed, reason = _observe_departure(robot, nav, profile, leg, previous)
         if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
+            miss = leg['checkpoint_not_seen']
+            healthy = bool(miss.get('healthy_windows') and miss['healthy_windows'] == miss['observation_windows']
+                           and not miss.get('temporary_camera_gaps'))
+            _return_repay_search(robot, nav, leg, camera_ok=healthy)
             result['missing_checkpoints'].append(leg['checkpoint_not_seen'])
             leg['departure_resolution'] = 'continue_estimated_after_missed_tag'
             continue
@@ -514,6 +649,7 @@ def ReturnTrial_Run(robot):
             else:
                 result['missing_checkpoints'].append(leg.get('checkpoint_not_seen') or
                     {'tag_id': tag, 'cause': observed.value, 'detail': reason})
+            _return_repay_search(robot, nav, leg, camera_ok=observed is not CheckpointScanResult.CAMERA_UNAVAILABLE)
             leg.update(departure_resolution='continue_estimated_after_recovery', departure_reason=reason)
             continue
         if observed is CheckpointScanResult.MOTION_NOT_STARTED:
@@ -521,6 +657,7 @@ def ReturnTrial_Run(robot):
         if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
             return set_status(ReturnTrialResult.CAMERA_UNAVAILABLE, reason)
         ReturnTrial_AlignEmptyMarker(robot, nav, leg)
+        _return_repay_search(robot, nav, leg, camera_ok=True)
         result['checkpoint'] = tag
 
     if result['checkpoint'] == 1:

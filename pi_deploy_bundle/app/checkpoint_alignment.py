@@ -14,6 +14,18 @@ _TAG3_VISUAL_MICRO_TRIGGER_DEG = 7.
 EMPTY_VISUAL_TURN_TRIGGER_DEG = 25.5
 
 
+def Checkpoint_EmptyTurnAction(robot, nav, error, spread):
+    """Pick a finite upright turn for the measured yaw and installed MCU."""
+    magnitude = abs(error) - spread
+    side = 'left' if error > 0 else 'right'
+    if magnitude > EMPTY_VISUAL_TURN_TRIGGER_DEG:
+        return 'empty_' + side + '_turn'
+    if (magnitude > nav.cfg['post_action_heading']['deadband_deg']
+            and getattr(robot.backend, 'empty_recovery_ready', lambda: False)() is True):
+        return 'empty_micro_' + side
+    return None
+
+
 class RouteTagHeadingRebaseResult(Enum):
     APPLIED = 'applied'
     UNAVAILABLE = 'unavailable'
@@ -279,10 +291,11 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
         rebase = getattr(robot, 'Route_RebaseTagHeading', None)
         if rebase is not None:
             reading['magnetic_reference'] = rebase(tag, error, stamp, direction=direction).value
-        # The available empty turn is nominally 30 degrees, with an estimated outer
-        # response of 45 degrees. Small residuals travel with the corrected magnetic target.
-        if abs(error) - geometry['max_heading_deviation_deg'] <= EMPTY_VISUAL_TURN_TRIGGER_DEG:
+        turn = Checkpoint_EmptyTurnAction(robot, nav, error, reading['spread_deg'])
+        if turn is None:
             heading['status'] = 'within_empty_turn_resolution'
+            if abs(error) - reading['spread_deg'] > nav.cfg['post_action_heading']['deadband_deg']:
+                heading['reason_zh'] = '当前 MCU 未确认空载小转，保留视觉余差并在移动后继续测量。'
             return
         previous = heading['observations'][-2] if attempt else None
         # With several consistent frames, an improvement smaller than three degrees
@@ -295,8 +308,6 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
                 or robot.count >= robot.cfg['max_body_macros_per_journey']):
             heading['status'] = 'retain_measured_residual'
             return
-        turn = 'empty_left_turn' if error > 0 else 'empty_right_turn'
-
         def verify():
             robot.check()
             if not Checkpoint_EmptyMarkerCurrent(robot, nav, tag, stamp):
