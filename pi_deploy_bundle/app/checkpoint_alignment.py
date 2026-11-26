@@ -92,6 +92,13 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     return turn
 
 
+def _capture_ready_for_reference(io):
+    health = getattr(io, 'magnetic_capture_health', None)
+    retry = getattr(io, 'retry_magnetic_preflight', None)
+    return (callable(health) and MagneticLoss_IsRecoverable(health())
+            and (getattr(io, 'motion_capture_verified', False) or (callable(retry) and retry())))
+
+
 def Checkpoint_RebaseTagHeading(robot, tag_id, error_deg, observed_at_ns, *, direction=None):
     """Keep a fresh expected Tag's yaw error in the magnetic target for this segment."""
     unavailable = RouteTagHeadingRebaseResult.UNAVAILABLE
@@ -99,7 +106,7 @@ def Checkpoint_RebaseTagHeading(robot, tag_id, error_deg, observed_at_ns, *, dir
     empty_return = (robot.load_kind == 'empty' and getattr(robot,'route_command',None) == '2'
                     and ((direction == 'return' and tag_id in (5,6,7,1))
                          or (direction == 'outbound' and tag_id == 1)))
-    loaded_route = direction is None and robot.load_kind in ('single','double') and tag_id in (1,2,3,4)
+    loaded_route = direction is None and robot.load_kind in ('single','double') and tag_id in (1,2,3,4,5)
     if (not (empty_return or loaded_route) or not robot._allows_missing_magnetic()
             or getattr(robot.backend,'is_simulation',False)
             or not bundle or not bundle['post_action_heading'].get('enabled')
@@ -117,14 +124,9 @@ def Checkpoint_RebaseTagHeading(robot, tag_id, error_deg, observed_at_ns, *, dir
         return unavailable
     heading = {'tag_id':tag_id,'route_heading_deg':goal['route_heading_deg'],
                'error_deg':error_deg,'observed_at_ns':observed_at_ns}
-    if robot.magnetic_route_only:
-        health = nav.io.magnetic_capture_health()
-        if (not MagneticLoss_IsRecoverable(health)
-                or (not nav.io.motion_capture_verified and not nav.io.retry_magnetic_preflight())
-                or not live(observed_at_ns)):
-            robot.events.append({'segment_heading_reference':{'status':'reference_unavailable',
-                                                             'tag_departure':heading}})
-            return unavailable
+    if robot.magnetic_route_only and (not _capture_ready_for_reference(nav.io) or not live(observed_at_ns)):
+        robot.events.append({'segment_heading_reference':{'status':'reference_unavailable', 'tag_departure':heading}})
+        return unavailable
     guard = robot._heading_controller(nav)
     try:
         report = guard.before_straight(robot.load_kind,robot.last_action_completed_monotonic,
@@ -139,7 +141,54 @@ def Checkpoint_RebaseTagHeading(robot, tag_id, error_deg, observed_at_ns, *, dir
     if report['status']=='tag_departure_reference_established':
         robot.magnetic_route_only=False
         robot.last_heading_report=None
+        if loaded_route and tag_id == 5 and not guard.budget.locked:
+            # An empty sample window can block feedback without locking its
+            # budget. The new same-stance sample supersedes that observation.
+            guard.blocked = False
         return RouteTagHeadingRebaseResult.APPLIED
+    return unavailable
+
+
+def Checkpoint_TrackEntryHeading(robot, nav, saved_anchor=None):
+    """Anchor a stationary entry or recover the exact same target after an interruption."""
+    unavailable = RouteTagHeadingRebaseResult.UNAVAILABLE
+    guard = getattr(robot, 'heading_guard', None)
+    if (guard is None or robot.load_kind not in ('single', 'double')
+            or not getattr(robot, '_allows_missing_magnetic', lambda: False)()):
+        return unavailable
+    robot.check()
+    if not _capture_ready_for_reference(nav.io):
+        return unavailable
+    guard = robot._heading_controller(nav)
+    prior = nav.mag.anchor
+    applied = False
+    try:
+        if saved_anchor is None:
+            # Only the relative drift AFTER this stance is observable.
+            nav.mag.anchor = None
+            sample = guard.before_straight(robot.load_kind, robot.last_action_completed_monotonic)
+            target = nav.mag.anchor or {}
+            applied = (sample.get('status') == 'relative_reference_established'
+                       and target.get('capture_verified') and target.get('usable_for_heading')
+                       and target.get('offset_deg') is not None)
+        else:
+            if saved_anchor.get('owner_observation_scope') != guard.observation_scope:
+                return unavailable
+            _, sample = guard.sample(robot.load_kind, robot.last_action_completed_monotonic, stationary_retry=True)
+            nav.mag.anchor = dict(saved_anchor)
+            applied = not guard._target_observation_faults(sample, robot.load_kind)
+        if applied:
+            robot.magnetic_route_only = False
+            robot.last_heading_report = None
+            if not guard.budget.locked:
+                guard.blocked = False
+            return RouteTagHeadingRebaseResult.APPLIED
+    except MagneticDataUnavailable as exc:
+        if not robot.defer_magnetic_route_fault(exc):
+            raise
+    finally:
+        if not applied:
+            nav.mag.anchor = None if robot.magnetic_route_only else prior
     return unavailable
 
 

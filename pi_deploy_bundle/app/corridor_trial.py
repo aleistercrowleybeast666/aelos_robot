@@ -8,6 +8,7 @@ from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
 from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, CheckpointScanResult
+from checkpoint_alignment import Checkpoint_TrackEntryHeading
 from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
 from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
@@ -220,12 +221,13 @@ def CorridorTrial_MirroredPickupStrafes(chain, *, small_ready):
     return tuple(moves)
 
 
-def _nominal_macro_count(steps, *, continuous, legacy):
+def _nominal_macro_count(steps, *, continuous, legacy, guard_tag4=False):
     total = 0
     for step in steps:
         op = step['op']
         if op == _FORWARD_GROUP:
-            total += len(_forward_actions(step['steps'], continuous=continuous, legacy=legacy))
+            total += (step['steps'] // 2 if guard_tag4 else
+                      len(_forward_actions(step['steps'], continuous=continuous, legacy=legacy)))
         elif op in _SIDE_ACTIONS:
             # Budget for the grouped fallback even if native right5 is available.
             total += _side_macro_count(step, continuous=continuous)
@@ -234,7 +236,8 @@ def _nominal_macro_count(steps, *, continuous, legacy):
     return total
 
 
-def CorridorTrial_MaxBodyMacros(chain, *, continuous=True, legacy=False, tag5_passage=False, extra_home_steps=0):
+def CorridorTrial_MaxBodyMacros(chain, *, continuous=True, legacy=False, tag5_passage=False,
+                                extra_home_steps=0, guard_tag4=False):
     """Count planned actions and possible stride fusion, apart from the shared navigation budget."""
     chain = CorridorTrial_ValidateChain(chain, extra_home_steps=extra_home_steps)
     if not continuous:
@@ -259,7 +262,10 @@ def CorridorTrial_MaxBodyMacros(chain, *, continuous=True, legacy=False, tag5_pa
                 actions = _forward_actions(step['steps'], continuous=continuous, legacy=legacy)
                 if not actions:
                     raise ValueError(f'{name} 缺少 {step["steps"]} 步的前进动作')
-                total += len(actions)
+                if name == _DROP and tag5_passage:
+                    total += len(_tag5_monitored_groups(step['steps']))
+                else:
+                    total += step['steps'] // 2 if guard_tag4 and name == 'tag3_to_tag4' else len(actions)
             elif op in _SIDE_ACTIONS:
                 count = step['repeat']
                 cost = _side_macro_count(step, continuous=continuous)
@@ -804,6 +810,82 @@ def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, b
                                           tag3_heading=tag3_heading)
 
 
+def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautious=False, native_five=False):
+    """Choose one closed gait. Past depth can shorten a gait but cannot authorise a long one."""
+    completed = leg.get('completed_forward_steps', 0)
+    # A four-step run reduced measured depth from 37.0 to 15.4 cm. Reserve the
+    # same 12.5 cm per two steps as the Tag 2 approach, including load variation.
+    step_upper = max(.125, settings['two_step_distance_m'][1]) / 2
+    ref = settings.get('left_departure_reference') or {}
+    # Use the existing near-start tolerance when deciding where a group may land.
+    floor = max(settings['distance_window_m'][0],
+                ref.get('distance_m', settings['target_distance_m']) -
+                ref.get('distance_deadband_m', settings['deadband_m']) - _TAG4_NEAR_LEFT_MARGIN_M)
+    anchor = leg.get('tag4_range_anchor')
+    travelled = completed - anchor['completed_steps'] if anchor else 0
+    lower = (anchor['bounds_m'][0] - travelled * step_upper - anchor['range_margin_m']
+             if anchor else None)
+    current_range = None
+    partial = plan.get('partial_pose') or {}
+    if plan['distance_verified']:
+        bounds, stamp = plan.get('distance_bounds_m'), plan.get('latest_stamp_ns')
+    elif partial.get('consistent') and partial.get('latest_fresh') and partial.get('samples', 0) >= 2:
+        bounds, stamp = partial.get('distance_bounds_m'), partial.get('latest_stamp_ns')
+    else:
+        bounds, stamp = None, None
+    stance = getattr(robot, 'last_action_completed_ros_ns', None)
+    live = getattr(nav.io, 'visual_motion_ready', None)
+    if (bounds and len(bounds) == 2 and all(type(v) in (float, int) and isfinite(v) for v in bounds)
+            and 0 < bounds[0] <= bounds[1] <= settings['distance_window_m'][1]
+            and bounds[1] - bounds[0] <= .025 and type(stamp) is int
+            and type(stance) is int and stamp > stance and live and live(stamp)
+            and (not anchor or stamp > anchor['stamp_ns']) and not plan.get('camera_contract_fault')):
+        current_range = tuple(bounds)
+    reason = 'fresh_range'
+    if current_range is not None:
+        # Slip can consume an entire stride. A forward gait cannot, however,
+        # explain the marker moving substantially further away than before.
+        if anchor and current_range[0] > anchor['bounds_m'][1] - travelled * settings['two_step_distance_m'][0] / 2 + .025:
+            reason = ('range_jump_farther' if current_range[0] > anchor['bounds_m'][1] + .025
+                      else 'range_did_not_close')
+            cautious = True
+        else:
+            range_margin = 0.
+            if anchor and current_range[1] < lower - .025:
+                # A nearer surprise is immediately useful for reducing travel.
+                reason = 'range_jump_nearer'
+                cautious = True
+            distance_only = RoutePose_Tag4DepthOnly(current_range, settings)
+            expected_motion = (anchor and travelled > 0 and
+                               current_range[1] >= anchor['bounds_m'][0] - travelled * step_upper - .025)
+            if not expected_motion and (distance_only or current_range[0] >= floor + 4 * step_upper):
+                # Stable corners in a single distant window can still overestimate
+                # depth. Keep ten cm in reserve until a second stance agrees.
+                range_margin = .10
+                cautious = True
+                reason = 'uncorroborated_long_range'
+            leg['tag4_range_anchor'] = {'bounds_m':current_range, 'stamp_ns':stamp, 'range_margin_m':range_margin,
+                                        'completed_steps':completed}
+            lower = current_range[0] - range_margin
+    else:
+        reason = 'previous_range_minus_travel' if anchor else 'no_range_yet'
+    if reason == 'no_range_yet':
+        cap = 4 if completed == 0 and not cautious else 2
+    elif reason == 'previous_range_minus_travel' or cautious or not plan['distance_verified']:
+        cap = 2
+    else:
+        cap = 8
+    sizes = (8, 5, 4, 2) if native_five else (8, 4, 2)
+    step_count = next((n for n in sizes if n <= min(requested, cap)
+                       and (lower is None or lower - step_upper * n >= floor)), 0)
+    leg.setdefault('tag4_forward_limits', []).append({
+        'completed_steps':completed, 'requested_steps':requested, 'next_steps':step_count,
+        'range_source':reason, 'observed_bounds_m':current_range,
+        'projected_min_depth_m':lower, 'stride_upper_m':step_upper, 'landing_floor_m':floor})
+    plan['scheduled_steps'] = step_count
+    return step_count
+
+
 def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approach_steps=None, tag3_heading=None):
     options = {}
     if (tag3_heading and tag3_heading['latest_stamp_ns'] > robot.last_action_completed_ros_ns
@@ -1124,6 +1206,9 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
         if not moved and stationary >= 2:
             break
         if moved:
+            # Forward-only distance accounting ends when recovery turns, backs
+            # up or changes lanes. The next stance establishes its own depth.
+            leg.pop('tag4_range_anchor', None)
             motion_evidence_stamp = stamp
             completed = robot.last_action_completed_ros_ns
             if type(completed) is int:
@@ -1152,6 +1237,8 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
         source_tag = 3 if plan.get('heading_authority') == 'current_tag3' else 4
         heading_stamp = plan.get('heading_observed_at_ns', plan['latest_stamp_ns'])
         recovery['heading_reference'] = rebase(source_tag, plan['heading_deg'], heading_stamp).value
+        if source_tag == 4 and recovery['heading_reference'] == 'applied':
+            plan['rebased_stamp_ns'] = heading_stamp
     return plan
 
 
@@ -1230,6 +1317,23 @@ def _tag4_left_start_ready(plan, settings):
     return (plan.get('depth_confirmed') and plan['distance_verified'] and not plan['steps']
             and not plan.get('confirmed_near') and not plan.get('confirmed_far')
             and not _tag4_taught_close(plan, settings))
+
+
+def _anchor_tag4_left_departure(robot, leg, plan):
+    """Carry the yaw measured at the final stance into the left-strafe controller."""
+    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+    stamp = plan.get('latest_stamp_ns')
+    heading = plan.get('heading_deg')
+    if (rebase is None or not plan.get('distance_verified') or type(stamp) is not int
+            or heading is None or plan.get('camera_contract_fault')
+            or plan.get('heading_authority') in ('prior_route_reference', 'current_tag3')
+            or plan.get('max_heading_deviation_deg', float('inf')) > 3.):
+        return
+    if (leg.get('tag4_left_heading_reference') or {}).get('stamp_ns') == stamp:
+        return
+    # The shared rebase checks that the frame is live and newer than the last motion.
+    status = 'applied' if plan.get('rebased_stamp_ns') == stamp else rebase(4, heading, stamp).value
+    leg['tag4_left_heading_reference'] = {'status': status, 'heading_deg': heading, 'stamp_ns': stamp}
 
 
 def _tag4_authorize_near_left(robot, nav, settings, plan, leg, *, reserved_actions):
@@ -1338,6 +1442,7 @@ def _tag4_retreat_before_left(robot, nav, profile, pose, leg, settings, plan, *,
             if (_tag4_left_start_ready(after, settings)
                     or _tag4_authorize_near_left(robot, nav, settings, after, leg, reserved_actions=reserved_actions)):
                 plan['approach_confirmed'] = True
+                _anchor_tag4_left_departure(robot, leg, after)
                 return measured, True
             if not after['distance_verified']:
                 if after.get('camera_contract_fault') or attempt >= 1:
@@ -1408,6 +1513,7 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
             return pose, False
         advisory = plan.get('partial_advice')
     if _tag4_authorize_near_left(robot, nav, settings, plan, leg, reserved_actions=reserved_actions):
+        _anchor_tag4_left_departure(robot, leg, plan)
         return pose, True
     if advisory == 'near':
         partial = plan['partial_pose']
@@ -1457,6 +1563,7 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
         plan['retreat_reason_zh'] = (f"Tag 4 距码约 {plan['distance_m']*100:.1f} cm，"
                                     '左跨和沿原路后退均未确认足够余量。')
         return pose, False
+    _anchor_tag4_left_departure(robot, leg, plan)
     return pose, True
 
 
@@ -1481,7 +1588,7 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
                            and (not batches or (plan.get('partial_pose') or {}).get('samples', 0) >= 2))
         can_advance = ((measured_advance or partial_advance) and len(batches)<_TAG4_APPROACH_GROUPS
                        and robot.count+reserved_actions+1<=robot.cfg['max_body_macros_per_journey'])
-        if need_reference and (ready or can_advance):
+        if need_reference and can_advance and not ready:
             rebase = getattr(robot, 'Route_RebaseTagHeading', None)
             if plan.get('heading_authority') == 'prior_route_reference':
                 initial['heading_reference'] = 'prior_route_reference'
@@ -1494,6 +1601,7 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
             need_reference = False
         if ready and fresh(stamp):
             initial.update(approach_confirmed=True, after_distance_m=plan['distance_m'])
+            _anchor_tag4_left_departure(robot, leg, plan)
             return pose, True
         taught_close = _tag4_taught_close(plan, settings)
         last_move = (leg['completed_actions'] or [None])[-1]
@@ -2877,6 +2985,27 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
         if turns and 'after_heading_deg' not in turns[-1] and plan['geometry_valid']:
             turns[-1]['after_heading_deg'] = plan['heading_deg']
         if plan['ready_for_forward']:
+            edge = plan.get('projected_lateral_bounds_m')
+            if (robot.load_kind == 'double' and plan.get('near_parallel_entry') and edge
+                    and 'edge_centering' not in alignment
+                    and (last_side is None or abs(last_side[2]['lateral_error_m']) - abs(plan['lateral_error_m']) >= .005)
+                    and robot.count + reserve < robot.cfg['max_body_macros_per_journey']):
+                # A parallel pair can fit numerically with only millimetres left.
+                # Spend at most one extra small stride to centre it before entering.
+                inner = max(settings.get('deadband_m', .05), settings.get('lateral_clearance_m', .075) - .015)
+                centered = _tag5_passage_plan(robot, nav, dict(settings, lateral_clearance_m=inner),
+                                               checkpoint, approach_distance_m=approach_distance_m)
+                movement = centered.get('operation')
+                if (centered['geometry_valid'] and movement in SMALL_SIDE_ACTIONS.values()
+                        and centered['latest_stamp_ns'] == plan['latest_stamp_ns']):
+                    alignment['edge_centering'] = {'operation': movement, 'before_bounds_m': edge,
+                                                   'reason_zh': '双抱贴近门边，补一次小跨再决定进场步幅。'}
+                    robot.corridor_side_action(movement)
+                    alignment['completed_actions'].append(movement)
+                    last_side = movement, abs(centered['alignment_error_m']), centered
+                    _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5, reuse_settled_cache=True)
+                    idle_windows = 0
+                    continue
             alignment.update(status='aligned', ready_for_forward=True)
             return plan
         clearance = None
@@ -2974,6 +3103,24 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 idle_windows = 0
                 continue
             idle_windows += 1
+            previous = records[-2] if idle_windows >= 2 else {}
+            if (idle_windows >= 2 and plan['geometry_valid'] and alignment.get('entry_group_steps') == 4
+                    and robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
+                    and previous.get('geometry_valid') and plan['latest_stamp_ns'] > previous['latest_stamp_ns']
+                    and abs(plan['lateral_error_m'] - previous['lateral_error_m']) <= .025
+                    and abs(plan['heading_deg'] - previous['heading_deg']) <= 3.
+                    and robot.count + reserve + 1 <= robot.cfg['max_body_macros_per_journey']):
+                # The passage calculation checks both the path to the doorway and
+                # the stride endpoint. Re-evaluate this stance for the shorter gait.
+                short = _tag5_passage_plan(robot, nav, settings, checkpoint,
+                                            approach_distance_m=_tag5_approach_distance('carry_forward2'))
+                if (short['ready_for_forward'] and short.get('latest_stamp_ns') == plan['latest_stamp_ns']
+                        and not short.get('near_parallel_entry')):
+                    alignment.update(status='aligned_for_two_steps', ready_for_forward=True, entry_group_steps=2,
+                                     short_entry={'steps': 2, 'original_steps': 4, 'stamp_ns': short['latest_stamp_ns']})
+                    _report_progress(robot, 'cmd0_delivery_advance', 5, 5,
+                                     reason_zh='门前四步的预计横偏超出余量，两步可通行。先走两步校航，再走剩余步数。')
+                    return short
             if idle_windows >= _TAG5_IDLE_WINDOWS:
                 reason = plan['reason']
                 detail_zh = {
@@ -3047,11 +3194,13 @@ def _tag5_continuous_entry(robot, nav, settings, plan):
     projected = plan.get('projected_lateral_bounds_m')
     stamp = plan.get('latest_stamp_ns')
     live = getattr(nav.io, 'visual_motion_ready', None)
-    if (not plan.get('geometry_valid') or not plan['ready_for_forward'] or plan.get('entering')
+    pair = robot.load_kind == 'double'
+    if (not plan.get('geometry_valid') or not plan['ready_for_forward'] or plan.get('entering') or plan.get('near_parallel_entry')
             or heading_bounds is None or lateral is None or projected is None
-            or max(map(abs, heading_bounds)) > 8. or type(stamp) is not int or live is None or not live(stamp)):
+            or max(map(abs, heading_bounds)) > (4. if pair else 6.)
+            or type(stamp) is not int or live is None or not live(stamp)):
         return None
-    if robot.load_kind == 'double':
+    if pair:
         pair_ops = getattr(robot.backend, 'mission_pair_ops', lambda: ())()
         if 'double_carry_forward' not in pair_ops:
             return None
@@ -3059,12 +3208,20 @@ def _tag5_continuous_entry(robot, nav, settings, plan):
     distance = _tag5_approach_distance('carry_forward') + _TAG5_STEP_UPPER_M
     shifts = [0., *(distance * sin(radians(yaw)) for yaw in heading_bounds)]
     bounds = min(projected[0], lateral[0] + min(shifts)), max(projected[1], lateral[1] + max(shifts))
-    limit = settings.get('lateral_clearance_m', .075) - .015
+    limit = settings.get('lateral_clearance_m', .075) - (.030 if pair else .020)
     if max(map(abs, bounds)) > limit:
         return None
     return {'action': 'carry_forward', 'latest_stamp_ns': stamp, 'steps': 8,
             'projected_lateral_bounds_m': bounds,
             'reason_zh': 'Tag 5 新位姿确认整段进场有余量，合并为连续前进 8 步。'}
+
+
+def _tag5_monitored_groups(steps):
+    # The smallest odd distance supported by the loaded MCU is five strides.
+    paired = steps - (5 if steps % 2 else 0)
+    return (('carry_forward4',) * (paired // 4)
+            + ('carry_forward2',) * (paired % 4 // 2)
+            + (('cmd0_carry_forward5',) if steps % 2 else ()))
 
 
 def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None):
@@ -3148,14 +3305,20 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
     tag5_alignment = robot.cfg.get('route_steps', {}).get('tag5_entry_lateral') or {}
     use_tag5_passage = (tag5_alignment.get('enabled') is True and tag5_alignment.get('verify_passage') is True
                        and continuous and not getattr(robot.backend,'is_simulation',False))
+    match_entry = use_tag5_passage and estimate
     entry_actions = (_forward_actions(chain[_DROP][0]['steps'], continuous=True, legacy=False)
                      if use_tag5_passage else ())
+    if match_entry:
+        entry_actions = _tag5_monitored_groups(chain[_DROP][0]['steps'])
     entry_distance = _tag5_approach_distance(entry_actions[0]) if entry_actions else .40
     remaining_route = [name for _, _, name in _LEGS]
     if continuous:
         remaining_route.append(_DROP)
-    required_macros = {name: _nominal_macro_count(chain[name], continuous=continuous, legacy=legacy)
+    required_macros = {name: _nominal_macro_count(chain[name], continuous=continuous, legacy=legacy,
+                        guard_tag4=(name == 'tag3_to_tag4' and use_tag4_trial and estimate))
                        for name in remaining_route}
+    if match_entry:
+        required_macros[_DROP] = 1 + sum(len(_tag5_monitored_groups(step['steps'])) for step in chain[_DROP][:-1])
     after_leg = sum(required_macros.values())
     tag5_probe_steps = 0
     for previous_id, expected_id, name in _LEGS:
@@ -3507,6 +3670,10 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 actions = (op, *CorridorTrial_GroupStrafes(op, count - 1, continuous=continuous, monitor_every=2))
             planned.append((op, actions, small, restore_large_step))
         pending_actions = sum(len(actions) + bool(small) for _, actions, small, _ in planned)
+        guarded_tag4_leg = use_tag4_trial and estimate and expected_id == 4
+        if guarded_tag4_leg:
+            pending_actions += sum(step['steps'] // 2 - len(batch)
+                for step, (op, batch, _, _) in zip(steps, planned) if op == _FORWARD_GROUP)
         if robot.count + pending_actions > robot.cfg['max_body_macros_per_journey']:
             return set_status(CorridorTrialResult.ROUTE_UNAVAILABLE, 'insufficient body macro budget for corridor leg')
 
@@ -3526,16 +3693,19 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 robot.settle_since_last_completed(nav.cfg['settle_s'])
             if op in _SIDE_ACTIONS:
                 omit_tag4_forward = False
+                leg.pop('tag4_range_anchor', None)
             if use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP:
-                if omit_tag4_forward:
-                    pending_actions -= len(actions)
-                    continue
                 count = steps[index]['steps']
-                if count in (2,4,8):
+                group_reserve = count // 2 - len(actions) if guarded_tag4_leg else 0
+                if omit_tag4_forward:
+                    pending_actions -= len(actions) + group_reserve
+                    continue
+                if count in (2,4,8) or guarded_tag4_leg:
                     magnetic_fallback = None
                     group_start = leg.get('completed_forward_steps',0)
                     _revalidate_heading(robot, nav)
-                    plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=count, boundary_first=True)
+                    scan_group = next(n for n in (2,4,8) if n >= min(count, 8))
+                    plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group, boundary_first=True)
                     leg.setdefault('tag4_approach', []).append(plan)
                     depth_bounds = plan.get('distance_bounds_m') or (plan.get('partial_pose') or {}).get('distance_bounds_m')
                     distant = RoutePose_Tag4DepthOnly(depth_bounds, tag4_trial)
@@ -3548,7 +3718,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             probe_once=not near_marker and getattr(robot, 'boundary_visual_observation', None) is not None)
                         handoff = leg.get('tag3_straight_heading') or {}
                         if handoff.get('turn') or (near_marker and tag3_heading is not None):
-                            plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=count,
+                            plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group,
                                                        boundary_first=True, tag3_heading=tag3_heading)
                             leg['tag4_approach'].append(plan)
                         if tag3_heading is not None:
@@ -3565,7 +3735,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                         and plan['distance_verified'] and plan['steps'] == 4)
                         uncertain_axis = ((extended or yaw_changed) and not plan['distance_verified']
                                           and not plan.get('distance_bounds_m') and not plan.get('partial_pose'))
-                        if count == 8 and (distant_four or uncertain_axis) and not plan.get('camera_contract_fault'):
+                        if not estimate and count == 8 and (distant_four or uncertain_axis) and not plan.get('camera_contract_fault'):
                             # Keep the measured route length. Move the existing 4-step checkpoint
                             # earlier when possible, so the usual 12 steps still use two gaits.
                             four = (op, _forward_actions(4, continuous=True, legacy=False), None, False)
@@ -3580,6 +3750,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                     planned[index:index+1] = [four, four]
                                     pending_actions += 1
                                 count, actions = 4, four[1]
+                                scan_group = count
                                 leg['tag3_straight_groups'] = [4, 8 if next_four else 4]
                                 _report_progress(robot, 'cmd0_corridor_leg', 3, 4, leg=leg,
                                     reason_zh='右跨转直行，先前进四步复查近处位姿，再调整剩余直行。')
@@ -3587,7 +3758,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     if (plan.get('partial_advice') in ambiguous and not plan.get('camera_contract_fault')
                             and _tag4_observed_clearance_problem(plan, nav) is None
                             and not _tag4_guarded_forward_ready(nav,plan)):
-                        plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=count)
+                        plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group)
                         leg['tag4_approach'].append(plan)
                     if plan.get('camera_contract_fault') and not resume_nominal(4, '相机来源变更，舍弃该窗位姿。'):
                         return set_status(CorridorTrialResult.CAMERA_UNAVAILABLE,
@@ -3601,7 +3772,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     if not (tag4_disruption or observed_issue) and (plan.get('partial_advice') == 'near' or close_glimpse):
                         leg['tag4_partial_approach'] = partial
                         omit_tag4_forward = True
-                        pending_actions -= len(actions)
+                        pending_actions -= len(actions) + group_reserve
                         continue
                     if tag4_disruption is None:
                         tag4_disruption = observed_issue
@@ -3611,7 +3782,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                              reason_zh=tag4_disruption['reason_zh'])
                     if tag4_disruption:
                         plan = _tag4_recover_forward_pose(robot, nav, profile, tag4_trial, plan, tag4_disruption,
-                                                         leg=leg, approach_steps=count, reserved_actions=pending_actions + after_leg)
+                                                         leg=leg, approach_steps=scan_group, reserved_actions=pending_actions + after_leg)
                         if plan.get('camera_contract_fault') and not resume_nominal(4, '相机来源变更，舍弃恢复窗位姿。'):
                             return set_status(CorridorTrialResult.CAMERA_UNAVAILABLE,
                                               'Tag 4 的扫码来源或相机配置异常。')
@@ -3625,7 +3796,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             current_depth = plan.get('distance_bounds_m') or ()
                             if (len(current_depth) == 2 and .02 <= current_depth[0] <= current_depth[1]
                                     <= tag4_trial['target_distance_m'] + tag4_trial['deadband_m']):
-                                pending_actions -= len(actions)
+                                pending_actions -= len(actions) + group_reserve
                                 omit_tag4_forward = True
                                 tag4_disruption = None
                                 continue
@@ -3650,10 +3821,6 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     advance_steps = plan['steps'] if plan['distance_verified'] else count
                     range_confirmed = plan['distance_verified']
                     tag4_fused_heading = bool(range_confirmed and plan.get('heading_fused_into_forward'))
-                    if tag4_fused_heading:
-                        leg.setdefault('tag4_fused_forward', []).append(plan['heading_fused_into_forward'])
-                        _report_progress(robot, 'cmd0_corridor_leg', 3, 4, leg=leg,
-                            reason_zh=f'Tag 4 已核对整组 {advance_steps} 步的通行余量，继续直行。')
                     boundaries = leg.get('heading_correction_boundaries') or []
                     side_plan = leg['side_plan'] or {}
                     incoming_error = side_plan.get('incoming_heading_residual_deg')
@@ -3667,7 +3834,41 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             'distance_m':plan['distance_m'],'completed_steps':0,
                             'reason_zh':'Tag 4 位姿已确认有短步余量，先走两步再复查。'}
                         leg['tag4_guarded_forward'] = True
-                    if count >= 4 and (plan.get('partial_advice') == 'far' or guarded_forward):
+                    if estimate:
+                        pending_actions -= group_reserve
+                        requested = min(count, advance_steps)
+                        if count == 5 and requested == 4 and plan.get('distance_verified') and all(
+                                k in plan for k in ('distance_bounds_m', 'lateral_bounds_m', 'heading_deg',
+                                                    'max_heading_deviation_deg', 'projection_bounds')):
+                            if _tag4_centered_forward_projection(plan, tag4_trial, 5):
+                                requested = 5
+                        if count % 2 and count > 5:
+                            requested = min(requested, count - 5)
+                        advance_steps = _tag4_approach_stride(robot, nav, tag4_trial, leg, plan, requested,
+                            cautious=(guarded_forward or (not range_confirmed and side_heading_lost)),
+                            native_five=count == 5)
+                        if not advance_steps:
+                            omit_tag4_forward = True
+                        elif advance_steps < count:
+                            # Spend only the unwalked part of this group. Each inserted
+                            # group goes through the same pose/heading check on dispatch.
+                            remainder = count - advance_steps
+                            keep_five = remainder >= 5 and remainder % 2
+                            even_part = remainder - 5 if keep_five else remainder
+                            chunks = ([4] * (even_part // 4) + ([2] if even_part % 4 >= 2 else [])
+                                      + ([5] if keep_five else []))
+                            if remainder % 2 and not keep_five:
+                                # There is no single-step gait for a last odd stride after a short group.
+                                plan['unavailable_final_stride'] = 1
+                            steps = list(steps)
+                            steps[index+1:index+1] = [{'op':op, 'steps':n} for n in chunks]
+                            queued = [(op, _forward_actions(n, continuous=True, legacy=False), None, False)
+                                      for n in chunks]
+                            planned[index+1:index+1] = queued
+                            pending_actions += sum(n // 2 for n in chunks)
+                        if magnetic_fallback is not None:
+                            magnetic_fallback['next_steps'] = advance_steps
+                    elif count >= 4 and (plan.get('partial_advice') == 'far' or guarded_forward):
                         advance_steps = 2
                         if room_to_split:
                             advance_steps = _tag4_recheck_after_short_advance(
@@ -3700,6 +3901,10 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                 magnetic_fallback=magnetic_fallback is not None,
                                 reserved_actions=pending_actions+after_leg)
                             range_confirmed = leg['tag4_approach_split']['tag4_distance_verified']
+                    if tag4_fused_heading and advance_steps:
+                        leg.setdefault('tag4_fused_forward', []).append(plan['heading_fused_into_forward'])
+                        _report_progress(robot, 'cmd0_corridor_leg', 3, 4, leg=leg,
+                            reason_zh=f'Tag 4 已核对本组 {advance_steps} 步的通行余量，继续直行。')
                     if advance_steps != count:
                         pending_actions -= len(actions)
                         if count == 8 and advance_steps + leg.get('completed_forward_steps',0) - group_start < count:
@@ -3732,6 +3937,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             monitor_only=use_tag5_passage, initial_plan=latest)
                         updated = recovery_leg['tag4_forward_trim']
                         leg['tag4_near_left_recheck'] = updated
+                        if recovery_leg.get('tag4_left_heading_reference'):
+                            leg['tag4_left_heading_reference'] = recovery_leg['tag4_left_heading_reference']
                         if ((not ready or not (updated.get('approach_confirmed') or
                                                _tag4_left_start_ready(updated, tag4_departure)))
                                 and not resume_nominal(4, '左跨前复查仍缺少位姿。')):
@@ -3959,6 +4166,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         return set_status(CorridorTrialResult.CHECKPOINT_DETECTED if result['detected'] else CorridorTrialResult.ROUTE_UNAVAILABLE,
                           '进场或放物所需的 MCU 动作不可用，保持持物。')
     base_actions = tuple(action for actions in forward_groups for action in actions)
+    if match_entry:
+        base_actions = tuple(action for index, step in enumerate(approach)
+                             for action in _tag5_monitored_groups(step['steps'] - (tag5_probe_steps if index == 0 else 0)))
+    elif use_tag5_passage and base_actions[0] == 'carry_forward':
+        base_actions = ('carry_forward4', 'carry_forward4', *base_actions[1:])
     if robot.count + len(base_actions) + 1 > robot.cfg['max_body_macros_per_journey']:
         return set_status(CorridorTrialResult.ROUTE_UNAVAILABLE, 'insufficient body macro budget for base approach and release')
     delivery = {'completed_actions': ['carry_forward2'] if tag5_probe_steps else [],
@@ -4000,6 +4212,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             if not resume_nominal(5, reason):
                 return set_status(CorridorTrialResult.DEPARTURE_UNSAFE, f'{reason}，保留方块。')
             alignment['status'] = 'continue_estimated_after_recovery'
+        if alignment.get('short_entry') and base_actions[0] == 'carry_forward4':
+            base_actions = ('carry_forward2', 'carry_forward2', *base_actions[1:])
         if alignment.get('entry_retreat',{}).get('completed_steps') == 2:
             base_actions += ('carry_forward2',)
             delivery['approach_steps'] += 2
@@ -4018,26 +4232,71 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                              reserved_actions=len(base_actions) + 1)
     set_status(CorridorTrialResult.MOVING_TO_CHECKPOINT, '执行进大本营的前进段。')
     _report_progress(robot, 'cmd0_delivery_advance', result['checkpoint'], 5)
-    _revalidate_heading(robot, nav)
-    if use_tag5_passage and aligned is not None and base_actions == ('carry_forward4', 'carry_forward4'):
+    entry_reference = None
+    saved_entry_anchor = None
+    if use_tag5_passage:
+        rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+        yaw = (aligned or {}).get('heading_deg')
+        stamp = (aligned or {}).get('latest_stamp_ns')
+        if rebase is not None and type(yaw) in (int, float) and type(stamp) is int:
+            entry_reference = rebase(5, yaw, stamp).value
+        if match_entry and entry_reference != 'applied':
+            if Checkpoint_TrackEntryHeading(robot, nav).value == 'applied':
+                entry_reference = 'relative'
+        if entry_reference in ('applied', 'relative') and nav.mag.anchor:
+            saved_entry_anchor = dict(nav.mag.anchor)
+        delivery['entry_heading_reference'] = {'status': entry_reference or 'unavailable',
+                                                'tag_id': 5, 'error_deg': yaw, 'observed_at_ns': stamp}
+    if entry_reference not in ('applied', 'relative') and not match_entry:
+        _revalidate_heading(robot, nav)
+    if use_tag5_passage and not match_entry and aligned is not None and base_actions[:2] == ('carry_forward4', 'carry_forward4'):
         continuous_entry = _tag5_continuous_entry(robot, nav, tag5_alignment, aligned)
         if continuous_entry is not None:
-            base_actions = (continuous_entry['action'],)
+            base_actions = (continuous_entry['action'], *base_actions[2:])
             alignment['entry_group_steps'] = continuous_entry['steps']
             delivery['continuous_entry'] = continuous_entry
             _report_progress(robot, 'cmd0_delivery_advance', result['checkpoint'], 5, reason_zh=continuous_entry['reason_zh'])
-    for index, action in enumerate(base_actions):
-        if index:
-            _revalidate_heading(robot, nav)
-        if use_tag5_passage:
+    pending = list(base_actions)
+    verified = entry_reference in ('applied', 'relative')
+    short_groups = match_entry and not verified
+    while pending:
+        if short_groups and pending[0] == 'carry_forward4' and robot.count + len(pending) + 2 <= robot.cfg['max_body_macros_per_journey']:
+            pending[:1] = ['carry_forward2', 'carry_forward2']
+        action = pending.pop(0)
+        reserve = len(pending) + 1
+        # If the four-stride boundary loses its reference, retain room for a
+        # two-stride observation and the original release, with no replay.
+        allow_turn = verified and bool(pending) and robot.count + 1 + reserve < robot.cfg['max_body_macros_per_journey']
+        if allow_turn:
+            robot.action(action, reserved_route_actions=reserve)
+        elif use_tag5_passage:
             robot.action(action, monitor_only_as=action)
         else:
             robot.action(action)
         delivery['completed_actions'].append(action)
-        if index + 1 < len(base_actions):
-            delivery.setdefault('heading_correction_boundaries', []).append({
-                'after_action': action, 'before_action': base_actions[index+1],
-                'monitor_report': getattr(robot, 'last_heading_report', None)})
+        if pending:
+            report = getattr(robot, 'last_heading_report', None)
+            check = {'after_action': action, 'before_action': pending[0], 'monitor_report': report}
+            if use_tag5_passage:
+                check['tag5_referenced_correction'] = allow_turn
+            if match_entry:
+                reading = CorridorTrial_HeadingSnapshot(report or {}, after=True, load=robot.load_kind)
+                missing = (not verified or reading is None or getattr(robot, 'magnetic_route_only', False)
+                           or (report or {}).get('status') == 'magnetic_field_recheck_unusable')
+                short_groups = missing or abs(reading[0]) > nav.cfg['post_action_heading'].get('deadband_deg', 8.)
+                if missing:
+                    verified = Checkpoint_TrackEntryHeading(robot, nav, saved_entry_anchor).value == 'applied'
+                    if verified and not saved_entry_anchor:
+                        saved_entry_anchor = dict(nav.mag.anchor)
+                    check['reference_recovered'] = verified
+                    if verified and robot.count + len(pending) + 1 < robot.cfg['max_body_macros_per_journey']:
+                        robot.monitor_heading(action, reserved_route_actions=len(pending)+1)
+                        check['recovered_monitor_report'] = robot.last_heading_report
+                if short_groups and pending[0] == 'carry_forward4' and robot.count + len(pending) + 2 <= robot.cfg['max_body_macros_per_journey']:
+                    check['before_action'] = 'carry_forward2'
+            else:
+                _revalidate_heading(robot, nav)
+            delivery.setdefault('heading_correction_boundaries', []).append(check)
     _report_progress(robot, 'cmd0_delivery_release', result['checkpoint'], 5)
     robot.action(PLACE_ACTION)
     delivery['completed_actions'].append(PLACE_ACTION)

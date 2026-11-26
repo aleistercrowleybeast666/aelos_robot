@@ -309,7 +309,7 @@ class Robot:
             raise
         self.count+=1;self.events.append({'action':name,'physical_success':'unobserved'})
 
-    def action(self,name,timeout_s=None,*,monitor_only_as=None):
+    def action(self,name,timeout_s=None,*,monitor_only_as=None,reserved_route_actions=0):
         if name not in BODY_ACTIONS:raise ValueError('unknown/unsupported body action: '+str(name))
         self.check()
         if self.count>=self.cfg['max_body_macros_per_journey']:raise RuntimeError('journey macro budget exceeded')
@@ -330,7 +330,8 @@ class Robot:
             return
         if name=='grab_single':self.load_kind='single' # protocol completion changes expected load before sampling
         try:self.monitor_heading(monitor_only_as or name,
-                                 allow_correction=monitor_only_as is None and not self.at_selected_boundary())
+                                 allow_correction=monitor_only_as is None and not self.at_selected_boundary(),
+                                 **({'reserved_route_actions':reserved_route_actions} if reserved_route_actions else {}))
         except Exception:
             self.record_fall_diagnostic(name)
             self.boundary_visual_observation(name,fault_diagnostic=True)
@@ -650,7 +651,7 @@ class Robot:
         self.navigator.load_kind=self.load_kind
         return self.navigator
 
-    def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False):
+    def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False,reserved_route_actions=0):
         name=getattr(self,'heading_turn_phase',None) or name
         cfg=getattr(self,'navigation_bundle',None)
         if (self.magnetic_route_only or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
@@ -670,7 +671,7 @@ class Robot:
                 if checker is None:raise RuntimeError('live micro capability check unavailable')
                 checker()
             required=self.cfg['request_timeout_s']+cfg['post_action_heading']['settle_s']+cfg['magnetic']['collect_s']
-            if self.count>=self.cfg['max_body_macros_per_journey'] or self.nav_count>=cfg['max_extra_actions_per_journey'] or self.deadline-self.clock()<=required:return False
+            if self.count+reserved_route_actions>=self.cfg['max_body_macros_per_journey'] or self.nav_count>=cfg['max_extra_actions_per_journey'] or self.deadline-self.clock()<=required:return False
             # Recheck this same decision window after capability/time checks, not just current stream health.
             self.heading_guard.verify_pending_decision()
             # Direct finite backend call: verification is inside the guard, never recurse.

@@ -307,10 +307,11 @@ def OutboundPickup_Prepare(mode, cfg, project, simulation=False):
     entry_ops, _ = EntranceTrial_PlanForward(steps['tag1_to_tag2_forward_steps'],
                                              continuous=True, legacy=False)
     entry_reserve = 2 if (steps.get('tag2_forward_trial') or {}).get('enabled') else 0
+    guard_tag4 = bool(steps.get('continue_estimated_route') and (steps.get('tag4_forward_trial') or {}).get('enabled'))
     tag5_passage = (steps.get('tag5_entry_lateral') or {}).get('verify_passage') is True
     extra_home_steps = steps.get('command2_before_base_turn_extra_steps', 0) if mode == '2' else 0
     outbound_cost = (1 + len(entry_ops) + entry_reserve
-                     + CorridorTrial_MaxBodyMacros(corridor, tag5_passage=tag5_passage,
+                     + CorridorTrial_MaxBodyMacros(corridor, guard_tag4=guard_tag4, tag5_passage=tag5_passage,
                                                   extra_home_steps=extra_home_steps)
                      + nav['max_extra_actions_per_journey'])
     worst = outbound_cost + exit_cost
