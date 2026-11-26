@@ -5,30 +5,9 @@ import json
 import re
 from nav_observation import MAGNETIC_INSUFFICIENT_SAMPLES, summarize, wrap, MagneticReference, mad
 from micro_trial import OPS, active, response_limit
-
-
-class VisualMicroStopped(RuntimeError):
-    def __init__(self, reason, *, report=None):
-        super().__init__(reason)
-        self.report=report
-        if report and report.get('reason_zh'):
-            self.error_details={'error_code':'passive_tag_observation_failed','reason_zh':report['reason_zh']}
-
-
-class VisualCameraUnavailable(VisualMicroStopped):
-    """A camera/AR read failed. This says nothing about the MCU request."""
-
-
-def VisualCamera_Read(read, check):
-    def check_owner():
-        try:
-            check()
-        except OSError as exc:
-            raise RuntimeError('读取图像时控制连接校验失败。') from exc
-    try:
-        return read(check_owner)
-    except OSError as exc:
-        raise VisualCameraUnavailable('图像或扫码话题读取失败：'+str(exc)) from exc
+from checkpoint_scan import Checkpoint_ReadWindow
+from checkpoint_errors import (VisualCamera_DiagnoseWindow, VisualCamera_Read,
+                               VisualCameraUnavailable, VisualMicroStopped)
 
 
 class _VisualObservationExpired(RuntimeError):
@@ -81,33 +60,6 @@ def validate(cfg):
         raise ValueError('dedicated signed nominal five-degree Tag deltas required')
 
 
-def VisualCamera_DiagnoseWindow(window, camera, expected_fingerprint):
-    stream=window.get('camera_window_status', {})
-    ar_waiting_for_first_packet=(stream.get('parameters_match') is True
-                                 and 'ar_source_matches' in stream and stream['ar_source_matches'] is None)
-    if (stream.get('parameters_match') is False or stream.get('ar_source_matches') is False
-            or (not window.get('contract_match') and not ar_waiting_for_first_packet)):
-        return ('camera/AR source or parameters changed during passive Tag checkpoint',
-                '扫码话题来源或参数校验失败。',False)
-    sources=(window.get('camera_info',{}), camera)
-    for item in sources:
-        fingerprint=item.get('fingerprint')
-        if ((fingerprint is not None and fingerprint!=expected_fingerprint)
-                or (item.get('ready') is True and fingerprint!=expected_fingerprint)):
-            return ('actual CameraInfo calibration/source/frame changed',
-                    '胸部相机标定或来源校验失败。',False)
-        if item.get('ready') is not True and not item.get('can_reobserve'):
-            return ('actual CameraInfo calibration/source/frame/time unavailable or changed',
-                    '胸部相机标定、来源或时间校验失败。',False)
-    if not window.get('camera_healthy') or not window.get('contract_match'):
-        return ('camera/AR stream fault during passive Tag checkpoint',
-                '胸部相机或扫码话题暂未收到符合要求的新帧。',True)
-    if any(item.get('ready') is not True for item in sources):
-        return ('CameraInfo/actual image timing unavailable during passive Tag checkpoint',
-                '胸部相机图像与标定帧暂未同步。',True)
-    return None
-
-
 def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadline, check, clock,
                                      accept_trusted_residual=False):
     """Use only fresh calibrated camera heading at an explicit route checkpoint."""
@@ -147,7 +99,7 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
         check()
         remaining=deadline-clock()
         if remaining<=0:break
-        window=VisualCamera_Read(lambda guard:io.observe(tag_id,after_ns,min(cfg['observe_s'],remaining),guard),check)
+        window=Checkpoint_ReadWindow(io,tag_id,after_ns,min(cfg['observe_s'],remaining),check)
         check()
         camera=VisualCamera_Read(lambda _:current(),check) if current is not None else window.get('camera_info',{})
         result.update(camera_info=camera,scan_attempted=True,
@@ -278,7 +230,7 @@ class VisualMicro:
         camera_rechecks=[]
         expected_camera=self.v['camera_info'].get('expected_fingerprint')
         while True:
-            window=VisualCamera_Read(lambda guard:self.io.observe(tag,after_ns,min(self.cfg['observe_s'],deadline-after),guard),self.check)
+            window=Checkpoint_ReadWindow(self.io,tag,after_ns,min(self.cfg['observe_s'],deadline-after),self.check)
             camera=VisualCamera_Read(lambda _:current(),self.check) if current is not None else window.get('camera_info',{})
             if not retry_frames:
                 if not window.get('camera_healthy'):self.camera_fault('camera/AR stream fault, not ordinary Tag loss')
@@ -382,7 +334,7 @@ class VisualMicro:
         after_ns=self.io.ros_now_ns()
         if type(after_ns) is not int or after_ns<pair['scan']['latest_stamp_ns']:
             self.stop('ROS clock moved backwards during Tag recheck',report=report)
-        window=VisualCamera_Read(lambda guard:self.io.observe(tag_id,after_ns,min(self.cfg['observe_s'],remaining),guard),self.check)
+        window=Checkpoint_ReadWindow(self.io,tag_id,after_ns,min(self.cfg['observe_s'],remaining),self.check)
         self.check()
         camera=VisualCamera_Read(lambda _:self.io.visual_camera_status(),self.check)
         issue=VisualCamera_DiagnoseWindow(window,camera,pair['camera_info']['fingerprint'])

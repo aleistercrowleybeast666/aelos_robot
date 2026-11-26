@@ -2,11 +2,15 @@
 
 from enum import Enum
 
-from entrance_trial import EntranceTrial_ObserveCheckpoint, EntranceTrialResult
+from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_AlignEmptyMarker,
+                                  Checkpoint_MeasureEmptyMarker as _empty_marker_geometry,
+                                  Checkpoint_EmptyMarkerCurrent as _empty_marker_current,
+                                  EMPTY_VISUAL_TURN_TRIGGER_DEG as _EMPTY_VISUAL_TURN_TRIGGER_DEG)
+from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
 from nav_observation import summarize, wrap
 from route_pose import (RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
                         RoutePose_PartialCheckpointGeometry, RoutePoseDepartureResult)
-from visual_micro import VisualCamera_Read, VisualCameraUnavailable
+from checkpoint_errors import VisualCamera_Read, VisualCameraUnavailable
 
 
 # Right and left are relative to the robot facing the transfer area. The
@@ -17,8 +21,6 @@ _RETURN_TAG1_PROBE_WINDOWS = 3
 _RETURN_FORWARD_PROBE_DEPTH_M = (.24, .55)
 _RETURN_SINGLE_FRAME_PROBE_MIN_M = .34
 _RETURN_DEPARTURE_RECHECKS = 3
-# One nominal 30-degree empty turn, with 45-degree upper response and 3-degree uncertainty.
-_EMPTY_VISUAL_TURN_TRIGGER_DEG = 25.5
 _TURN_SECTIONS = ('base_turn', 'transfer_turn')
 _MOVE_SECTIONS = tuple(f'tag{tag}' for tag in _RETURN_TAGS) + ('transfer_approach', 'station_side')
 _EMPTY_MOVES = ('empty_forward2', 'free_forward', 'empty_strafe_left', 'empty_strafe_right')
@@ -179,107 +181,6 @@ def _return_boundary_geometry(robot, nav, tag):
     return RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
 
 
-def _empty_marker_geometry(robot, nav, leg):
-    scan = leg.get('scan') or {}
-    tag = leg['expected_id']
-    pinned = nav.cfg.get('visual_micro', {}).get('camera_info', {})
-    camera = leg.get('camera_info') or {}
-    stamp = robot.last_action_completed_ros_ns
-    floor, now = scan.get('after_ns'), scan.get('now_ns')
-    live = getattr(nav.io, 'visual_motion_ready', None)
-    if (robot.load_kind != 'empty' or live is None or type(stamp) is not int
-            or type(floor) is not int or type(now) is not int or not stamp <= floor < now
-            or pinned.get('source_confirmed') is not True or not pinned.get('expected_fingerprint')
-            or camera.get('ready') is not True or camera.get('fingerprint') != pinned['expected_fingerprint']
-            or scan.get('ids') != [tag] or not scan.get('contract_match') or not scan.get('camera_healthy')):
-        return None
-    rows = [row for row in scan.get('observations', ()) if type(row.get('stamp_ns')) is int
-            and floor < row['stamp_ns'] <= now and now - row['stamp_ns'] <= nav.cfg['max_age_s'] * 1e9]
-    geometry = RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
-    if (geometry and geometry['samples'] >= nav.cfg['min_frames'] and geometry['max_heading_deviation_deg'] <= 5.
-            and _empty_marker_current(robot, nav, tag, geometry['latest_stamp_ns'])):
-        return geometry
-    return None
-
-
-def _empty_marker_current(robot, nav, tag, stamp):
-    try:
-        return nav.io.visual_motion_ready(stamp)
-    except OSError as exc:
-        robot.check()
-        robot.events.append({'return_camera_read_error': {'tag_id': tag, 'reason': str(exc)}})
-        return False
-
-
-class _EmptyMarkerExpired(Exception):
-    pass
-
-
-def ReturnTrial_AlignEmptyMarker(robot, nav, leg, *, direction='return'):
-    """Correct the heading of the upright, empty body using the expected floor-marker orientation."""
-    tag = leg['expected_id']
-    goal = next((goal for goal in nav.cfg['legs'].get(direction, ()) if goal['id'] == tag), {})
-    goal_yaw = goal.get('tag_heading_deg')
-    if goal_yaw is None:
-        return
-    heading = {'direction': direction, 'expected_yaw_deg': goal_yaw, 'observations': [], 'actions': []}
-    leg['empty_heading'] = heading
-    current = leg
-    for attempt in range(3):
-        geometry = _empty_marker_geometry(robot, nav, current)
-        if geometry is None:
-            heading['status'] = 'pose_unavailable'
-            return
-        error = wrap(geometry['heading_deg'] - goal_yaw)
-        stamp = geometry['latest_stamp_ns']
-        reading = {'error_deg': error, 'latest_stamp_ns': stamp, 'spread_deg': geometry['max_heading_deviation_deg']}
-        heading['observations'].append(reading)
-        if abs(error) >= 90.:
-            heading['status'] = 'orientation_inconsistent'
-            return
-        rebase = getattr(robot, 'Route_RebaseTagHeading', None)
-        if rebase is not None:
-            reading['magnetic_reference'] = rebase(tag, error, stamp, direction=direction).value
-        # The available empty turn is nominally 30 degrees, with an estimated outer
-        # response of 45 degrees. Small residuals travel with the corrected magnetic target.
-        if abs(error) - geometry['max_heading_deviation_deg'] <= _EMPTY_VISUAL_TURN_TRIGGER_DEG:
-            heading['status'] = 'within_empty_turn_resolution'
-            return
-        previous = heading['observations'][-2] if attempt else None
-        # With several consistent frames, an improvement smaller than three degrees
-        # is usable if the pre/post yaw intervals no longer overlap.
-        progress = previous is None or (previous['error_deg']*error > 0 and stamp > previous['latest_stamp_ns']
-            and abs(previous['error_deg']) - abs(error) > min(3., previous['spread_deg'] + reading['spread_deg']))
-        if (attempt == 2 or not progress or goal.get('allow_turn') is not True
-                or robot.nav_count >= nav.cfg['max_extra_actions_per_journey']
-                or robot.count >= robot.cfg['max_body_macros_per_journey']):
-            heading['status'] = 'retain_measured_residual'
-            return
-        turn = 'empty_left_turn' if error > 0 else 'empty_right_turn'
-
-        def verify():
-            robot.check()
-            if not _empty_marker_current(robot, nav, tag, stamp):
-                raise _EmptyMarkerExpired()
-
-        try:
-            robot.finite(turn, configured=True, checkpoint_follows=True, before_dispatch=verify)
-        except _EmptyMarkerExpired:
-            heading['status'] = 'pose_expired_before_turn'
-            return
-        robot.nav_count += 1
-        heading['actions'].append(turn)
-        current = {'expected_id': tag, 'observation_windows': 0, 'detected': False}
-        observed, _ = EntranceTrial_ObserveCheckpoint(robot, nav, current, lambda: None,
-            quick_id=True, single_window=True, reuse_settled_cache=True)
-        # Do not pass pre-turn positions on to route fusion after the stance changed.
-        leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {},
-                   detected=observed is EntranceTrialResult.CHECKPOINT_DETECTED)
-        if observed is not EntranceTrialResult.CHECKPOINT_DETECTED:
-            heading['status'] = 'marker_lost_after_turn'
-            return
-
-
 def _return_travel(robot, nav, leg, actions):
     """Read the settled camera buffer at action boundaries; shorten only the final approach."""
     tag = leg['expected_id']
@@ -399,22 +300,22 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
             record = getattr(robot, 'route_checkpoint_observed', None)
             if record is not None:
                 record(tag)
-            observed, reason = EntranceTrialResult.CHECKPOINT_DETECTED, 'fresh expected marker at action boundary'
+            observed, reason = CheckpointScanResult.CHECKPOINT_DETECTED, 'fresh expected marker at action boundary'
         else:
-            observed, reason = EntranceTrial_ObserveCheckpoint(
+            observed, reason = Checkpoint_Observe(
                 robot, nav, leg, report_wait, miss_policy='continue_estimated' if advisory_tag else None,
                 advisory_windows=None if advisory_tag else windows, quick_id=try_transfer_probe,
                 reuse_settled_cache=attempt == 0)
-        if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             if try_transfer_probe and attempt == 0:
                 return observed, reason
             miss = leg.get('checkpoint_not_seen') or {}
             if not miss.get('healthy_windows') and miss.get('cause') in ('temporary_camera_gap','camera_stream_unhealthy'):
-                return EntranceTrialResult.CAMERA_UNAVAILABLE, f'返程 Tag {tag} 扫码流未恢复，未进入下一段。'
+                return CheckpointScanResult.CAMERA_UNAVAILABLE, f'返程 Tag {tag} 扫码流未恢复，未进入下一段。'
             if not advisory_tag:
-                return EntranceTrialResult.MOTION_NOT_STARTED, f'返程未确认 Tag {tag}，交接路线尚未定位。'
+                return CheckpointScanResult.MOTION_NOT_STARTED, f'返程未确认 Tag {tag}，交接路线尚未定位。'
             return observed, reason
-        if observed is not EntranceTrialResult.CHECKPOINT_DETECTED:
+        if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
             return observed, reason
 
         scan = dict(leg['scan'], expected_load=robot.load_kind)
@@ -431,7 +332,7 @@ def _observe_departure(robot, nav, profile, leg, previous, *, try_transfer_probe
 
         leg.setdefault('first_departure_hold', advice)
         if attempt == _RETURN_DEPARTURE_RECHECKS:
-            return EntranceTrialResult.MOTION_NOT_STARTED, f'返程 Tag {tag} 位姿多次复核仍不适合进入下一段。'
+            return CheckpointScanResult.MOTION_NOT_STARTED, f'返程 Tag {tag} 位姿多次复核仍不适合进入下一段。'
         leg['departure_reobservations'] += 1
         report_wait()
 
@@ -462,19 +363,19 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
         _report_progress(robot, 'cmd2_return_scan', expected_tag=1, last_passed_tag=last_seen, return_step='transfer_turn',
                          reason_zh='空载已掉头，正在按去程方向重新识别 Tag 1。')
     waiting()
-    observed, detail = EntranceTrial_ObserveCheckpoint(robot, nav, leg, waiting, advisory_windows=3,
+    observed, detail = Checkpoint_Observe(robot, nav, leg, waiting, advisory_windows=3,
                                                        reuse_settled_cache=True)
     leg.update(status=observed.value, reason=detail)
-    if observed is EntranceTrialResult.CHECKPOINT_DETECTED:
+    if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
         ReturnTrial_AlignEmptyMarker(robot, nav, leg, direction='outbound')
     heading = leg.get('empty_heading') or {}
-    if observed is EntranceTrialResult.CHECKPOINT_DETECTED and heading.get('status') not in (
+    if observed is CheckpointScanResult.CHECKPOINT_DETECTED and heading.get('status') not in (
             'within_empty_turn_resolution', 'retain_measured_residual', 'orientation_inconsistent'):
         retry = {'expected_id':1, 'detected':False, 'observation_windows':0}
-        observed, detail = EntranceTrial_ObserveCheckpoint(robot, nav, retry, waiting, single_window=True)
+        observed, detail = Checkpoint_Observe(robot, nav, retry, waiting, single_window=True)
         retry.update(status=observed.value, reason=detail)
         leg['post_turn_second_window'] = retry
-        if observed is EntranceTrialResult.CHECKPOINT_DETECTED:
+        if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
             ReturnTrial_AlignEmptyMarker(robot, nav, retry, direction='outbound')
         heading = retry.get('empty_heading') or {}
     else:
@@ -485,7 +386,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
         leg['reason_zh'] = f"空载掉头后的 Tag 1 实测仍偏 {readings[-1]['error_deg']:+.1f}°，接驳侧跨方向待确认。"
         if not estimate:
             return leg
-    if not (observed is EntranceTrialResult.CHECKPOINT_DETECTED and readings
+    if not (observed is CheckpointScanResult.CHECKPOINT_DETECTED and readings
             and heading.get('status') in ('within_empty_turn_resolution', 'retain_measured_residual')):
         from corridor_trial import CorridorTrial_HeadingSnapshot
         scan = retry.get('scan') or {}
@@ -494,7 +395,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
         target = (anchor.get('planned_group_target') is True or
                   (anchor.get('tag_id') == 1 and anchor.get('absolute_route_heading_known') is True
                    and type(turn_completed_ns) is int and type(tag_stamp) is int and tag_stamp > turn_completed_ns))
-        healthy_miss = (observed is not EntranceTrialResult.CAMERA_UNAVAILABLE and target
+        healthy_miss = (observed is not CheckpointScanResult.CAMERA_UNAVAILABLE and target
                         and not getattr(robot,'magnetic_route_only',False)
                         and scan.get('camera_healthy') is True and scan.get('contract_match') is True)
         if healthy_miss:
@@ -512,7 +413,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
             leg.update(heading_source='verified_empty_turn', residual_deg=current[0])
     else:
         leg.update(heading_source='outbound_tag1_pose', residual_deg=readings[-1]['error_deg'])
-    if observed is EntranceTrialResult.CHECKPOINT_DETECTED:
+    if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
         last_seen = 1
     _report_progress(robot, 'cmd2_return_station', expected_tag=None, last_passed_tag=last_seen, return_step='station_side',
                      reason_zh='进入接驳位置，随后用胸部相机识别方块。')
@@ -578,7 +479,7 @@ def ReturnTrial_Run(robot):
         boundary = _return_boundary_geometry(robot, nav, tag) if can_probe else None
         observed, reason = _observe_departure(robot, nav, profile, leg, previous,
                                                try_transfer_probe=can_probe and tag == 1, early=early)
-        if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             miss = leg['checkpoint_not_seen']
             decision = _return_recovery_decision(robot, nav, leg, miss, boundary, forward_reserved=can_probe)
             leg['checkpoint_recovery'] = decision
@@ -602,12 +503,12 @@ def ReturnTrial_Run(robot):
             if decision['view_change_allowed'] or (can_probe and tag == 1):
                 leg.pop('checkpoint_not_seen', None)
                 observed, reason = _observe_departure(robot, nav, profile, leg, previous)
-        if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             result['missing_checkpoints'].append(leg['checkpoint_not_seen'])
             leg['departure_resolution'] = 'continue_estimated_after_missed_tag'
             continue
-        if estimate and observed in (EntranceTrialResult.MOTION_NOT_STARTED, EntranceTrialResult.CAMERA_UNAVAILABLE):
-            if leg.get('detected') and observed is EntranceTrialResult.MOTION_NOT_STARTED:
+        if estimate and observed in (CheckpointScanResult.MOTION_NOT_STARTED, CheckpointScanResult.CAMERA_UNAVAILABLE):
+            if leg.get('detected') and observed is CheckpointScanResult.MOTION_NOT_STARTED:
                 ReturnTrial_AlignEmptyMarker(robot, nav, leg)
                 result['checkpoint'] = tag
             else:
@@ -615,9 +516,9 @@ def ReturnTrial_Run(robot):
                     {'tag_id': tag, 'cause': observed.value, 'detail': reason})
             leg.update(departure_resolution='continue_estimated_after_recovery', departure_reason=reason)
             continue
-        if observed is EntranceTrialResult.MOTION_NOT_STARTED:
+        if observed is CheckpointScanResult.MOTION_NOT_STARTED:
             return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED, reason)
-        if observed is not EntranceTrialResult.CHECKPOINT_DETECTED:
+        if observed is not CheckpointScanResult.CHECKPOINT_DETECTED:
             return set_status(ReturnTrialResult.CAMERA_UNAVAILABLE, reason)
         ReturnTrial_AlignEmptyMarker(robot, nav, leg)
         result['checkpoint'] = tag

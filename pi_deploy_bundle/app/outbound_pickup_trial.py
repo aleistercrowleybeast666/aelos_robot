@@ -17,15 +17,15 @@ from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_LoadRouteSteps, 
 from corridor_trial import (CorridorTrial_CheckLateralHeading, CorridorTrial_DefaultChain,
                             CorridorTrial_GroupStrafes, CorridorTrial_HeadingSnapshot,
                             CorridorTrial_MaxBodyMacros, CorridorTrial_MirroredPickupStrafes, CorridorTrial_Run)
-from entrance_trial import (EntranceTrial_IsEntryAccepted, EntranceTrial_ObserveCheckpoint,
-                            EntranceTrial_PlanForward, EntranceTrialResult, EntranceTrial_Run)
+from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
+from entrance_trial import EntranceTrial_IsEntryAccepted, EntranceTrial_PlanForward, EntranceTrial_Run
 from mission_v5 import MissionRobot, PAIR_MOTION_OPS, VISUAL_PICKUP_OPS, defaults, validate_chains
 from micro_trial import MEDIUM_OPS, OPS as MICRO_OPS
 from pickup_controller import PickupObservationUnavailable, validate as validate_pickup
 from route_pose import RoutePose_TrialLateralHint
 from task_runner import NotReady, Robot
 from transfer_test import validate as validate_transfer
-from visual_micro import VisualCamera_Read, VisualCameraUnavailable
+from checkpoint_errors import VisualCamera_Read, VisualCameraUnavailable
 
 
 _PICKUP_SIDE_ACTIONS = frozenset((*SIDE_ACTIONS.values(), *SMALL_SIDE_ACTIONS, *SMALL_SIDE_ACTIONS.values()))
@@ -149,9 +149,9 @@ def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
 
     if getattr(getattr(nav, 'io', None), 'visual_motion_ready', None) is not None:
         view = {'expected_id':1, 'detected':False, 'observation_windows':0}
-        observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, view, lambda: None,
+        observed, reason = Checkpoint_Observe(robot, nav, view, lambda: None,
             single_window=True, quick_id=True, reuse_settled_cache=True)
-        hint = RoutePose_TrialLateralHint(view, nav.cfg, 1) if observed is EntranceTrialResult.CHECKPOINT_DETECTED else None
+        hint = RoutePose_TrialLateralHint(view, nav.cfg, 1) if observed is CheckpointScanResult.CHECKPOINT_DETECTED else None
         check['tag1'] = {'status':observed.value, 'reason':reason, 'pose':hint}
         if (hint is not None and nav.io.visual_motion_ready(hint['latest_stamp_ns'])
                 and max(map(abs, hint['lateral_bounds_m'])) <= .10

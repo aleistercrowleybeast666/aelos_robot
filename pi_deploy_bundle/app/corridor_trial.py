@@ -7,8 +7,8 @@ from statistics import median
 from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
-from entrance_trial import (EntranceTrial_BoundaryCheckpoint, EntranceTrial_ObserveCheckpoint,
-                            EntranceTrial_PlanForward, EntranceTrialResult)
+from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, CheckpointScanResult
+from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
 from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
                         RoutePose_PartialCheckpointGeometry,
@@ -17,6 +17,8 @@ from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePo
                         RoutePose_PlanTag5Passage, RoutePose_Tag3HeadingRecovery, RoutePose_Tag4DepthOnly,
                         RoutePose_TrialLateralHint)
 
+# Retain the result type exported to existing route extensions.
+EntranceTrialResult = CheckpointScanResult
 
 _CHECKPOINTS = (2, 3, 4, 5)
 _LEGS = tuple((start, end, f'tag{start}_to_tag{end}') for start, end in zip(_CHECKPOINTS, _CHECKPOINTS[1:]))
@@ -605,12 +607,12 @@ def _departure_pose(robot, nav, profile, tag_id, pose, evidence):
                       'completed_actions': []}
         evidence['departure_reobservations'] = attempt
         hold = tag_id == _CHECKPOINTS[-1] or 'departure_hard_obstruction' in evidence
-        observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, checkpoint,
+        observed, reason = Checkpoint_Observe(robot, nav, checkpoint,
             lambda: _report_progress(robot, 'cmd0_departure_reobserve', tag_id, tag_id, leg=checkpoint),
             miss_policy='hold_load_for_departure' if hold else 'continue_estimated')
-        if observed is EntranceTrialResult.CAMERA_UNAVAILABLE:
+        if observed is CheckpointScanResult.CAMERA_UNAVAILABLE:
             return None, (CorridorTrialResult.CAMERA_UNAVAILABLE, reason)
-        if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             evidence['departure_checkpoint_not_seen'] = checkpoint['checkpoint_not_seen']
             break
         pose = _measure(robot, nav, profile, checkpoint)
@@ -673,12 +675,12 @@ def _corridor_boundary_checkpoint(robot, nav, tag_id, action=None):
     read = getattr(robot, 'boundary_visual_observation', None)
     if read is None:
         return None
-    checkpoint = EntranceTrial_BoundaryCheckpoint(robot, nav, tag_id)
+    checkpoint = Checkpoint_FromBoundary(robot, nav, tag_id)
     if checkpoint is not None:
         return checkpoint
     report = read(action or 'corridor_checkpoint', expected_tag=tag_id)
     if report is not None:
-        return EntranceTrial_BoundaryCheckpoint(robot, nav, tag_id, report=report)
+        return Checkpoint_FromBoundary(robot, nav, tag_id, report=report)
     return None
 
 
@@ -689,10 +691,10 @@ def _refresh_checkpoint_pose(robot, nav, profile, tag_id, *, reuse_settled_cache
         if checkpoint is not None:
             return _measure(robot, nav, profile, checkpoint), checkpoint
     observation = {'expected_id': tag_id, 'observation_windows': 0, 'detected': False}
-    observed, _ = EntranceTrial_ObserveCheckpoint(robot, nav, observation, lambda: None,
+    observed, _ = Checkpoint_Observe(robot, nav, observation, lambda: None,
                                                   single_window=advisory_windows is None, advisory_windows=advisory_windows,
                                                   reuse_settled_cache=reuse_settled_cache, quick_id=quick_id)
-    pose = _measure(robot, nav, profile, observation) if observed is EntranceTrialResult.CHECKPOINT_DETECTED else {}
+    pose = _measure(robot, nav, profile, observation) if observed is CheckpointScanResult.CHECKPOINT_DETECTED else {}
     return pose, observation
 
 
@@ -2659,7 +2661,7 @@ def _tag5_partial_forward_probe(robot, nav, settings, leg, approach):
     robot.action('carry_forward2', monitor_only_as='carry_forward2')
     recovery['completed_steps'] = 2
     observation = {'expected_id':5,'observation_windows':0,'detected':False}
-    verified, reason = EntranceTrial_ObserveCheckpoint(robot, nav, observation, lambda: None,
+    verified, reason = Checkpoint_Observe(robot, nav, observation, lambda: None,
         quick_id=True, reuse_settled_cache=True, advisory_windows=2,
         miss_policy='continue_estimated' if robot.cfg.get('route_steps', {}).get('continue_estimated_route') else 'hold_load_for_placement')
     recovery['status'] = verified.value
@@ -3070,10 +3072,10 @@ def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None):
         observation = _corridor_boundary_checkpoint(robot, nav, 3, action)
         if observation is None:
             return
-        observed = EntranceTrialResult.CHECKPOINT_DETECTED
+        observed = CheckpointScanResult.CHECKPOINT_DETECTED
     else:
         observation = {'expected_id': 3, 'observation_windows': 0, 'detected': False}
-        observed, _ = EntranceTrial_ObserveCheckpoint(
+        observed, _ = Checkpoint_Observe(
             robot, nav, observation, lambda: None, quick_id=True, single_window=True, reuse_settled_cache=True)
     scan = observation.get('scan') or {}
     leg['tag3_midpoint_observation'] = {
@@ -3911,19 +3913,19 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         boundary_arrival = tag5_handoff or _corridor_boundary_checkpoint(robot, nav, expected_id)
         if boundary_arrival:
             leg.update(boundary_arrival)
-            observed = EntranceTrialResult.CHECKPOINT_DETECTED
+            observed = CheckpointScanResult.CHECKPOINT_DETECTED
             reason = f'fresh Tag {expected_id} confirmed at an action boundary'
             notify = getattr(robot,'route_checkpoint_observed',None)
             if notify is not None:
                 notify(expected_id)
         else:
-            observed, reason = EntranceTrial_ObserveCheckpoint(robot, nav, leg,
+            observed, reason = Checkpoint_Observe(robot, nav, leg,
                 lambda: _report_progress(robot, 'cmd0_corridor_wait', previous_id, expected_id, leg=leg),
                 quick_id=expected_id==3, reuse_settled_cache=True,
                 miss_policy='hold_load_for_placement' if expected_id == _CHECKPOINTS[-1] and not estimate else 'continue_estimated',
                 next_stationary_id=5 if expected_id == 4 and not chain[_TAG5_LEG] else None,
                 advisory_windows=2 if expected_id == 3 else None)
-        if expected_id == 5 and use_tag5_passage and observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if expected_id == 5 and use_tag5_passage and observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             probe = _tag5_partial_forward_probe(robot, nav, tag5_alignment, leg, chain[_DROP][:-1])
             if probe is not None:
                 observed, reason, observation = probe
@@ -3931,14 +3933,14 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 leg['tag5_partial_probe']['initial_miss'] = leg.pop('checkpoint_not_seen')
                 observation['observation_windows'] += leg['observation_windows']
                 leg.update(observation)
-        if observed is EntranceTrialResult.CAMERA_UNAVAILABLE:
+        if observed is CheckpointScanResult.CAMERA_UNAVAILABLE:
             if not resume_nominal(expected_id, reason):
                 return set_status(CorridorTrialResult.CAMERA_UNAVAILABLE, reason)
-            observed = EntranceTrialResult.CHECKPOINT_NOT_SEEN
+            observed = CheckpointScanResult.CHECKPOINT_NOT_SEEN
             leg['checkpoint_not_seen'] = {'tag_id': expected_id, 'cause': 'camera_stream_unhealthy',
                                           'policy': 'continue_estimated', 'detail': reason}
         result['estimated_checkpoint'] = expected_id
-        if observed is EntranceTrialResult.CHECKPOINT_NOT_SEEN:
+        if observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             result['missing_checkpoints'].append(leg['checkpoint_not_seen'])
             if expected_id == _CHECKPOINTS[-1] and not resume_nominal(expected_id, reason):
                 return set_status(CorridorTrialResult.CHECKPOINT_NOT_SEEN, reason)

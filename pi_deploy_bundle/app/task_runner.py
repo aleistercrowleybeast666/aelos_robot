@@ -3,6 +3,11 @@ import collections,json,math,time,types,threading
 from enum import Enum
 from pathlib import Path
 
+from checkpoint_alignment import (Checkpoint_RebaseTagHeading, Checkpoint_TurnAtTag5,
+                                  Checkpoint_TurnFromTagHeading, RouteTagHeadingRebaseResult)
+from checkpoint_errors import (VisualCamera_DiagnoseWindow, VisualCamera_Read,
+                               VisualCameraUnavailable, VisualMicroStopped)
+from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_ReadWindow
 from transfer_test import BoundaryReached, MACRO_BOUNDARIES
 from cmd0_motion import (COMMAND0_TRANSFER_FORWARD_STEPS, TRANSFER_FORWARD9_ACTION, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady, Cmd0Motion_LoadRouteSteps,
@@ -15,11 +20,6 @@ from micro_step_test import TURN_TEST_STEPS
 from nav_observation import MAGNETIC_INSUFFICIENT_SAMPLES
 
 class NotReady(RuntimeError):pass
-
-
-class RouteTagHeadingRebaseResult(Enum):
-    APPLIED = 'applied'
-    UNAVAILABLE = 'unavailable'
 
 
 class _Tag1ReacquireResult(Enum):
@@ -67,7 +67,6 @@ _TAG1_REOBSERVE_SCANS = ('no_tag', 'id_seen_pose_untrusted', 'unreliable')
 _TAG1_PROBE_DEFAULT_MAX_TRAVEL_M = .125
 _TAG1_UNCONFIRMED_REASON_ZH = '入口已完成找码与原地复核，仍未确认 Tag 1，请检查机器人位置和胸部相机。'
 _TAG1_POSE_UNCONFIRMED_REASON_ZH = '已识别 Tag 1，当前位姿未能验证，无法确认进场方向。'
-_TAG3_VISUAL_MICRO_TRIGGER_DEG = 7.
 
 def load(path):
     cfg=json.loads(Path(path).read_text(encoding='utf-8'))
@@ -362,149 +361,13 @@ class Robot:
         self.action(name,monitor_only_as='corridor_side_boundary')
 
     def Route_TurnFromTagHeading(self, tag_id, error, observed_at_ns, *, reserved_actions=0):
-        """Submit one camera-guided micro turn without relying on a magnetic reference."""
-        from micro_trial import OPS
-        from turn_estimator import MICRO_INITIAL_DEG
-        paired_route = self.load_kind == 'double' and getattr(self,'pair_route_enabled',False)
-        if (tag_id not in (1,2,3,4) or (self.load_kind!='single' and not paired_route)
-                or not self._allows_missing_magnetic()
-                or getattr(self.backend,'is_simulation',False)
-                or type(error) not in (int,float) or not math.isfinite(error)):
-            return None
-        nav=self.ensure_navigation_io()
-        cfg=nav.cfg
-        visual=cfg.get('visual_micro',{})
-        goal=next((point for point in cfg['legs']['outbound'] if point['id']==tag_id),{})
-        if (visual.get('execute') is not True or visual.get('target_id_confirmed') is not True
-                or visual.get('direction_evidence')!='measured_r3_tag' or goal.get('allow_turn') is not True
-                or (tag_id == 1 and abs(error)>visual['max_error_deg'])
-                or abs(error) >= 90.):
-            # At a corridor marker the caller selects the recovery using the
-            # fresh pose and clearance. The requested action is one micro turn.
-            return None
-        trigger = _TAG3_VISUAL_MICRO_TRIGGER_DEG if tag_id == 3 else visual['deadband_deg']
-        if abs(error) <= trigger:
-            return None
-        gains=visual['signed_nominal_delta_deg']
-        name=next((op for op in OPS if gains[op]*error<0),None)
-        bound=visual['max_observed_step_deg']
-        improvement=visual['minimum_improvement_deg']
-        if name is None:
-            return None
-        selection_response = bound
-        if tag_id in (2, 3, 4):
-            # Each corridor correction is followed by a new observation.
-            # Use the estimated turn for selection and the full bound for the motion budget.
-            initial = self.cfg.get('route_steps', {}).get('micro_turn_filter', {}).get('initial_deg', MICRO_INITIAL_DEG)
-            selection_response = min(bound, initial)
-            estimator = getattr(self.heading_guard, 'turn_estimator', None)
-            anchor = nav.mag.anchor or {}
-            direction = 'left' if gains[name] < 0 else 'right'
-            measured = estimator.control_estimate(direction, 'micro', self.load_kind,
-                getattr(self.backend,'session',''), getattr(self.backend,'epoch',-1),
-                anchor.get('calibration_id',''), now_s=self.clock()) if estimator is not None else None
-            if measured is not None:
-                selection_response = abs(measured['degrees'])
-        if abs(abs(error)-selection_response)>abs(error)-improvement:
-            return None
-        timeout=self.cfg['request_timeout_s']
-        route_feedback = tag_id in (2, 3, 4) and self.cfg.get('route_steps', {}).get('continue_estimated_route') is True
-        if (self.count+reserved_actions+1>self.cfg['max_body_macros_per_journey']
-                or (not route_feedback and self.nav_count>=cfg['max_extra_actions_per_journey'])
-                or self.deadline-self.clock()<=timeout+cfg['settle_s']+cfg['observe_s']):
-            return None
-        self.check()
-        checker=getattr(self.backend,'check_micro',None)
-        live=getattr(nav.io,'visual_motion_ready',None)
-        if (checker is None or live is None or type(observed_at_ns) is not int
-                or (tag_id in (2, 3, 4) and type(self.last_action_completed_ros_ns) is int
-                    and observed_at_ns <= self.last_action_completed_ros_ns)):
-            return None
-        checker()
-        if not live(observed_at_ns) or not self.micro_budget().reserve(
-                'visual',name,gains[name],conservative_bound=bound,route_visual_feedback=route_feedback):
-            return None
-        self._complete_body_action(name,timeout)
-        self.nav_count+=1
-        self.last_heading_report=None
-        self.events.append({'visual_micro_action':name,'tag_id':tag_id,'feedback_source':'tag_only',
-                            'angle_evidence':'source_nominal','physical_success':'unobserved'})
-        turn = {'action':name,'before_error_deg':error}
-        if tag_id in (2, 3, 4):
-            turn['selected_response_deg'] = selection_response
-        return turn
+        return Checkpoint_TurnFromTagHeading(self, tag_id, error, observed_at_ns, reserved_actions=reserved_actions)
 
     def Route_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns, *, direction=None):
-        """Keep a fresh expected Tag's yaw error in the magnetic target for this segment."""
-        unavailable = RouteTagHeadingRebaseResult.UNAVAILABLE
-        bundle = getattr(self,'navigation_bundle',None)
-        empty_return = (self.load_kind == 'empty' and getattr(self,'route_command',None) == '2'
-                        and ((direction == 'return' and tag_id in (5,6,7,1))
-                             or (direction == 'outbound' and tag_id == 1)))
-        loaded_route = direction is None and self.load_kind in ('single','double') and tag_id in (1,2,3,4)
-        if (not (empty_return or loaded_route) or not self._allows_missing_magnetic()
-                or getattr(self.backend,'is_simulation',False)
-                or not bundle or not bundle['post_action_heading'].get('enabled')
-                or type(error_deg) not in (int,float) or not math.isfinite(error_deg) or abs(error_deg)>180
-                or type(observed_at_ns) is not int or observed_at_ns<=0):
-            return unavailable
-        completed_ns = self.last_action_completed_ros_ns
-        if type(completed_ns) is int and observed_at_ns<=completed_ns:
-            return unavailable
-        self.check()
-        nav = self.ensure_navigation_io()
-        goal = next((point for point in nav.cfg['legs'][direction or 'outbound'] if point['id']==tag_id),None)
-        live = getattr(nav.io,'visual_motion_ready',None)
-        if goal is None or live is None or not live(observed_at_ns):
-            return unavailable
-        heading = {'tag_id':tag_id,'route_heading_deg':goal['route_heading_deg'],
-                   'error_deg':error_deg,'observed_at_ns':observed_at_ns}
-        if self.magnetic_route_only:
-            health = nav.io.magnetic_capture_health()
-            if (not MagneticLoss_IsRecoverable(health)
-                    or (not nav.io.motion_capture_verified and not nav.io.retry_magnetic_preflight())
-                    or not live(observed_at_ns)):
-                self.events.append({'segment_heading_reference':{'status':'reference_unavailable',
-                                                                 'tag_departure':heading}})
-                return unavailable
-        guard = self._heading_controller(nav)
-        try:
-            report = guard.before_straight(self.load_kind,self.last_action_completed_monotonic,
-                                           tag_departure=heading)
-        except MagneticDataUnavailable as exc:
-            if not self.defer_magnetic_route_fault(exc):
-                raise
-            self.events.append({'segment_heading_reference':{'status':'reference_unavailable',
-                                                             'tag_departure':heading}})
-            return unavailable
-        self.events.append({'segment_heading_reference':dict(report,tag_departure=heading)})
-        if report['status']=='tag_departure_reference_established':
-            self.magnetic_route_only=False
-            self.last_heading_report=None
-            return RouteTagHeadingRebaseResult.APPLIED
-        return unavailable
+        return Checkpoint_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns, direction=direction)
 
     def Corridor_TurnAtTag5(self, name, observed_at_ns):
-        """One visual-selected micro turn at the gate, followed by a fresh camera check."""
-        if name not in ('single_micro_left','single_micro_right') or self.load_kind not in ('single','double'):
-            raise ValueError('Tag 5 requires a loaded micro turn')
-        self.check()
-        nav = self.ensure_navigation_io()
-        timeout = self.cfg['request_timeout_s']
-        goal = next((point for point in nav.cfg['legs']['outbound'] if point['id'] == 5), {})
-        passage = self.cfg['route_steps']['tag5_entry_lateral']
-        if goal.get('allow_turn') is not True or passage.get('verify_passage') is not True:
-            return False
-        if (self.count >= self.cfg['max_body_macros_per_journey']
-                or self.deadline-self.clock() <= timeout + nav.cfg['observe_s']):
-            return False
-        self.backend.check_micro()
-        if not nav.io.visual_motion_ready(observed_at_ns):
-            return False
-        self.last_heading_report = None
-        self._complete_body_action(name,timeout)
-        self.monitor_heading('corridor_side_boundary',allow_correction=False)
-        return True
+        return Checkpoint_TurnAtTag5(self, name, observed_at_ns)
 
     def corridor_recovery_translate(self,name,*,sampled_at):
         """Complete one verified two-step clearance, with no in-place turn hook."""
@@ -577,9 +440,9 @@ class Robot:
         return None
 
     def _entry_visual_before_magnetic_turn(self,name,next_action,nav,settings):
-        from entrance_trial import EntranceTrial_BoundaryCheckpoint, _tag2_boundary_replan
+        from entrance_trial import _tag2_boundary_replan
         report=self.boundary_visual_observation(name)
-        checkpoint=EntranceTrial_BoundaryCheckpoint(self,nav,2,action=name,report=report)
+        checkpoint=Checkpoint_FromBoundary(self,nav,2,action=name,report=report)
         if checkpoint is None:
             return None
         remaining=Cmd0Motion_ForwardStepCount([next_action]) if next_action else 0
@@ -592,24 +455,21 @@ class Robot:
 
     def _tag4_visual_before_magnetic_turn(self, name, nav, settings):
         """Give the next Tag 4 approach decision the pose before magnetic correction moves it."""
-        from entrance_trial import EntranceTrial_BoundaryCheckpoint
         from route_pose import RoutePose_PlanTag4Longitudinal
         report = self.boundary_visual_observation(name, expected_tag=4)
-        checkpoint = EntranceTrial_BoundaryCheckpoint(self,nav,4,action=name,report=report)
+        checkpoint = Checkpoint_FromBoundary(self,nav,4,action=name,report=report)
         if (checkpoint is None and report and report.get('boundary_valid') and report.get('camera_healthy')
                 and report.get('contract_match') and report.get('camera_info_ready')):
             # The first stationary frames may still be arriving when the magnetometer completes.
-            observe = getattr(nav.io,'observe_checkpoint_id',None)
-            if observe is not None:
+            if getattr(nav.io,'observe_checkpoint_id',None) is not None:
                 try:
-                    from visual_micro import VisualCamera_Read, VisualCameraUnavailable
-                    VisualCamera_Read(lambda check: observe(4, report['after_ns'], min(.35, nav.cfg['observe_s']), check),
-                                      self.check)
+                    Checkpoint_ReadWindow(nav.io, 4, report['after_ns'], min(.35, nav.cfg['observe_s']),
+                                          self.check, quick_id=True)
                 except VisualCameraUnavailable:
                     self.check()
                     return None
                 report = self.boundary_visual_observation(name,expected_tag=4)
-                checkpoint = EntranceTrial_BoundaryCheckpoint(self,nav,4,action=name,report=report)
+                checkpoint = Checkpoint_FromBoundary(self,nav,4,action=name,report=report)
         if checkpoint is None:
             return None
         pose = RoutePose_PlanTag4Longitudinal(checkpoint,nav.cfg,settings,approach_steps=4)
@@ -661,7 +521,6 @@ class Robot:
         from micro_trial import active
         from heading_guard import HeadingGuard, MicroTrialStopped
         from nav_observation import MagneticReference
-        from visual_micro import VisualCamera_DiagnoseWindow
         started=self.clock();wall_started=time.monotonic();cancel=threading.Event()
         results={};errors={};timings={};threads=[];magnetic_attempts=[];camera_attempts=[]
         camera_s=min(nav.cfg['observe_s'],nav.cfg.get('preflight_observe_s',nav.cfg['observe_s']))
@@ -679,14 +538,14 @@ class Robot:
             if time.monotonic()-wall_started>wall_limit:raise RuntimeError('sensor preflight reader deadline exceeded')
         def camera():
             target=nav.cfg['legs']['outbound'][0]['id']
-            w=nav.io.observe(target,0,camera_s,reader_check)
+            w=Checkpoint_ReadWindow(nav.io,target,0,camera_s,reader_check,classify_errors=False)
             if retry_camera:
                 expected=visual['camera_info']['expected_fingerprint']
                 issue=VisualCamera_DiagnoseWindow(w,w.get('camera_info',{}),expected)
                 if issue is not None and issue[2]:
                     camera_attempts.append({'reason':issue[0],'reason_zh':issue[1]})
                     reader_check()
-                    w=nav.io.observe(target,nav.io.ros_now_ns(),camera_s,reader_check)
+                    w=Checkpoint_ReadWindow(nav.io,target,nav.io.ros_now_ns(),camera_s,reader_check,classify_errors=False)
                     issue=VisualCamera_DiagnoseWindow(w,w.get('camera_info',{}),expected)
                 if issue is not None:
                     raise RuntimeError(issue[0]+' BEFORE stand')
@@ -1119,7 +978,7 @@ class Robot:
                         'magnetic_target_reached':False,'forward_translation_allowed':False}
                 return scan
             nav=self.ensure_navigation_io()
-            window=nav.io.observe(None,0,bundle['observe_s'],self.check)
+            window=Checkpoint_ReadWindow(nav.io,None,0,bundle['observe_s'],self.check,classify_errors=False)
             if not window.get('camera_healthy',False):raise RuntimeError('camera or AR stream lacks new data; not ordinary Tag loss')
             scan=self.raw_scan_ar()
             scan['navigation_checkpoint']={'status':'blocked' if bundle.get('visual_micro',{}).get('enabled') else 'report_only','visual_micro':bundle.get('visual_micro',{}).get('enabled',False),'heading_aligned':False,'position_controlled':False,'ready_for_obstacle':False,'reason':'target ID not explicitly verified; no target selected and no correction','correction_actions':0,'search_actions':0,'magnetic':{'status':'not_updated','reason':'no reliable target alignment'}}
@@ -1136,13 +995,12 @@ class Robot:
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);scanner=module.scan_tags
         from tag_reporting import reporting_options,enrich_for_project
         options=dict(self.cfg['terminal_scan']);options['min_fresh_frames']=reporting_options(self.project)['min_frames']
-        from visual_micro import VisualCamera_Read, VisualCameraUnavailable
         try:
             result=VisualCamera_Read(lambda check:scanner(options,check,options['timeout_s']),self.check)
             if result.get('status')=='cancelled':raise RuntimeError('AR observation cancelled')
             if self.cfg.get('transfer_test',{}).get('preflight_sensor_streams') and not getattr(self.backend,'is_simulation',False):
                 nav=self.ensure_navigation_io()
-                window=VisualCamera_Read(lambda check:nav.io.observe(None,0,nav.cfg['observe_s'],check),self.check)
+                window=Checkpoint_ReadWindow(nav.io,None,0,nav.cfg['observe_s'],self.check)
                 if not window.get('camera_healthy',False):raise VisualCameraUnavailable('terminal scan camera/AR stream fault')
                 result['scan_health']='fresh_camera_and_AR_stream'
         except VisualCameraUnavailable as exc:
@@ -1181,7 +1039,6 @@ class Robot:
         injected=getattr(self.backend,'observe_entry',None)
         from entry_camera import CameraUnavailable
         try:
-            from visual_micro import VisualCamera_Read
             if injected is not None:window=VisualCamera_Read(lambda _:injected(profile,None,profile['window_timeout_s']),self.check)
             else:
                 from entry_observer import observe_entry_window
@@ -1239,7 +1096,6 @@ class Robot:
                 RoutePose_Load(self.project),tag_id,camera_info=nav.get('camera_info'))
         self.events.append({'AR_checkpoint':nav}) # retain the primary result even if optional reporting faults
         from entry_camera import CameraUnavailable
-        from visual_micro import VisualCameraUnavailable
         try:
             self.add_pixel_diagnostics(scan)
         except (CameraUnavailable,VisualCameraUnavailable) as exc:
@@ -1254,7 +1110,7 @@ class Robot:
         return scan
 
     def visual_checkpoint(self,tag_id,direction='outbound',*,departure_pose=None):
-        from visual_micro import VisualCameraUnavailable, VisualMicro, VisualMicroStopped, VisualMicro_ObserveWithoutMagnetic
+        from visual_micro import VisualMicro, VisualMicro_ObserveWithoutMagnetic
         nav=self.ensure_navigation_io();cfg=nav.cfg
         if direction!='outbound':raise RuntimeError('v10 dedicated visual micro is only scoped to command-0 outbound endpoint')
         metric_departure=departure_pose is not None
@@ -1865,12 +1721,8 @@ class Robot:
                 # Reuse only fresh frames captured after this stance settled, including partial windows.
                 after_ns=settled
         target=goal['id']
-        observe=getattr(nav.io,'observe_checkpoint_id',nav.io.observe) if quick_id else nav.io.observe
-        from visual_micro import VisualCamera_Read, VisualCameraUnavailable
-        if self._allows_unobserved_tag():
-            window=VisualCamera_Read(lambda check:observe(target,after_ns,remaining,check),self.check)
-        else:
-            window=observe(target,after_ns,remaining,self.check)
+        window=Checkpoint_ReadWindow(nav.io,target,after_ns,remaining,self.check,quick_id=quick_id,
+                                     classify_errors=self._allows_unobserved_tag())
         self.check()
         evidence={'camera_healthy':window.get('camera_healthy') is True,
                   'contract_match':window.get('contract_match') is True,
@@ -1879,7 +1731,6 @@ class Robot:
                   'receiver_rejections_total':window.get('rejected'),
                   'camera_window_status':window.get('camera_window_status')}
         if self._allows_missing_magnetic():
-            from visual_micro import VisualCamera_DiagnoseWindow
             camera=window.get('camera_info',{})
             camera_config=nav.cfg['visual_micro']['camera_info']
             issue=VisualCamera_DiagnoseWindow(window,camera,camera_config['expected_fingerprint'])
