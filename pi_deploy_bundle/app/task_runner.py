@@ -5,9 +5,10 @@ from pathlib import Path
 
 from checkpoint_alignment import (Checkpoint_RebaseTagHeading, Checkpoint_TurnAtTag5,
                                   Checkpoint_TurnFromTagHeading, RouteTagHeadingRebaseResult)
-from checkpoint_errors import (VisualCamera_DiagnoseWindow, VisualCamera_Read,
+from checkpoint_errors import (VisualCamera_GetFreshnessCheck,
+                               VisualCamera_DiagnoseWindow, VisualCamera_Read,
                                VisualCameraUnavailable, VisualMicroStopped)
-from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_ReadWindow
+from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_ReadScanTime, Checkpoint_ReadWindow
 from transfer_test import BoundaryReached, MACRO_BOUNDARIES
 from cmd0_motion import (COMMAND0_TRANSFER_FORWARD_STEPS, TRANSFER_FORWARD9_ACTION, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady, Cmd0Motion_LoadRouteSteps,
@@ -193,9 +194,19 @@ class Robot:
         completed=self.clock()
         self.last_action_completed_monotonic=completed
         nav=getattr(self,'navigator',None)
-        ros_now=getattr(getattr(nav,'io',None),'ros_now_ns',None)
-        self.last_action_completed_ros_ns=ros_now() if ros_now is not None else None
-        self.events.append({'stage_timing':{'stage':'protocol_action','action':name,'started_monotonic':started,'completed_monotonic':completed,'completed_ros_ns':self.last_action_completed_ros_ns,'elapsed_s':completed-started,'protocol_completed':True,'physical_success':'unobserved'}})
+        io=getattr(nav,'io',None)
+        timing={'stage':'protocol_action','action':name,'started_monotonic':started,
+                'completed_monotonic':completed,'elapsed_s':completed-started,'protocol_completed':True,
+                'physical_success':'unobserved'}
+        self.last_action_completed_ros_ns=None
+        if getattr(io,'ros_now_ns',None) is not None:
+            try:
+                self.last_action_completed_ros_ns=Checkpoint_ReadScanTime(io)
+            except VisualCameraUnavailable as exc:
+                timing['camera_clock_error']=str(exc)
+                self.last_boundary_visual=None
+        timing['completed_ros_ns']=self.last_action_completed_ros_ns
+        self.events.append({'stage_timing':timing})
         if name=='stand':
             # Preflight samples/anchors are never a post-stand baseline.
             self.heading_guard=None;self.last_heading_report=None
@@ -319,7 +330,13 @@ class Robot:
         if self.count>=self.cfg['max_body_macros_per_journey']:raise RuntimeError('journey macro budget exceeded')
         timeout=self.cfg['request_timeout_s'] if timeout_s is None else timeout_s
         if type(timeout) is not int or not 2<=timeout<=self.cfg['request_timeout_s']:raise ValueError('bounded action timeout invalid')
-        self.check_magnetic_before_motion(configured=name not in SMALL_STRAFE_TEST_STEPS.values())
+        # A small stride already selected by the competition route is a finite
+        # position change. A magnetic dropout between planning and dispatch
+        # may defer heading correction just like it does for a large stride.
+        configured_stride = (name not in SMALL_STRAFE_TEST_STEPS.values() or
+                             (self._allows_missing_magnetic() and
+                              self.cfg.get('route_steps', {}).get('continue_estimated_route') is True))
+        self.check_magnetic_before_motion(configured=configured_stride)
         guard=getattr(self,'heading_guard',None)
         if guard is not None:
             guard.observation_scope=(getattr(self.backend,'session',''),getattr(self.backend,'epoch',-1))
@@ -425,12 +442,18 @@ class Robot:
         self.corridor_recover_heading(expected_tag,tag2_clearance_on_worsening=True)
 
     def corridor_recover_heading(self,expected_tag=None,*,boundary='corridor_side_boundary',
-                                 tag2_clearance_on_worsening=False):
+                                 tag2_clearance_on_worsening=False, checked_visual_stance=None):
         """Sample after the last completed motion and correct toward the saved target."""
         self._route_end_expected_tag=expected_tag
+        monitored = getattr(self,'last_heading_report',None) or {}
         self.last_heading_report=None
         try:
             options={'tag2_clearance_on_worsening':True} if tag2_clearance_on_worsening else {}
+            if expected_tag == 4 and type(checked_visual_stance) is int:
+                options['checked_visual_stance'] = checked_visual_stance
+                if (checked_visual_stance == self.last_action_completed_ros_ns and monitored.get('action') == boundary
+                        and monitored.get('correction_actions') == 0):
+                    options['completed_observation'] = monitored.get('sample')
             self.monitor_heading(boundary,**options)
         except Exception:
             self.record_fall_diagnostic(boundary)
@@ -474,8 +497,15 @@ class Robot:
         checkpoint = Checkpoint_FromBoundary(self,nav,4,action=name,report=report)
         if (checkpoint is None and report and report.get('boundary_valid') and report.get('camera_healthy')
                 and report.get('contract_match') and report.get('camera_info_ready')):
-            # The first stationary frames may still be arriving when the magnetometer completes.
-            if getattr(nav.io,'observe_checkpoint_id',None) is not None:
+            # Wait for a just-started camera window or a partial expected marker.
+            # A settled blank view has already had a full window; a second wait
+            # only ages the magnetic sample, and the route scans at its next boundary.
+            scan = report.get('scan') or {}
+            start, end = report.get('after_ns'), report.get('now_ns')
+            settled_blank = (type(start) is int and type(end) is int and end-start >= 350_000_000
+                             and 4 not in scan.get('observed_ids', ())
+                             and not any(row.get('id') == 4 for row in scan.get('observations', ())))
+            if not settled_blank and getattr(nav.io,'observe_checkpoint_id',None) is not None:
                 try:
                     Checkpoint_ReadWindow(nav.io, 4, report['after_ns'], min(.35, nav.cfg['observe_s']),
                                           self.check, quick_id=True)
@@ -664,7 +694,8 @@ class Robot:
         self.navigator.load_kind=self.load_kind
         return self.navigator
 
-    def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False,reserved_route_actions=0):
+    def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False,
+                        reserved_route_actions=0,checked_visual_stance=None,completed_observation=None):
         name=getattr(self,'heading_turn_phase',None) or name
         cfg=getattr(self,'navigation_bundle',None)
         if (self.magnetic_route_only or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
@@ -709,6 +740,10 @@ class Robot:
         started=self.clock()
         try:
             sample_options={}
+            if completed_observation is not None:
+                receipt = (completed_observation.get('reference') or {}).get('received_monotonic')
+                if guard.corridor_motion_sample_ready(self.load_kind,receipt,self.last_action_completed_monotonic):
+                    sample_options['initial_observation'] = (completed_observation,guard.last_sample)
             if tag2_clearance_on_worsening:
                 sample_options['tag2_clearance_on_worsening']=True
             if self.last_action_completed_monotonic is not None:
@@ -728,8 +763,11 @@ class Robot:
                     tag4_settings=self.cfg.get('route_steps',{}).get('tag4_forward_trial') or {}
                     if (expected_tag==4 and allow_correction and tag4_settings.get('enabled') is True
                             and name in CARRY_HEADING_ACTIONS):
-                        sample_options['prefer_visual_followup']=lambda:self._tag4_visual_before_magnetic_turn(
-                            name,nav,tag4_settings)
+                        def tag4_followup():
+                            if checked_visual_stance is not None and self.last_action_completed_ros_ns == checked_visual_stance:
+                                return None
+                            return self._tag4_visual_before_magnetic_turn(name,nav,tag4_settings)
+                        sample_options['prefer_visual_followup']=tag4_followup
             if getattr(self,'_transfer_turn_pending',False):
                 sample_options['transfer_turn_pending']=True
             result=guard.after_action(name,self.load_kind,correct,allow_correction,**sample_options)
@@ -929,7 +967,7 @@ class Robot:
         error=wrap(obs['heading_deg']-goal['tag_heading_deg'])
         if abs(error)>v['max_error_deg']:return False
         nav=self.ensure_navigation_io()
-        live=getattr(nav.io,'visual_motion_ready',None)
+        live=VisualCamera_GetFreshnessCheck(nav.io)
         if live is None or not live(obs.get('latest_stamp_ns',0)):return False
         import copy
         anchor=copy.deepcopy(nav.mag.anchor)
@@ -1152,7 +1190,7 @@ class Robot:
             verify_pair()  # after backend checks, immediately before actual native submission
             self.completed_call(name,self.cfg['request_timeout_s']);self.count+=1;self.nav_count+=1
             self.events.append({'visual_micro_action':name,'angle_evidence':'source_nominal','physical_success':'unobserved'})
-            return {'after_ns':nav.io.ros_now_ns()}
+            return {'after_ns':Checkpoint_ReadScanTime(nav.io)}
         if self.heading_guard is None:
             from heading_guard import HeadingGuard
             self.heading_guard=HeadingGuard(cfg,nav.io,nav.mag,self.check,self.clock,budget=self.micro_budget(),estimator=getattr(self.backend,'turn_estimator',None))
@@ -1180,7 +1218,7 @@ class Robot:
             can_recover=self._allows_missing_magnetic() and (tag_id==1 or (metric_departure and tag_id!=5))
             if not can_recover:
                 return VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,
-                    after_ns=nav.io.ros_now_ns(),deadline=self.deadline,check=self.check,clock=self.clock)
+                    after_ns=Checkpoint_ReadScanTime(nav.io),deadline=self.deadline,check=self.check,clock=self.clock)
             recovery=None
             turns=[]
             retried_camera_gap=False
@@ -1191,7 +1229,7 @@ class Robot:
                 deadline=min(self.deadline,self.clock()+cfg['settle_s']+windows*cfg['observe_s'])
                 try:
                     result=VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,
-                        after_ns=nav.io.ros_now_ns(),deadline=deadline,check=self.check,clock=self.clock,
+                        after_ns=Checkpoint_ReadScanTime(nav.io),deadline=deadline,check=self.check,clock=self.clock,
                         accept_trusted_residual=True)
                 except VisualMicroStopped as exc:
                     warnings=(exc.report or {}).get('events') or [{}]
@@ -1254,14 +1292,14 @@ class Robot:
             self.check()
             self.last_boundary_visual=None
             self.events.append({'visual_checkpoint_failure':{'target_id':tag_id,'reason':str(exc),'report':exc.report}})
-            reason='Tag 1 图像或相机校验不可用，本轮未确认位姿，按预设路线继续。'
+            reason=f'Tag {tag_id} 图像或相机校验不可用，本轮未确认位姿，按预设路线继续。'
             return {'status':'partial','expected_id':tag_id,'reason':reason,'reason_zh':reason,
                     'fresh_target_detected':False,'pose_accepted':False,'heading_aligned':False,
                     'scan':{'status':'unavailable','ids':[],'observed_ids':[],'observations':[],'pose_usable':False},
                     'camera_info':{},'ready_for_obstacle':False,'position_controlled':False}
 
         def observe_turned_stance():
-            after=nav.io.ros_now_ns()
+            after=Checkpoint_ReadScanTime(nav.io)
             deadline=min(self.deadline,self.clock()+cfg['settle_s']+2*cfg['observe_s'])
             try:
                 return VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,after_ns=after,
@@ -1278,11 +1316,9 @@ class Robot:
             if self.magnetic_route_only:
                 result=passive_checkpoint()
             elif metric_departure:
-                result=controller.checkpoint(tag_id,goal,after_ns=nav.io.ros_now_ns(),deadline=self.deadline)
+                result=controller.checkpoint(tag_id,goal,after_ns=Checkpoint_ReadScanTime(nav.io),deadline=self.deadline)
             elif getattr(self,'command0_scan_after_turn',False) is True:
-                after_ns=nav.io.ros_now_ns()
-                if type(after_ns) is not int or after_ns<=0:
-                    raise RuntimeError('fresh terminal scan clock unavailable')
+                after_ns=Checkpoint_ReadScanTime(nav.io)
                 deadline=min(self.deadline,self.clock()+cfg['checkpoint_timeout_s'])
                 motion_deadline=deadline
                 steps=[]
@@ -1378,7 +1414,7 @@ class Robot:
                     self.check()
                     if result.get('correction_executed'):steps.append(result)
                     else:stationary_rechecks+=1
-                    result=controller.checkpoint(tag_id,goal,after_ns=nav.io.ros_now_ns(),deadline=deadline)
+                    result=controller.checkpoint(tag_id,goal,after_ns=Checkpoint_ReadScanTime(nav.io),deadline=deadline)
                     result=reobserve_missing(result)
                 if stationary_rechecks:result['stationary_heading_rechecks']=stationary_rechecks
                 if (pickup_departure and not result.get('heading_aligned') and not result.get('correction_executed')
@@ -1481,7 +1517,11 @@ class Robot:
             return decision.ADVANCE_UNSEEN,None
 
         after,observed_at=scan.get('after_ns'),scan.get('now_ns')
-        now=nav.io.ros_now_ns()
+        try:
+            now=Checkpoint_ReadScanTime(nav.io)
+        except VisualCameraUnavailable:
+            self.check()
+            return decision.WAIT_AMBIGUOUS,None
         if (type(stance) is not int or type(now) is not int or now<=stance):
             return decision.WAIT_AMBIGUOUS,None
         restart=(evidence.get('camera_window_status') or {}).get('restart_barrier_ns',0)
@@ -1502,7 +1542,7 @@ class Robot:
         left,right=geometry['lateral_bounds_m']
         if far-near>.025 or max(abs(left),abs(right))>.10 or geometry['max_abs_heading_deg']>12.:
             return decision.WAIT_AMBIGUOUS,geometry
-        camera_ready=getattr(nav.io,'visual_motion_ready',None)
+        camera_ready=VisualCamera_GetFreshnessCheck(nav.io)
         live=camera_ready is not None and camera_ready(geometry['latest_stamp_ns'])
         if .02<=near<=far<=.11:
             if (live and approach.get('last_forward_completed_ros_ns')==stance
@@ -1632,7 +1672,7 @@ class Robot:
         if len(positions) < nav.cfg['min_frames']:
             return None
         latest = max(positions)
-        live = getattr(nav.io,'visual_motion_ready',None)
+        live = VisualCamera_GetFreshnessCheck(nav.io)
         if live is None or not live(latest):
             return None
         x, y, z = zip(*positions.values())
@@ -1704,7 +1744,7 @@ class Robot:
                 telemetry['observations'].append({'offset_deg':angle,'seen_tags':scan.get('observed_ids',[]),
                                                    'status':scan.get('status'),**result.get('tag_observation',{})})
             else:
-                result=controller.checkpoint(tag,goal,after_ns=nav.io.ros_now_ns(),deadline=deadline)
+                result=controller.checkpoint(tag,goal,after_ns=Checkpoint_ReadScanTime(nav.io),deadline=deadline)
         if sweep['turns']:
             scope='measured two-sided entrance sweep' if measured else 'bounded in-place sweep'
             result=dict(result,search_actions=sweep['turns'],search_scope=scope)
@@ -1724,9 +1764,7 @@ class Robot:
         remaining=min(wait_s,deadline-self.clock())
         if remaining<=0:
             return result
-        after_ns=nav.io.ros_now_ns()
-        if type(after_ns) is not int or after_ns<=0:
-            raise RuntimeError('fresh terminal scan clock unavailable')
+        after_ns=Checkpoint_ReadScanTime(nav.io)
         stance=self.last_action_completed_ros_ns
         if (quick_entry and reuse_settled_cache and nav.cfg.get('reuse_post_completion_observations') is True
                 and type(stance) is int):
@@ -1785,9 +1823,9 @@ class Robot:
         reserve=self.cfg['request_timeout_s']+2*(cfg['settle_s']+cfg['observe_s']+cfg['magnetic']['collect_s'])
         if budget.locked or self.clock()+reserve>=deadline:
             return report
-        checkpoint_after_ns=nav.io.ros_now_ns()
-        if type(checkpoint_after_ns) is not int or checkpoint_after_ns<after_ns:
-            raise RuntimeError('terminal stationary retry ROS clock moved backwards')
+        checkpoint_after_ns=Checkpoint_ReadScanTime(nav.io)
+        if checkpoint_after_ns<after_ns:
+            raise VisualCameraUnavailable('terminal stationary retry ROS clock moved backwards')
         window_after_ns=window.get('after_ns')
         if (quick_id and cfg.get('reuse_post_completion_observations') is True
                 and type(window_after_ns) is int and after_ns<=window_after_ns<=checkpoint_after_ns):

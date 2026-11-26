@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import types
 
+from checkpoint_errors import VisualCamera_IsFresh, VisualCamera_Read, VisualCameraUnavailable
 from task_runner import Robot, NotReady
 from pickup_controller import PickupController, validate as validate_pickup
 from block_camera import BlockCameraContractLost, BlockEvidenceExpired, BlockFrameUnavailable
@@ -49,6 +50,14 @@ _SENSOR_RECHECKS = 4
 
 class _ChestUnavailable(RuntimeError):
     """A missing stream before the next native dispatch."""
+
+
+def _read_chest(read, check):
+    try:
+        return VisualCamera_Read(read, check)
+    except VisualCameraUnavailable as exc:
+        raise _ChestUnavailable(str(exc)) from exc
+
 
 class _CheckpointEvidenceExpired(RuntimeError):
     """The tag pose expired while preparing a short recovery step."""
@@ -241,17 +250,17 @@ class MissionRobot(Robot):
 
         for attempt in range(_SENSOR_RECHECKS):
             check()
-            after = nav.io.ros_now_ns()
-            window = nav.io.observe(cfg['legs']['outbound'][0]['id'], after, cfg['observe_s'], check)
             try:
+                window = _read_chest(lambda guard: nav.io.observe(cfg['legs']['outbound'][0]['id'],
+                                     nav.io.ros_now_ns(), cfg['observe_s'], guard), check)
                 self._check_camera(window, 'before begin')
+                if heading_ready() and _read_chest(lambda _: nav.io.preflight_health_snapshot(), check).get('camera_healthy'):
+                    check()
+                    break
             except _ChestUnavailable as exc:
                 reason = '启动前多次重读仍未收到有效的胸部相机、CameraInfo 或扫码数据。'
                 self._record_progress('waiting_camera',reason=str(exc))
             else:
-                if heading_ready() and nav.io.preflight_health_snapshot().get('camera_healthy'):
-                    check()
-                    break
                 reason = '启动前多次重读仍未取得同时有效的航向与胸部相机数据。'
                 self._record_progress('waiting_sensors',reason=reason)
             check()
@@ -274,7 +283,8 @@ class MissionRobot(Robot):
 
     def completed_call(self, name, timeout_s):
         if not getattr(self.backend, 'is_simulation', False):
-            self._check_camera(self.ensure_navigation_io().io.preflight_health_snapshot(), 'before '+name)
+            io = self.ensure_navigation_io().io
+            self._check_camera(_read_chest(lambda _: io.preflight_health_snapshot(), self.check), 'before '+name)
             self.check()
         return super().completed_call(name, timeout_s)
 
@@ -283,7 +293,7 @@ class MissionRobot(Robot):
         for attempt in range(_SENSOR_RECHECKS):
             self.check()
             try:
-                self._check_camera(io.preflight_health_snapshot(),'before '+name)
+                self._check_camera(_read_chest(lambda _: io.preflight_health_snapshot(), self.check), 'before '+name)
             except _ChestUnavailable as exc:
                 self._record_progress('waiting_camera',action=name,reason=str(exc))
             else:
@@ -401,7 +411,7 @@ class MissionRobot(Robot):
                 break
             except _ChestUnavailable as exc:
                 # This exception is raised before submitting the native request.
-                if op in _GRAB_OPS:
+                if op in _GRAB_OPS or visual_pickup:
                     raise BlockEvidenceExpired(str(exc)) from exc
                 if attempt + 1 >= _SENSOR_RECHECKS:
                     raise _ChestUnavailable('胸部相机反复在动作提交前掉线，待执行的动作尚未发出。') from exc
@@ -637,11 +647,11 @@ class MissionRobot(Robot):
             recover_until=self.clock()+cfg['checkpoint_timeout_s']
             while self.clock()<recover_until:
                 self.settle_since_last_completed(cfg['settle_s'])
-                after=nav.io.ros_now_ns()
-                if type(after) is not int or after<=0:
-                    raise RuntimeError('V5 checkpoint clock unavailable')
-                window=nav.io.observe(tag,after,cfg['observe_s'],self.check)
                 try:
+                    after = _read_chest(lambda _: nav.io.ros_now_ns(), self.check)
+                    if type(after) is not int or after <= 0:
+                        raise _ChestUnavailable('V5 checkpoint clock unavailable')
+                    window = _read_chest(lambda guard: nav.io.observe(tag, after, cfg['observe_s'], guard), self.check)
                     self._check_camera(window,boundary)
                     row,result,location=Checkpoint_Locate(window,cfg,windows,direction,tag,previous,after)
                     next_seen=location.get('adjacent_at_arrival')
@@ -674,7 +684,7 @@ class MissionRobot(Robot):
 
                             def verify_pose():
                                 self.check()
-                                if not nav.io.visual_motion_ready(stamp):
+                                if not VisualCamera_IsFresh(nav.io.visual_motion_ready, stamp):
                                     raise _CheckpointEvidenceExpired('checkpoint pose expired before '+op)
 
                             self.finite(op,checkpoint_follows=True,before_dispatch=verify_pose)

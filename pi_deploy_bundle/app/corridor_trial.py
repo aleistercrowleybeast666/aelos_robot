@@ -4,10 +4,11 @@ from enum import Enum
 from math import isfinite, radians, sin
 from statistics import median
 
+from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_IsFresh, VisualCameraUnavailable
 from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
-from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, CheckpointScanResult
+from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime, CheckpointScanResult
 from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
 from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
@@ -533,7 +534,7 @@ def _tag2_recheck_severe_lateral_drift(robot, nav, profile, leg, *, more_right, 
     leg['tag2_backward_clearance_allowed'] = False
     _report_progress(robot,'cmd0_departure_reobserve',2,3,leg=leg,
                      reason_zh='侧跨或转向后的航向余差较大，重读 Tag 2 和 Tag 3，确认墙边通行余量。')
-    live = getattr(nav.io,'visual_motion_ready',None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     rebase = getattr(robot,'Route_RebaseTagHeading',None)
     settings = robot.cfg.get('route_steps', {}).get('tag2_forward_trial') or {}
     near, far = settings.get('distance_window_m',(.08,.26))
@@ -665,13 +666,19 @@ def _departure_pose(robot, nav, profile, tag_id, pose, evidence):
         if attempt == _DEPARTURE_REOBSERVATIONS:
             # Leave one fresh observation available after any additional motion.
             continue
-        still_fresh = getattr(nav.io, 'visual_motion_ready', None)
+        still_fresh = VisualCamera_GetFreshnessCheck(nav.io)
         if still_fresh is None or not still_fresh(pose.get('latest_stamp_ns', 0)):
             continue
         if advice['action']=='heading_micro_after_reobserve':
             nudged = True
             prior_heading = nav.mag.anchor
-            correction = robot.visual_checkpoint(tag_id, departure_pose=pose)
+            try:
+                correction = robot.visual_checkpoint(tag_id, departure_pose=pose)
+            except VisualCameraUnavailable as exc:
+                robot.check()
+                evidence['departure_camera_error'] = str(exc)
+                return None, (CorridorTrialResult.CAMERA_UNAVAILABLE,
+                              f'Tag {tag_id} 起步纠偏时无法读取新图像。')
             evidence['departure_correction'] = correction
             anchor = nav.mag.anchor or {}
             if (correction.get('magnetic', {}).get('status') == 'updated'
@@ -739,7 +746,9 @@ def _corridor_partial_geometry(robot, nav, checkpoint, tag_id, *, fresh_only=Fal
         camera = checkpoint.get('camera_info') or {}
         if not expected or camera.get('fingerprint') != expected or camera.get('ready') is not True:
             return None
-        now = nav.io.ros_now_ns()
+        now = Checkpoint_OptionalScanTime(nav.io, robot.check)
+        if now is None or type(robot.last_action_completed_ros_ns) is not int:
+            return None
         rows = [row for row in rows if type(row.get('stamp_ns')) is int
                 and row['stamp_ns'] > robot.last_action_completed_ros_ns
                 and 0 <= now-row['stamp_ns'] <= nav.cfg['max_age_s']*1e9]
@@ -750,7 +759,7 @@ def _corridor_partial_geometry(robot, nav, checkpoint, tag_id, *, fresh_only=Fal
     left, right = geometry['lateral_bounds_m']
     geometry['consistent'] = (far-near <= .035 and right-left <= .035
                               and geometry['max_heading_deviation_deg'] <= 5.)
-    ready = getattr(nav.io, 'visual_motion_ready', None)
+    ready = VisualCamera_GetFreshnessCheck(nav.io)
     geometry['latest_fresh'] = bool(ready and ready(geometry['latest_stamp_ns']))
     return geometry
 
@@ -834,8 +843,8 @@ def _tag4_position_plan(robot, nav, profile, settings, *, approach_steps=None, b
 
 
 def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings):
-    """Let a single moderate magnetic deviation reach one short visual boundary."""
-    robot.action(action, monitor_only_as=action)
+    """Handle feedback after this gait's receipt has already been recorded."""
+    robot.check()
     report = robot.last_heading_report or {}
     sample = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
     previous = leg.pop('tag4_deferred_heading_deg', None)
@@ -854,8 +863,18 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings):
     elif robot._tag4_visual_before_magnetic_turn(action, nav, settings):
         decision = 'fresh_tag4'
     else:
-        robot.corridor_recover_heading(4, boundary=action)
-        decision = 'corrected_from_magnetic'
+        robot.corridor_recover_heading(4, boundary=action, checked_visual_stance=robot.last_action_completed_ros_ns)
+        feedback = robot.last_heading_report or {}
+        if getattr(robot, 'magnetic_route_only', False) or not feedback:
+            decision = 'magnetic_unavailable_continue'
+        elif feedback.get('correction_actions', 0) > 0:
+            decision = 'corrected_from_magnetic'
+        elif (feedback.get('entry_followup') or {}).get('fresh_tag') == 4:
+            decision = 'fresh_tag4'
+        elif CorridorTrial_HeadingSnapshot(feedback, after=True, load=robot.load_kind) is None:
+            decision = 'magnetic_unavailable_continue'
+        else:
+            decision = 'checked_from_magnetic'
     leg.setdefault('tag4_forward_heading', []).append(
         {'action':action, 'measured_deg':error, 'decision':decision})
 
@@ -884,7 +903,7 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
     else:
         bounds, stamp = None, None
     stance = getattr(robot, 'last_action_completed_ros_ns', None)
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if (bounds and len(bounds) == 2 and all(type(v) in (float, int) and isfinite(v) for v in bounds)
             and 0 < bounds[0] <= bounds[1] <= settings['distance_window_m'][1]
             and bounds[1] - bounds[0] <= .025 and type(stamp) is int
@@ -939,12 +958,12 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
 def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approach_steps=None, tag3_heading=None):
     options = {}
     if (tag3_heading and tag3_heading['latest_stamp_ns'] > robot.last_action_completed_ros_ns
-            and nav.io.visual_motion_ready(tag3_heading['latest_stamp_ns'])):
+            and VisualCamera_IsFresh(nav.io.visual_motion_ready, tag3_heading['latest_stamp_ns'])):
         options['tag3_heading'] = tag3_heading
     plan = RoutePose_PlanTag4Longitudinal(observation, nav.cfg, settings, approach_steps=approach_steps, **options)
     if observation.get('reused_boundary_frames'):
         plan['reused_boundary_frames'] = True
-    ready = getattr(nav.io, 'visual_motion_ready', None)
+    ready = VisualCamera_GetFreshnessCheck(nav.io)
     if plan['distance_verified'] and (ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(distance_verified=False, reason='Tag 4 depth expired before dispatch')
     depth = plan.get('distance_bounds_m')
@@ -1054,7 +1073,7 @@ def _tag4_observed_clearance_problem(plan, nav, *, heading_limit=None):
 
 
 def _tag4_guarded_forward_ready(nav, plan):
-    live = getattr(nav.io,'visual_motion_ready',None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     return (plan.get('guarded_forward_steps') == 2 and not plan.get('camera_contract_fault')
             and abs(plan['heading_deg']) < _TAG4_CLEARANCE_YAW_DEG
             and live is not None and live(plan['latest_stamp_ns']))
@@ -1169,7 +1188,7 @@ def _tag4_recover_forward_pose(robot, nav, profile, settings, plan, recovery, *,
     turn_from_tag = getattr(robot, 'Route_TurnFromTagHeading', None)
     strafe = getattr(robot, 'corridor_side_action', None)
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
-    live = getattr(nav.io, 'visual_motion_ready', lambda _: False)
+    live = VisualCamera_GetFreshnessCheck(nav.io, lambda _: False)
     attempts = recovery.setdefault('reobservations', [])
     turns = recovery.setdefault('visual_turns', [])
     goal = next((point for point in nav.cfg['legs']['outbound'] if point['id'] == 4), {})
@@ -1447,7 +1466,7 @@ def _tag4_authorize_near_left(robot, nav, settings, plan, leg, *, reserved_actio
     heading = plan.get('heading_deg')
     spread = plan.get('max_heading_deviation_deg', float('inf'))
     stamp = plan.get('latest_stamp_ns')
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     deadband = nav.cfg.get('visual_micro', {}).get('deadband_deg', 8.)
     if (depth is None or lateral is None or heading is None or spread > 3.
             or (plan.get('max_abs_yaw_deg', abs(heading) + spread) > deadband
@@ -1647,7 +1666,7 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
     taught_close = _tag4_taught_close(plan, settings)
     if plan.get('confirmed_near') or taught_close:
         last_move = (leg['completed_actions'] or checkpoint.get('completed_actions') or [None])[-1]
-        live = getattr(nav.io, 'visual_motion_ready', None)
+        live = VisualCamera_GetFreshnessCheck(nav.io)
         if (plan['distance_verified'] and live is not None and live(plan['latest_stamp_ns'])
                 and _tag4_can_reverse_approach(plan, settings, last_move,
                     minimum_departure_m=_TAG4_LEFT_PROBE_DEPTH_M if taught_close else None)):
@@ -1667,7 +1686,7 @@ def _approach_tag4_before_left(robot, nav, profile, pose, leg, settings, initial
     batches = initial['approach_batches'] = []
     turns = initial['heading_recovery'] = []
     turn_from_tag = getattr(robot, 'Route_TurnFromTagHeading', None)
-    fresh = getattr(nav.io, 'visual_motion_ready', lambda _: False)
+    fresh = VisualCamera_GetFreshnessCheck(nav.io, lambda _: False)
     need_reference = False
     previous_turn = None
     stationary_checks = 0
@@ -1761,7 +1780,7 @@ def _trim_tag2_dispatch(robot, nav, leg, pose, plan, *, continuous, reserved_act
     operation = plan['operation']
     if operation is None:
         return False
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if live is None or not live(plan.get('latest_stamp_ns', pose.get('latest_stamp_ns', 0))):
         plan.update(status='deferred', reason='Tag 2 longitudinal pose expired before dispatch')
         return False
@@ -1827,7 +1846,7 @@ def _tag2_reframe_for_view(robot, nav, profile, leg, *, operation, distance_m, r
         reason = 'Tag 2 航向偏差较大，沿已走过的路后退两步让开障碍，再用新帧定转向。'
     robot.check()
     if fresh_turn_pose is not None:
-        live = getattr(nav.io,'visual_motion_ready',None)
+        live = VisualCamera_GetFreshnessCheck(nav.io)
         if (live is None or fresh_turn_pose['stance_completed_ns'] != robot.last_action_completed_ros_ns
                 or not live(fresh_turn_pose['latest_stamp_ns'])):
             return None
@@ -1860,7 +1879,7 @@ def _tag2_recover_heading_clearance(robot, nav, profile, leg, plan, settings, *,
     """Reverse on the approach just traveled when a Tag 2 turn needs wall clearance."""
     stance = robot.last_action_completed_ros_ns
     stamp = plan.get('latest_stamp_ns', 0)
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     traversed = leg.get('entry_completed_steps', 0) >= 2 or 'carry_forward2' in leg['completed_actions']
     bounds = plan.get('lateral_bounds_m')
     projection = plan.get('projection_bounds')
@@ -1923,7 +1942,7 @@ def _tag2_after_turn_partial_reframe(robot, nav, observation, settings):
     stance = robot.last_action_completed_ros_ns
     now = scan.get('now_ns')
     restart = scan.get('camera_restart_ns', 0)
-    live = getattr(nav.io,'visual_motion_ready',None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if (type(stance) is not int or observation.get('partial_pose_same_stance_ns') != stance
             or type(now) is not int or type(restart) is not int or live is None
             or scan.get('camera_healthy') is not True or scan.get('contract_match') is not True
@@ -1945,7 +1964,7 @@ def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading
                                departure_heading, reserved_actions):
     """Return a recent checkpoint, or retain the distinction between lost and unseen."""
     scan = checkpoint.get('scan') or {}
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     stance = robot.last_action_completed_ros_ns
     stamp = max((row['stamp_ns'] for row in scan.get('observations', ())
                  if row.get('id') == 2 and type(row.get('stamp_ns')) is int), default=0)
@@ -1978,15 +1997,23 @@ def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading
             rows.extend(boundary.get('partial_pose_rows', ()))
     settings = robot.cfg['route_steps']['tag2_forward_trial']
     camera_status = getattr(nav.io, 'visual_camera_status', None)
+    def camera_ready():
+        try:
+            return camera_status().get('ready') is True
+        except OSError as exc:
+            robot.check()
+            recheck['camera_read_error'] = str(exc)
+            return False
+
     scan_at = scan.get('now_ns')
     cutoff = scan.get('after_ns')
-    now = nav.io.ros_now_ns()
+    now = Checkpoint_OptionalScanTime(nav.io, robot.check)
     if (not sighted and not heading_changed and miss.get('cause') == 'tag_not_visible'
             and miss.get('healthy_windows', 0) >= 2 and scan.get('camera_healthy') is True
             and scan.get('contract_match') is True and type(cutoff) is int and type(scan_at) is int
             and type(now) is int and type(stance) is int and stance <= cutoff <= scan_at <= now
             and now - scan_at <= nav.cfg['max_age_s'] * 1e9
-            and camera_status is not None and camera_status().get('ready') is True):
+            and camera_status is not None and camera_ready()):
         recheck.update(status='unseen_continue_estimated', reused_healthy_windows=miss['healthy_windows'])
         return {}, True
     deadband = nav.cfg['post_action_heading'].get('deadband_deg')
@@ -2038,7 +2065,7 @@ def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading
         if not heading_steady:
             plan['reframe_blocked'] = 'heading_unconfirmed'
             continue
-        if camera_status is not None and camera_status().get('ready') is not True:
+        if camera_status is not None and not camera_ready():
             plan['reframe_blocked'] = 'camera_unconfirmed'
             continue
         observation = _tag2_reframe_for_view(robot, nav, profile, leg, operation=plan['operation'],
@@ -2084,7 +2111,7 @@ def _recover_tag2_lateral_start(robot, nav, profile, leg, plan, settings, *,
 
     side_action = getattr(robot, 'corridor_side_action', None)
     departure = (leg.get('configured_steps') or [{}])[0]
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if (side_action is None or live is None or departure.get('op') != 'strafe_right_once'
             or departure.get('repeat', 0) < 2 or plan['lateral_bounds_m'][1] >= 0.):
         return None
@@ -2163,7 +2190,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
     near, far = settings['distance_window_m']
     short, long = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])
     groups = (initial['planned_steps'] + 1) // 2
-    live = getattr(nav.io, 'visual_motion_ready', lambda _: False)
+    live = VisualCamera_GetFreshnessCheck(nav.io, lambda _: False)
     windows = initial['landing_checks'] = []
     turn = getattr(robot, 'Route_TurnFromTagHeading', None)
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
@@ -2315,7 +2342,7 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     last_turn = None
     refreshed = False
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     while True:
         yaw = latest.get('heading_to_correct_deg')
         step_count = latest['planned_steps']
@@ -2479,7 +2506,7 @@ def _tag2_current_visual_plan(robot, nav, checkpoint, *, continuous, candidate_c
     camera = checkpoint.get('camera_info') or {}
     after = scan.get('after_ns')
     stance = robot.last_action_completed_ros_ns
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if (checkpoint.get('detected') is not True or camera.get('ready') is not True
             or type(after) is not int or type(stance) is not int or not 0 < stance <= after or live is None):
         return None
@@ -2541,7 +2568,7 @@ def _tag3_heading_clearance_action(robot, leg, hint, *, reserved_actions):
 def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_actions):
     """Use the current Tag 3 stance as the reference before right-striding toward the wall."""
     rebase = getattr(robot,'Route_RebaseTagHeading',None)
-    live = getattr(nav.io,'visual_motion_ready',None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     stance = robot.last_action_completed_ros_ns
     floor = (previous_leg.get('scan') or {}).get('after_ns')
     if rebase is None or live is None or type(stance) is not int or type(floor) is not int or floor < stance:
@@ -2656,12 +2683,12 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
     checkpoint = _corridor_boundary_checkpoint(robot, nav, 3)
     hint = RoutePose_Tag3HeadingRecovery(checkpoint, nav.cfg) if checkpoint else None
     if probe_once and (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
-                       or not nav.io.visual_motion_ready(hint['latest_stamp_ns'])):
+                       or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         _, observed = _refresh_checkpoint_pose(robot, nav, profile, 3, quick_id=True,
                                                reuse_settled_cache=True, advisory_windows=1)
         hint = RoutePose_Tag3HeadingRecovery(observed, nav.cfg)
     if (hint is None or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
-            or not nav.io.visual_motion_ready(hint['latest_stamp_ns'])):
+            or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
         return
     yaw = hint['heading_deg']
     stamp = hint['latest_stamp_ns']
@@ -2673,7 +2700,7 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
                                             quick_id=True, reuse_settled_cache=True, advisory_windows=1)
         hint = RoutePose_Tag3HeadingRecovery(fresh, nav.cfg)
         if (hint is None or hint['latest_stamp_ns'] <= max(stamp, robot.last_action_completed_ros_ns)
-                or not nav.io.visual_motion_ready(hint['latest_stamp_ns'])):
+                or not VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])):
             info['post_turn_pose_confirmed'] = False
             return
         info['post_turn_pose_confirmed'] = True
@@ -2773,7 +2800,7 @@ def _trim_tag5_entry(robot, nav, profile, settings, checkpoint, delivery, *, res
     alignment = {'expected_id': 5, 'observations': [], 'completed_actions': []}
     delivery['entry_lateral_alignment'] = alignment
     ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     lateral_action = getattr(robot, 'corridor_side_action', None)
     if (delivery.get('heading_before_advance') or {}).get('correction_actions'):
         _, checkpoint = _refresh_checkpoint_pose(robot, nav, profile, 5)
@@ -2826,7 +2853,7 @@ def _tag5_passage_plan(robot, nav, settings, checkpoint, *, approach_distance_m=
     plan = RoutePose_PlanTag5Passage(
         checkpoint, nav.cfg, settings, current_group_distance_m=approach_distance_m,
         small_ready=not getattr(robot, 'magnetic_route_only', False) and small_ready())
-    ready = getattr(nav.io, 'visual_motion_ready', None)
+    ready = VisualCamera_GetFreshnessCheck(nav.io)
     if plan['geometry_valid'] and (type(completed) is not int or ready is None or not ready(plan['latest_stamp_ns'])):
         plan.update(geometry_valid=False, ready_for_forward=False, operation=None,
                     reason='Tag 5 passage observation expired', reason_zh='Tag 5 门口位姿已过期，等待动作完成后的新帧。')
@@ -2983,7 +3010,7 @@ def _tag5_heading_clearance(robot, nav, plan, settings):
             or not settings.get('max_heading_deg', 12.) < abs(yaw) <= 35.):
         return None
     goal = next((point for point in nav.cfg['legs']['outbound'] if point['id'] == 5), {})
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if goal.get('allow_strafe') is not True or live is None or not live(plan['latest_stamp_ns']):
         return None
     side = 'strafe_left_once' if bounds[0] > 0 else 'strafe_right_once'
@@ -3287,7 +3314,7 @@ def _tag5_continuous_entry(robot, nav, settings, plan):
     lateral = plan.get('lateral_bounds_m')
     projected = plan.get('projected_lateral_bounds_m')
     stamp = plan.get('latest_stamp_ns')
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     pair = robot.load_kind == 'double'
     if (not plan.get('geometry_valid') or not plan['ready_for_forward'] or plan.get('entering') or plan.get('near_parallel_entry')
             or heading_bounds is None or lateral is None or projected is None
@@ -3636,7 +3663,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 small = side_plan.get('small_operation')
                 calibrated = side_plan.get('calibrated_pose_used') is True
                 if calibrated or count != nominal or small:
-                    motion_ready = getattr(nav.io, 'visual_motion_ready', None)
+                    motion_ready = VisualCamera_GetFreshnessCheck(nav.io)
                     if not motion_ready or not motion_ready(pose.get('latest_stamp_ns', 0)):
                         count, small, calibrated = nominal, None, False
                         side_plan.update(status='nominal', count=count, small_operation=None,
@@ -3662,7 +3689,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     hint = _tag3_lateral_hint(result['legs'][-2], nav, deadband, tag3_refresh)
                     left_count = _tag3_left_bias_count(step, hint)
                     if left_count is not None:
-                        ready = getattr(nav.io, 'visual_motion_ready', None)
+                        ready = VisualCamera_GetFreshnessCheck(nav.io)
                         if ready is None or not ready(hint['latest_stamp_ns']):
                             _, tag3_refresh = _refresh_checkpoint_pose(robot, nav, profile, 3)
                             hint = RoutePose_TrialLateralHint(tag3_refresh, nav.cfg, 3)
@@ -3737,7 +3764,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 departure_turned = bool((leg.get('departure_heading') or {}).get('correction_actions'))
                 hint = _tag3_lateral_hint(previous_leg, nav, deadband, tag3_refresh,
                                           departure_turned=departure_turned)
-                live = getattr(nav.io, 'visual_motion_ready', None)
+                live = VisualCamera_GetFreshnessCheck(nav.io)
                 if hint and hint['tag_id'] == 3 and (not live or not live(hint['latest_stamp_ns'])):
                     hint = None
                 can_small = (small_ready is not None and small_ready()
@@ -4046,7 +4073,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             for action_index, action in enumerate(actions):
                 _revalidate_heading(robot, nav)
                 if index == 0 and action_index == 0 and leg.get('tag4_near_left_start'):
-                    live = nav.io.visual_motion_ready
+                    live = VisualCamera_GetFreshnessCheck(nav.io)
                     if not live(leg['tag4_near_left_start']['latest_stamp_ns']):
                         latest = _tag4_position_plan(robot, nav, profile, tag4_departure, boundary_first=True,
                                                      advisory_windows=2)
@@ -4071,7 +4098,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 if tag5_continuation is not None:
                     midpoint, checkpoint = tag5_continuation
                     tag5_continuation = None
-                    if not nav.io.visual_motion_ready(midpoint['latest_stamp_ns']):
+                    if not VisualCamera_IsFresh(nav.io.visual_motion_ready, midpoint['latest_stamp_ns']):
                         midpoint['decision'] = 'replace_remaining_strafes'
                         midpoint['group_rejection'] = 'Tag 5 observed pose expired before dispatch'
                         tag5_handoff = checkpoint
@@ -4156,12 +4183,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             break
                         midpoint['decision'] = 'retain_estimated_group'
                     continue
-                if (guarded_tag4_leg and op == _FORWARD_GROUP and not tag4_fused_heading
+                monitor_tag4_group = (guarded_tag4_leg and op == _FORWARD_GROUP and not tag4_fused_heading
                         and index + 1 < len(planned) and planned[index + 1][0] == _FORWARD_GROUP
                         and callable(getattr(robot, '_tag4_visual_before_magnetic_turn', None))
-                        and callable(getattr(robot, 'corridor_recover_heading', None))):
-                    _tag4_monitor_towards_next_window(robot, nav, action, leg, tag4_trial)
-                elif tag4_fused_heading or (use_tag5_passage and expected_id == 5):
+                        and callable(getattr(robot, 'corridor_recover_heading', None)))
+                if monitor_tag4_group or tag4_fused_heading or (use_tag5_passage and expected_id == 5):
                     robot.action(action, monitor_only_as=action)
                 elif checkpoint_action is not None and (is_boundary or
                         (use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP
@@ -4177,6 +4203,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 if use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP:
                     leg['completed_forward_steps'] = (leg.get('completed_forward_steps',0)
                                                        + Cmd0Motion_ForwardStepCount((action,)))
+                    if monitor_tag4_group:
+                        _tag4_monitor_towards_next_window(robot, nav, action, leg, tag4_trial)
                     tag4_disruption = _tag4_forward_disruption(robot, last_event, previous_report, leg)
                     if tag4_disruption and action_index + 1 < len(actions):
                         pending_actions -= len(actions) - action_index - 1
@@ -4388,7 +4416,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         stamp = (aligned or {}).get('latest_stamp_ns')
         if yaw is None and pose.get('stance_ns') == robot.last_action_completed_ros_ns:
             yaw, stamp = pose.get('error_deg'), pose.get('observed_at_ns')
-        live = getattr(nav.io, 'visual_motion_ready', None)
+        live = VisualCamera_GetFreshnessCheck(nav.io)
         if rebase is not None and type(yaw) in (int, float) and type(stamp) is int and live and live(stamp):
             entry_reference = rebase(5, yaw, stamp).value
         delivery['entry_heading_reference'] = {'status': entry_reference or 'unavailable',

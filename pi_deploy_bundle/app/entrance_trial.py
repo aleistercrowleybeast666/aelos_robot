@@ -5,9 +5,11 @@ from math import isfinite, radians, sin
 from action_chains_v5 import COMMAND0_OUTBOUND
 from cmd0_motion import (COMMAND0_ENTRY_FORWARD_STEPS, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady)
-from checkpoint_errors import VisualCameraUnavailable
-from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_ReadWindow, CheckpointScanResult
-from nav_observation import summarize
+from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCameraUnavailable
+from checkpoint_scan import (Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime,
+                             Checkpoint_ReadWindow, CheckpointScanResult)
+from nav_observation import summarize, wrap
+from checkpoint_alignment import RouteTagHeadingRebaseResult
 from route_pose import (RoutePose_Load, RoutePose_Measure, RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanForwardCount, RoutePose_PlanTag1ForwardTrial, RoutePose_PlanTag2ForwardTrial,
                         TAG2_APPROACH_COUNTS)
@@ -129,7 +131,11 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
     """Read the new stance before another action can use its pose."""
     from visual_micro import VisualMicro_ObserveWithoutMagnetic, VisualMicroStopped
 
-    after = nav.io.ros_now_ns()
+    after = Checkpoint_OptionalScanTime(nav.io, robot.check)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if after is None or live is None:
+        recovery['reobserve_reason'] = 'Tag 1 的相机时钟或新帧校验暂不可用。'
+        return None
     try:
         alignment = VisualMicro_ObserveWithoutMagnetic(nav.cfg, nav.io, 1, goal, after_ns=after,
             deadline=min(robot.deadline, robot.clock()+nav.cfg['settle_s']+2*nav.cfg['observe_s']),
@@ -140,9 +146,9 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
         return None
     scan = alignment['scan']
     stamp = scan.get('latest_stamp_ns')
-    live = nav.io.visual_motion_ready
+    completed = robot.last_action_completed_ros_ns
     if (alignment.get('pose_accepted') is not True or scan.get('ids') != [1] or type(stamp) is not int
-            or stamp <= max(after, robot.last_action_completed_ros_ns) or not live(stamp)):
+            or type(completed) is not int or stamp <= max(after, completed) or not live(stamp)):
         recovery['reobserve_reason'] = alignment['reason']
         return None
     alignment['heading_residual_advisory'] = not alignment.get('heading_aligned')
@@ -160,7 +166,7 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
         return alignment
     error = alignment['decision_fusion'].get('error_deg')
     stamp = alignment['scan'].get('latest_stamp_ns')
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     deadband = visual['deadband_deg']
     completed = robot.last_action_completed_ros_ns
     if (type(error) not in (int, float) or not isfinite(error) or abs(error) <= deadband
@@ -235,15 +241,78 @@ def _tag1_forward_plan(nav, profile, load, scan, camera_info, nominal, candidate
     return pose, plan
 
 
+def _tag1_paired_heading(robot, nav, goal, alignment):
+    """Carry the measured Tag 1 offset into the straight without zeroing its yaw."""
+    unavailable = RouteTagHeadingRebaseResult.UNAVAILABLE
+    scan = alignment['scan']
+    fused = alignment['decision_fusion']
+    reference = (alignment.get('magnetic') or {}).get('reference') or {}
+    anchor = nav.mag.anchor or {}
+    stamp, after, observed = (scan.get(k) for k in ('latest_stamp_ns','after_ns','now_ns'))
+    completed = robot.last_action_completed_ros_ns
+    if (not reference or not anchor or not nav.cfg['post_action_heading'].get('enabled')
+            or getattr(robot.backend, 'is_simulation', False)
+            or anchor.get('source') != 'reliable_tag_alignment'
+            or anchor.get('tag_id') != 1 or anchor.get('load') != robot.load_kind
+            or robot.load_kind not in ('single','double') or not anchor.get('capture_verified')
+            or not anchor.get('usable_for_heading') or not all(type(v) is int for v in (completed,after,stamp,observed))
+            or not 0 < completed <= after < stamp <= observed
+            or anchor.get('visual_stamp_ns') != stamp or stamp <= getattr(nav.io,'restart_barrier',0)
+            or scan.get('contract_match') is not True or scan.get('camera_healthy') is not True
+            or not (alignment.get('camera_info') or {}).get('fingerprint')
+            or anchor.get('visual_camera_fingerprint') != alignment['camera_info']['fingerprint']):
+        return unavailable
+    now_ns = Checkpoint_OptionalScanTime(nav.io, robot.check)
+    if now_ns is None or not 0 <= now_ns - stamp <= _TAG1_STANCE_REFERENCE_MAX_NS:
+        return unavailable
+    stream = getattr(nav.io,'capture_stream',None)
+    session = anchor.get('capture_session')
+    calibration = anchor.get('calibration_id')
+    epoch = anchor.get('load_epoch')
+    scope = (getattr(robot.backend,'session',''), getattr(robot.backend,'epoch',-1))
+    if (not session or not calibration or type(epoch) is not int or not scope[0]
+            or type(scope[1]) is not int or scope[1] < 0
+            or anchor.get('owner_observation_scope') != scope or not getattr(nav.io,'motion_capture_verified',False)
+            or session != getattr(stream,'session',None) or calibration != getattr(stream,'calibration_digest',None)
+            or epoch != getattr(nav.io,'magnetic_load_epoch',None)
+            or any(anchor.get(k) != reference.get(k) for k in ('raw_heading_deg','offset_deg','capture_session',
+                        'calibration_id','received_monotonic','load_epoch','norm'))):
+        return unavailable
+    yaw, goal_yaw = fused.get('error_deg'), goal.get('route_heading_deg')
+    measured, offset = anchor.get('raw_heading_deg'), anchor.get('offset_deg')
+    started, paired, receipt = (getattr(robot,'last_action_completed_monotonic',None),
+                                anchor.get('paired_after_monotonic'),anchor.get('received_monotonic'))
+    sign = nav.cfg['magnetic'].get('heading_sign')
+    now = robot.clock()
+    if (not all(type(v) in (int,float) and isfinite(v) for v in (yaw,goal_yaw,measured,offset,started,paired,receipt,now))
+            or not started <= paired < receipt <= now or sign not in (-1,1)
+            or now - receipt > _TAG1_STANCE_REFERENCE_MAX_NS / 1e9
+            or abs(wrap(sign*measured + offset - goal_yaw - yaw)) > .01):
+        return unavailable
+    robot.check()
+    departure = {'tag_id':1,'route_heading_deg':goal_yaw,'error_deg':yaw,'observed_at_ns':stamp}
+    nav.mag.anchor = dict(anchor,source='relative_stationary_segment_start',route_heading_deg=goal_yaw,
+                          absolute_route_heading_known=True,tag_departure=departure)
+    guard = robot._heading_controller(nav)
+    guard.latched = False
+    robot.magnetic_route_only = False
+    robot.last_heading_report = None
+    robot.events.append({'segment_heading_reference':{'status':'tag_departure_reference_established',
+                        'reference_source':'same_stance_tag_magnetic_pair','tag_departure':departure,
+                        'reference':dict(nav.mag.anchor)}})
+    return RouteTagHeadingRebaseResult.APPLIED
+
+
 def _tag1_same_stance_reference(robot, nav, plan, scan, fresh, camera_info, completed_ns):
     """A settled reference can size the existing straight while the stance stays fixed."""
     latest = plan.get('latest_stamp_ns')
     after, observed = scan.get('after_ns'), scan.get('now_ns')
     current = fresh.get('camera_info') or {}
+    now = Checkpoint_OptionalScanTime(nav.io, robot.check)
     return (plan.get('source') == 'tag1_forward_trial'
             and all(type(stamp) is int for stamp in (completed_ns, after, latest, observed))
             and 0 < completed_ns == robot.last_action_completed_ros_ns <= after < latest <= observed
-            and 0 <= nav.io.ros_now_ns() - latest <= _TAG1_STANCE_REFERENCE_MAX_NS
+            and now is not None and 0 <= now - latest <= _TAG1_STANCE_REFERENCE_MAX_NS
             and fresh.get('camera_healthy') is True and fresh.get('contract_match') is True
             and current.get('ready') is True and current.get('fingerprint') == camera_info['fingerprint']
             and all(row.get('id') == 1 for row in fresh.get('observations', ())))
@@ -252,7 +321,7 @@ def _tag1_same_stance_reference(robot, nav, plan, scan, fresh, camera_info, comp
 def _tag2_boundary_pose_rows(robot, nav, boundary):
     after = boundary.get('after_ns')
     completed = robot.last_action_completed_ros_ns
-    now = nav.io.ros_now_ns()
+    now = Checkpoint_OptionalScanTime(nav.io, robot.check)
     if (not boundary.get('camera_info_ready') or not all(type(stamp) is int for stamp in (after, completed, now))
             or not 0 < completed <= after <= now):
         return []
@@ -372,10 +441,44 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
     rebase = getattr(robot, 'Route_RebaseTagHeading', None)
     tag_rebased = False
     if rebase is not None and not nominal_entry and entry_alignment and EntranceTrial_IsEntryAccepted(entry_alignment):
-        from task_runner import RouteTagHeadingRebaseResult
-        entry_scan = entry_alignment['scan']
-        fused = entry_alignment['decision_fusion']
-        outcome = rebase(start['tag'], fused.get('error_deg'), entry_scan.get('latest_stamp_ns'))
+        outcome = (_tag1_paired_heading(robot, nav, points[0], entry_alignment) if camera_info
+                   else RouteTagHeadingRebaseResult.UNAVAILABLE)
+        if outcome is RouteTagHeadingRebaseResult.APPLIED:
+            result['entry_heading_source'] = 'same_stance_tag_magnetic_pair'
+        else:
+            stamp = entry_alignment['scan'].get('latest_stamp_ns')
+            outcome = rebase(start['tag'], entry_alignment['decision_fusion'].get('error_deg'), stamp)
+            live = VisualCamera_GetFreshnessCheck(nav.io)
+            if (outcome is RouteTagHeadingRebaseResult.UNAVAILABLE and camera_info and estimate
+                    and type(stamp) is int and live is not None and not live(stamp)
+                    and callable(getattr(robot,'clock',None)) and getattr(robot,'deadline',None) is not None
+                    and not getattr(robot.backend,'is_simulation',False)):
+                refresh = {'reobservations':[]}
+                result['entry_heading_reobserve'] = refresh
+                current = _tag1_observe_after_recovery(robot, nav, points[0], refresh)
+                if (current and entry_stance_ns == robot.last_action_completed_ros_ns
+                        and (current.get('camera_info') or {}).get('fingerprint') == camera_info.get('fingerprint')
+                        and EntranceTrial_IsEntryAccepted(current)):
+                    if entry_alignment.get('correction_executed'):
+                        current['correction_executed'] = True
+                    current = _tag1_recover_departure(robot, nav, points[0], current, result,
+                                                      reserved_actions=len(operations))
+                    entry_stance_ns = robot.last_action_completed_ros_ns
+                    entry_alignment = current
+                    if current and current['camera_info'].get('fingerprint') == camera_info.get('fingerprint'):
+                        camera_info = current['camera_info']
+                        outcome = rebase(start['tag'], current['decision_fusion'].get('error_deg'),
+                                         current['scan']['latest_stamp_ns'])
+                        if outcome is RouteTagHeadingRebaseResult.APPLIED:
+                            result['entry_heading_source'] = 'stationary_tag_reobservation'
+                    else:
+                        entry_alignment = camera_info = None
+                        refresh['reobserve_reason'] = '入口纠偏后未重新取得同一相机的位姿，按预设路线继续。'
+                elif robot.last_action_completed_ros_ns != entry_stance_ns:
+                    entry_alignment = camera_info = None
+                elif current:
+                    entry_alignment = camera_info = None
+                    refresh['reobserve_reason'] = '新观测的相机标定或入口位姿未通过核对。'
         result['tag_heading_rebase'] = outcome.value
         tag_rebased = outcome is RouteTagHeadingRebaseResult.APPLIED
     if nominal_entry:
@@ -387,6 +490,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         # Establish a fresh relative zero if the Tag reading has expired or the
         # Mag stream cannot be paired with the confirmed departure stance.
         nav.mag.anchor = None
+        result['entry_heading_source'] = 'relative_straight_only'
         robot.prepare_heading_segment(fresh=True)
     if (nav.cfg['post_action_heading'].get('enabled') and nav.mag.anchor is None
             and not getattr(robot,'magnetic_route_only',False) and not estimate):
@@ -408,7 +512,7 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         result['forward_plan'] = plan
         adjusted_steps = plan['count']
         if adjusted_steps != target_steps:
-            motion_ready = getattr(nav.io, 'visual_motion_ready', None)
+            motion_ready = VisualCamera_GetFreshnessCheck(nav.io)
             stamp = plan.get('latest_stamp_ns', pose.get('latest_stamp_ns', 0))
             same_stance_reference = False
             if motion_ready is not None and not motion_ready(stamp):

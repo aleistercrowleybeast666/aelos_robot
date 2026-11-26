@@ -2,7 +2,8 @@
 
 from enum import Enum
 
-from checkpoint_errors import (Checkpoint_ClassifyStreamGap, Checkpoint_RecordMiss, CheckpointStreamResult,
+from checkpoint_errors import (VisualCamera_GetFreshnessCheck,
+                               Checkpoint_ClassifyStreamGap, Checkpoint_RecordMiss, CheckpointStreamResult,
                                VisualCamera_Read, VisualCameraUnavailable)
 from nav_observation import Observation_DistinctTagRows, summarize
 from route_pose import RoutePose_PartialCheckpointGeometry
@@ -23,6 +24,26 @@ _PARTIAL_POSE_HISTORY_NS = 6_000_000_000
 _PARTIAL_POSE_HISTORY_FRAMES = 8
 
 
+def Checkpoint_ReadScanTime(io):
+    """Get a fresh ROS time floor without substituting the operator's wall clock."""
+    try:
+        stamp = io.ros_now_ns()
+    except OSError as exc:
+        raise VisualCameraUnavailable('胸部相机 ROS 时钟读取失败：' + str(exc)) from exc
+    if type(stamp) is not int or stamp <= 0:
+        raise VisualCameraUnavailable('胸部相机暂未提供有效的 ROS 时间戳。')
+    return stamp
+
+
+def Checkpoint_OptionalScanTime(io, check):
+    if callable(getattr(io, 'ros_now_ns', None)):
+        try:
+            return Checkpoint_ReadScanTime(io)
+        except VisualCameraUnavailable:
+            check()
+    return None
+
+
 def Checkpoint_ReadWindow(io, tag, after_ns, timeout_s, check, *, quick_id=False, classify_errors=True):
     """Read one AR window. A missing time floor starts the window at the current ROS time."""
     def read(check_owner):
@@ -33,7 +54,9 @@ def Checkpoint_ReadWindow(io, tag, after_ns, timeout_s, check, *, quick_id=False
                 observe = io.observe
         else:
             observe = io.observe
-        floor = io.ros_now_ns() if after_ns is None else after_ns
+        floor = after_ns
+        if floor is None:
+            floor = Checkpoint_ReadScanTime(io) if classify_errors else io.ros_now_ns()
         return observe(tag, floor, timeout_s, check_owner)
 
     if classify_errors:
@@ -66,7 +89,7 @@ def Checkpoint_FromBoundary(robot, nav, expected_id, action=None, report=None):
             and type(row.get('stamp_ns')) is int and after < row['stamp_ns'] <= observed
             and 0 <= now-row['stamp_ns'] <= nav.cfg['max_age_s']*1e9]
     rows = list(Observation_DistinctTagRows(rows).values())
-    ready = getattr(nav.io,'visual_motion_ready',None)
+    ready = VisualCamera_GetFreshnessCheck(nav.io)
     if (scan.get('ids') != [expected_id] or len(rows) < nav.cfg['min_frames']
             or ready is None or not ready(max(row['stamp_ns'] for row in rows))):
         return None

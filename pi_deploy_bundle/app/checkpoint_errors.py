@@ -1,6 +1,7 @@
 """Camera failures and control-connection checks shared by Tag checkpoints."""
 
 from enum import Enum
+from functools import partial
 
 
 class CheckpointStreamResult(Enum):
@@ -50,6 +51,19 @@ class VisualMicroStopped(RuntimeError):
 
 class VisualCameraUnavailable(VisualMicroStopped):
     """A camera or AR read failed during an observation."""
+
+
+def VisualCamera_IsFresh(read, stamp_ns):
+    """A failed camera freshness read cannot authorize motion from that pose."""
+    try:
+        return read(stamp_ns)
+    except OSError:
+        return False
+
+
+def VisualCamera_GetFreshnessCheck(io, default=None):
+    read = getattr(io, 'visual_motion_ready', None)
+    return default if read is None else partial(VisualCamera_IsFresh, read)
 
 
 def VisualCamera_Read(read, check):

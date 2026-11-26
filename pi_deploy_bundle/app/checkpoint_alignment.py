@@ -2,6 +2,7 @@
 import math
 from enum import Enum
 
+from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_IsFresh
 from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
 from heading_guard import MagneticDataUnavailable, MagneticLoss_IsRecoverable
 from nav_observation import wrap
@@ -72,7 +73,7 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
         return None
     robot.check()
     checker=getattr(robot.backend,'check_micro',None)
-    live=getattr(nav.io,'visual_motion_ready',None)
+    live=VisualCamera_GetFreshnessCheck(nav.io)
     if (checker is None or live is None or type(observed_at_ns) is not int
             or (tag_id in (2, 3, 4) and type(robot.last_action_completed_ros_ns) is int
                 and observed_at_ns <= robot.last_action_completed_ros_ns)):
@@ -119,7 +120,7 @@ def Checkpoint_RebaseTagHeading(robot, tag_id, error_deg, observed_at_ns, *, dir
     robot.check()
     nav = robot.ensure_navigation_io()
     goal = next((point for point in nav.cfg['legs'][direction or 'outbound'] if point['id']==tag_id),None)
-    live = getattr(nav.io,'visual_motion_ready',None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if goal is None or live is None or not live(observed_at_ns):
         return unavailable
     heading = {'tag_id':tag_id,'route_heading_deg':goal['route_heading_deg'],
@@ -207,7 +208,7 @@ def Checkpoint_TurnAtTag5(robot, name, observed_at_ns):
             or robot.deadline-robot.clock() <= timeout + nav.cfg['observe_s']):
         return False
     robot.backend.check_micro()
-    if not nav.io.visual_motion_ready(observed_at_ns):
+    if not VisualCamera_IsFresh(nav.io.visual_motion_ready, observed_at_ns):
         return False
     robot.last_heading_report = None
     robot._complete_body_action(name,timeout)
@@ -222,7 +223,7 @@ def Checkpoint_MeasureEmptyMarker(robot, nav, leg):
     camera = leg.get('camera_info') or {}
     stamp = robot.last_action_completed_ros_ns
     floor, now = scan.get('after_ns'), scan.get('now_ns')
-    live = getattr(nav.io, 'visual_motion_ready', None)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
     if (robot.load_kind != 'empty' or live is None or type(stamp) is not int
             or type(floor) is not int or type(now) is not int or not stamp <= floor < now
             or pinned.get('source_confirmed') is not True or not pinned.get('expected_fingerprint')

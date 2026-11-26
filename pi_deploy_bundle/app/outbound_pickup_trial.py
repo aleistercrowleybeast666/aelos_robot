@@ -25,7 +25,7 @@ from pickup_controller import PickupObservationUnavailable, validate as validate
 from route_pose import RoutePose_TrialLateralHint
 from task_runner import NotReady, Robot
 from transfer_test import validate as validate_transfer
-from checkpoint_errors import VisualCamera_Read, VisualCameraUnavailable
+from checkpoint_errors import VisualCamera_IsFresh, VisualCamera_Read, VisualCameraUnavailable
 
 
 _PICKUP_SIDE_ACTIONS = frozenset((*SIDE_ACTIONS.values(), *SMALL_SIDE_ACTIONS, *SMALL_SIDE_ACTIONS.values()))
@@ -153,7 +153,7 @@ def _recover_startup_side_heading(robot, nav, boundary, severe_heading):
             single_window=True, quick_id=True, reuse_settled_cache=True)
         hint = RoutePose_TrialLateralHint(view, nav.cfg, 1) if observed is CheckpointScanResult.CHECKPOINT_DETECTED else None
         check['tag1'] = {'status':observed.value, 'reason':reason, 'pose':hint}
-        if (hint is not None and nav.io.visual_motion_ready(hint['latest_stamp_ns'])
+        if (hint is not None and VisualCamera_IsFresh(nav.io.visual_motion_ready, hint['latest_stamp_ns'])
                 and max(map(abs, hint['lateral_bounds_m'])) <= .10
                 and abs(hint['heading_deg']) < severe_heading):
             boundary.update(residual_deg=hint['heading_deg'], heading_status='tag1_verified')

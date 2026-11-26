@@ -5,7 +5,7 @@ import json
 import re
 from nav_observation import MAGNETIC_INSUFFICIENT_SAMPLES, summarize, wrap, MagneticReference, mad
 from micro_trial import OPS, active, response_limit
-from checkpoint_scan import Checkpoint_ReadWindow
+from checkpoint_scan import Checkpoint_ReadScanTime, Checkpoint_ReadWindow
 from checkpoint_errors import (VisualCamera_DiagnoseWindow, VisualCamera_Read,
                                VisualCameraUnavailable, VisualMicroStopped)
 
@@ -105,7 +105,7 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
         result.update(camera_info=camera,scan_attempted=True,
                       observation_windows=result['observation_windows']+1)
         window_now=window.get('now_ns')
-        now_ros=io.ros_now_ns()
+        now_ros=Checkpoint_ReadScanTime(io)
         if type(window_now) is not int or type(now_ros) is not int or not after_ns<=window_now<=now_ros:
             stop(('ROS clock moved backwards during passive Tag checkpoint',
                   '扫码时钟回退，本轮图像无法验证。',False))
@@ -206,9 +206,9 @@ class VisualMicro:
             if (retry is None or self.clock()+reserve>=deadline
                     or retry() is not MagneticRebindResult.REBOUND):
                 raise
-            fresh_after=self.io.ros_now_ns()
-            if type(fresh_after) is not int or fresh_after<after_ns:
-                self.stop('ROS clock moved backwards during stationary magnetic retry')
+            fresh_after=Checkpoint_ReadScanTime(self.io)
+            if fresh_after<after_ns:
+                raise VisualCameraUnavailable('ROS clock moved backwards during stationary magnetic retry')
             attempts=first.error_details['magnetic_sampling_attempts']
             try:
                 pair=self._pair_once(tag,fresh_after,deadline,post)
@@ -245,9 +245,9 @@ class VisualMicro:
                     or self.clock()+self.cfg['observe_s']+self.cfg['magnetic']['collect_s']>=deadline):
                 window=dict(window,observations=[])
                 break
-            new_after_ns=self.io.ros_now_ns()
-            if type(new_after_ns) is not int or new_after_ns<after_ns:
-                self.stop('ROS clock moved backwards during camera recheck')
+            new_after_ns=Checkpoint_ReadScanTime(self.io)
+            if new_after_ns<after_ns:
+                raise VisualCameraUnavailable('ROS clock moved backwards during camera recheck')
             after_ns=new_after_ns
             after=self.clock()
         obs=summarize(window,tag,self.cfg,after_ns)
@@ -278,7 +278,7 @@ class VisualMicro:
                     self.magnetic_loss(reason,'visual_post_action_heading' if post else 'visual_magnetic_pair')
                 self.stop(reason)
             magnetic=None
-        if obs.get('pose_usable') and not 0<=self.io.ros_now_ns()-obs['latest_stamp_ns']<=self.cfg['max_age_s']*1e9:
+        if obs.get('pose_usable') and not 0<=Checkpoint_ReadScanTime(self.io)-obs['latest_stamp_ns']<=self.cfg['max_age_s']*1e9:
             obs=dict(obs,pose_usable=False,reason='target pose expired before paired sample completed')
         trusted=bool(obs.get('pose_usable') and (obs.get('position_usable') or obs.get('heading_only')) and camera.get('ready') and obs.get('heading_mad_deg',float('inf'))<=self.v['max_heading_mad_deg'])
         if magnetic:
@@ -296,7 +296,7 @@ class VisualMicro:
         obs=pair['scan'];rows=pair.get('rows',[])
         live_visual=getattr(self.io,'visual_motion_ready',None)
         camera=VisualCamera_Read(lambda _:self.io.visual_camera_status(),self.check)
-        tag_age=self.io.ros_now_ns()-obs['latest_stamp_ns']
+        tag_age=Checkpoint_ReadScanTime(self.io)-obs['latest_stamp_ns']
         if (live_visual is None or not VisualCamera_Read(lambda _:live_visual(obs['latest_stamp_ns']),self.check) or
                 not 0<=tag_age<=self.cfg['max_age_s']*1e9 or
                 camera.get('fingerprint')!=pair['camera_info'].get('fingerprint')):
@@ -331,9 +331,9 @@ class VisualMicro:
         remaining=deadline-self.clock()
         if remaining<=0:return None
         self.check()
-        after_ns=self.io.ros_now_ns()
-        if type(after_ns) is not int or after_ns<pair['scan']['latest_stamp_ns']:
-            self.stop('ROS clock moved backwards during Tag recheck',report=report)
+        after_ns=Checkpoint_ReadScanTime(self.io)
+        if after_ns<pair['scan']['latest_stamp_ns']:
+            raise VisualCameraUnavailable('ROS clock moved backwards during Tag recheck',report=report)
         window=Checkpoint_ReadWindow(self.io,tag_id,after_ns,min(self.cfg['observe_s'],remaining),self.check)
         self.check()
         camera=VisualCamera_Read(lambda _:self.io.visual_camera_status(),self.check)
@@ -392,6 +392,10 @@ class VisualMicro:
         if self.reference.anchor is not None:
             self.reference.anchor.update(visual_basis_id=visual_basis_id,
                 owner_observation_scope=self.motion_model.observation_scope if self.motion_model else ('',-1))
+            if goal['id'] == 1:
+                self.reference.anchor.update(visual_stamp_ns=obs['latest_stamp_ns'],
+                    visual_camera_fingerprint=pair['camera_info'].get('fingerprint'),
+                    paired_after_monotonic=pair['after'])
         result.update(heading_aligned=True,magnetic=refreshed)
         if not near_target and self.reference.anchor is not None:
             result['reason']='reliable heading aligned; magnetic reference uses observed residual; x/y remain diagnostic, obstacle entry not authorized'
@@ -418,7 +422,7 @@ class VisualMicro:
         fresh_target_seen=tag_id in obs['observed_ids']
         while obs['status']=='no_tag' and windows<=self.v['max_reobserve_windows'] and self.clock()<deadline:
             events.append({'stationary_reobserve':windows,'body_commands':0})
-            pair=self.pair(tag_id,self.io.ros_now_ns(),deadline);obs=pair['scan'];windows+=1
+            pair=self.pair(tag_id,Checkpoint_ReadScanTime(self.io),deadline);obs=pair['scan'];windows+=1
             events.extend({'camera_recheck':issue} for issue in pair.get('camera_rechecks',()))
             fresh_target_seen=fresh_target_seen or tag_id in obs['observed_ids']
         result.update(scan=obs,observation_windows=windows,camera_info=pair['camera_info'],budget=self.budget.status(),
@@ -455,7 +459,7 @@ class VisualMicro:
             from motion_prediction import fuse_heading_errors
             now=self.clock();basis='tag:'+str(tag_id)+':route:'+str(goal['route_heading_deg'])
             magnetic_before_error=magnetic_reference_error
-            fused=fuse_heading_errors(dict(error_deg=magnetic_before_error,captured_at_s=min(r['captured_monotonic'] for r in pair['rows']),mad_deg=mad([float(r['heading_deg']) for r in pair['rows']],pair['magnetic']['raw_heading_deg'],True),target_basis=basis,valid=True,capture_verified=True,field_valid=True),dict(error_deg=error,captured_at_s=now-max(0.,(self.io.ros_now_ns()-obs['latest_stamp_ns'])/1e9),mad_deg=obs['heading_mad_deg'],target_basis=basis,valid=True,capture_verified=self.cfg['pose_contract']['capture_time_confirmed'],tag_id=tag_id,pose_usable=True),now_s=now,target_basis=basis,expected_tag_id=tag_id,max_age_s=min(self.cfg['magnetic']['max_age_s'],self.cfg['max_age_s']),max_skew_s=min(.5,self.cfg['magnetic']['max_age_s']),max_disagreement_deg=self.v['max_sensor_disagreement_deg'])
+            fused=fuse_heading_errors(dict(error_deg=magnetic_before_error,captured_at_s=min(r['captured_monotonic'] for r in pair['rows']),mad_deg=mad([float(r['heading_deg']) for r in pair['rows']],pair['magnetic']['raw_heading_deg'],True),target_basis=basis,valid=True,capture_verified=True,field_valid=True),dict(error_deg=error,captured_at_s=now-max(0.,(Checkpoint_ReadScanTime(self.io)-obs['latest_stamp_ns'])/1e9),mad_deg=obs['heading_mad_deg'],target_basis=basis,valid=True,capture_verified=self.cfg['pose_contract']['capture_time_confirmed'],tag_id=tag_id,pose_usable=True),now_s=now,target_basis=basis,expected_tag_id=tag_id,max_age_s=min(self.cfg['magnetic']['max_age_s'],self.cfg['max_age_s']),max_skew_s=min(.5,self.cfg['magnetic']['max_age_s']),max_disagreement_deg=self.v['max_sensor_disagreement_deg'])
             if fused.get('reason')=='observation_time_skew':
                 fused=dict(status='observed',error_deg=magnetic_before_error,source='fresh_magnetic_only',reason='visual pairing time skew; no fusion',predicted_only=False)
             result['decision_fusion']=fused
@@ -491,7 +495,7 @@ class VisualMicro:
             if self.motion_model is not None:
                 from motion_prediction import select_turn
                 session,epoch=self.motion_model.observation_scope
-                choice=select_turn(error_deg=error,captured_at_s=self.clock()-max(0.,(self.io.ros_now_ns()-obs['latest_stamp_ns'])/1e9),now_s=self.clock(),candidates={n:dict(direction='left' if 'left' in n else 'right',action_type='micro',nominal_delta_deg=d,max_step_deg=self.v['max_observed_step_deg'],bootstrap_upper_deg=response_limit(self.cfg['post_action_heading']) if response_limit(self.cfg['post_action_heading'])>8 else abs(d),adaptive_feedback=response_limit(self.cfg['post_action_heading'])>8,bounded_crossing_feedback=residual_driven,stop_on_possible_overshoot=self.cfg['post_action_heading'].get('stop_on_possible_overshoot',False)) for n,d in delta_map.items()},estimator=self.motion_model.turn_estimator,load=self.load,session=session,epoch=epoch,calibration_id=pair['magnetic'].get('calibration_id',''),max_age_s=self.cfg['max_age_s'],deadband_deg=self.v['release_deg'] if residual_driven else self.v['deadband_deg'],release_deg=.5 if residual_driven else self.v['release_deg'])
+                choice=select_turn(error_deg=error,captured_at_s=self.clock()-max(0.,(Checkpoint_ReadScanTime(self.io)-obs['latest_stamp_ns'])/1e9),now_s=self.clock(),candidates={n:dict(direction='left' if 'left' in n else 'right',action_type='micro',nominal_delta_deg=d,max_step_deg=self.v['max_observed_step_deg'],bootstrap_upper_deg=response_limit(self.cfg['post_action_heading']) if response_limit(self.cfg['post_action_heading'])>8 else abs(d),adaptive_feedback=response_limit(self.cfg['post_action_heading'])>8,bounded_crossing_feedback=residual_driven,stop_on_possible_overshoot=self.cfg['post_action_heading'].get('stop_on_possible_overshoot',False)) for n,d in delta_map.items()},estimator=self.motion_model.turn_estimator,load=self.load,session=session,epoch=epoch,calibration_id=pair['magnetic'].get('calibration_id',''),max_age_s=self.cfg['max_age_s'],deadband_deg=self.v['release_deg'] if residual_driven else self.v['deadband_deg'],release_deg=.5 if residual_driven else self.v['release_deg'])
                 result['motion_prediction']=choice
                 if choice.get('status')!='selected':
                     if (prefer_tag_heading
@@ -614,7 +618,7 @@ class VisualMicro:
             else:
                 from motion_prediction import fuse_heading_errors
                 now=self.clock();basis='tag:'+str(tag_id)+':goal:'+str(goal['tag_heading_deg'])
-                fused=fuse_heading_errors(dict(error_deg=magnetic_error,captured_at_s=min(r['captured_monotonic'] for r in pair['rows']),mad_deg=mad([float(r['heading_deg']) for r in pair['rows']],a['raw_heading_deg'],True),target_basis=basis,valid=True,capture_verified=a.get('capture_verified',False),field_valid=True),dict(error_deg=new_error,captured_at_s=now-max(0.,(self.io.ros_now_ns()-obs['latest_stamp_ns'])/1e9),mad_deg=obs.get('heading_mad_deg',float('inf')),target_basis=basis,valid=True,capture_verified=self.cfg['pose_contract']['capture_time_confirmed'],tag_id=tag_id,pose_usable=pair['trusted']),now_s=now,target_basis=basis,expected_tag_id=tag_id,max_age_s=min(self.cfg['magnetic']['max_age_s'],self.cfg['max_age_s']),max_skew_s=min(.5,self.cfg['magnetic']['max_age_s']),max_disagreement_deg=disagreement_limit)
+                fused=fuse_heading_errors(dict(error_deg=magnetic_error,captured_at_s=min(r['captured_monotonic'] for r in pair['rows']),mad_deg=mad([float(r['heading_deg']) for r in pair['rows']],a['raw_heading_deg'],True),target_basis=basis,valid=True,capture_verified=a.get('capture_verified',False),field_valid=True),dict(error_deg=new_error,captured_at_s=now-max(0.,(Checkpoint_ReadScanTime(self.io)-obs['latest_stamp_ns'])/1e9),mad_deg=obs.get('heading_mad_deg',float('inf')),target_basis=basis,valid=True,capture_verified=self.cfg['pose_contract']['capture_time_confirmed'],tag_id=tag_id,pose_usable=pair['trusted']),now_s=now,target_basis=basis,expected_tag_id=tag_id,max_age_s=min(self.cfg['magnetic']['max_age_s'],self.cfg['max_age_s']),max_skew_s=min(.5,self.cfg['magnetic']['max_age_s']),max_disagreement_deg=disagreement_limit)
             if fused.get('reason')=='observation_time_skew' and not field_feedback:
                 fused=dict(status='observed',error_deg=magnetic_error,source='fresh_magnetic_only',reason='visual pairing time skew; no fusion',predicted_only=False)
             result['prediction_update']=dict(predicted_error_deg=choice['predicted_error_deg'] if choice else wrap(error+delta),visual_error_deg=new_error,magnetic_error_deg=magnetic_error,fusion=fused,prediction_not_new_sample=True)
