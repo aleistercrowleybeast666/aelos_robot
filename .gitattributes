@@ -1,3 +1,4 @@
 * text=auto
 pi_deploy_bundle/** -text
+tools/optics/*.patch text eol=lf
 *.zip binary

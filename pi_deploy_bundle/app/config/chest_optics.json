@@ -1,0 +1,53 @@
+{
+  "width": 640,
+  "height": 480,
+  "frame_id": "chest_usb_cam",
+  "distortion_model": "plumb_bob",
+  "K": [
+    228.4822441704471,
+    0.0,
+    318.5911243382726,
+    0.0,
+    229.54386183804493,
+    236.21719592514174,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "D": [
+    0.10014561706757194,
+    -0.059807299546012965,
+    -0.0032574413952828236,
+    0.00012564072537508912,
+    0.0
+  ],
+  "R": [
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "P": [
+    228.125244140625,
+    0.0,
+    318.0933262486069,
+    0.0,
+    0.0,
+    238.08352661132812,
+    233.20433171864352,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0
+  ],
+  "source": "/usb_cam_chest/camera_info",
+  "source_calibration_sha256": "595ed2a7d3b956c7971d778e6a3367f36cb0b509c2ea200ed304aa2f6121dcc0",
+  "calibration_origin": "R3 chest CameraInfo, read back 2026-11-26",
+  "field_validation": "Yellow/white field grid. Fixed intrinsic matrix, radial/tangential coefficients from the camera. See docs/chest-optics.md for validation and coverage."
+}

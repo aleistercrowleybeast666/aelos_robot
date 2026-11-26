@@ -2,7 +2,7 @@
 
 import json
 from enum import Enum
-from math import radians, sin, tan
+from math import atan2, degrees, radians, sin, tan
 from pathlib import Path
 from statistics import median
 
@@ -422,6 +422,12 @@ def _trial_ground_depth(checkpoint, nav_cfg, tag_id):
             'max_abs_yaw_deg': max(map(abs, headings)),
             'max_abs_lateral_m': max(map(abs, lateral)), 'lateral_bounds_m': (min(lateral), max(lateral)),
             'projection_bounds': (min(projection), max(projection)), 'latest_stamp_ns': max(rows)}
+    if tag_id == 3:
+        # Horizontal view from the body origin. This is a proxy for peripheral
+        # viewing, distinct from an optical bearing or a measured corner pixel.
+        evidence['min_abs_body_bearing_deg'] = min(
+            abs(degrees(atan2(row['position_raw_m']['y'], row['position_raw_m']['x'])))
+            for row in rows.values())
     if tag_id == 4:
         # Keep the actual measurements used for each departure check, including after a retreat.
         evidence['tag4_depth_observation'] = {

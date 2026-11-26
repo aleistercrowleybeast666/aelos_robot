@@ -49,6 +49,7 @@ _TAG2_APPROACH_NEAR_MARGIN_M = .025
 _TAG2_DEPARTURE_LATERAL_M = .16
 _TAG2_CLEARANCE_YAW_DEG = 22.
 _TAG3_CLEARANCE_YAW_DEG = 20.
+_TAG3_PERIPHERAL_BODY_BEARING_DEG = 50.
 _LATERAL_LARGE_DRIFT_DEG = 30.
 _LATERAL_CLEARANCE_MAX_GROUPS = 3
 _LATERAL_CLEARANCE_HEADING_DEG = 45.
@@ -2674,6 +2675,45 @@ def _tag3_visual_departure(robot, nav, profile, previous_leg, leg, *, reserved_a
     return pose, refreshed
 
 
+def _tag3_peripheral_heading(robot, nav, leg, hint):
+    """Check a small peripheral yaw against the existing Tag 3 route reference."""
+    bearing = hint.get('min_abs_body_bearing_deg', 0.)
+    yaw = hint['heading_deg']
+    deadband = nav.cfg.get('post_action_heading', {}).get('deadband_deg', 8.)
+    if (bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG or abs(yaw) > deadband
+            or (leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
+            or getattr(robot, 'magnetic_route_only', False)):
+        return None
+    guard = getattr(robot, 'heading_guard', None)
+    anchor = nav.mag.anchor or {}
+    owner = (getattr(robot.backend, 'session', ''), getattr(robot.backend, 'epoch', -1))
+    if (guard is None or guard.blocked or anchor.get('tag_id') != 3
+            or anchor.get('absolute_route_heading_known') is not True
+            or (anchor.get('tag_departure') or {}).get('tag_id') != 3
+            or not owner[0] or owner != guard.observation_scope or anchor.get('owner_observation_scope') != owner
+            or not getattr(nav.io, 'motion_capture_verified', False)):
+        return None
+    snapshot = CorridorTrial_HeadingSnapshot(robot.last_heading_report or {}, after=True, load=robot.load_kind)
+    completed = robot.last_action_completed_monotonic
+    if not snapshot or type(completed) not in (int, float) or not isfinite(completed):
+        return None
+    magnetic, receipt, scope = snapshot
+    sample = guard.last_sample or {}
+    now = robot.clock()
+    captures = sample.get('decision_capture_times') or ()
+    # The usual magnetic dispatch limit can expire while reading the next Tag.
+    # This settled witness can only veto an extra turn; it never starts one.
+    if (not completed < receipt <= now or now - receipt > nav.cfg['max_age_s']
+            or not captures or not all(type(t) in (int, float) and completed < t <= receipt for t in captures)
+            or sample.get('action_completed_monotonic') != completed or sample.get('received_monotonic') != receipt
+            or scope != tuple(sample.get(k) for k in ('capture_session', 'load_epoch', 'calibration_id'))
+            or set(guard._target_observation_faults(sample, robot.load_kind)) - {'sample_stale'}
+            or abs(magnetic) > deadband):
+        return None
+    return {'body_bearing_min_abs_deg': bearing, 'magnetic_error_deg': magnetic,
+            'magnetic_receipt_age_s': now-receipt}
+
+
 def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False):
     """Use the current lateral-end Tag 3 for straight heading when visible."""
     turn = getattr(robot, 'Route_TurnFromTagHeading', None)
@@ -2693,6 +2733,11 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
     yaw = hint['heading_deg']
     stamp = hint['latest_stamp_ns']
     info = leg['tag3_straight_heading'] = {'before_error_deg': yaw, 'stamp_ns': stamp}
+    peripheral = _tag3_peripheral_heading(robot, nav, leg, hint)
+    if peripheral is not None:
+        info.update(peripheral, magnetic_reference='prior_tag3_reference_retained',
+                    reason_zh='Tag 3 位于视野侧缘，视觉与同站姿磁航向均在直行容差内，沿用本段 Tag 3 航向参考。')
+        return
     step = turn(3, yaw, stamp, reserved_actions=reserved_actions)
     if step is not None:
         info['turn'] = step
@@ -3868,6 +3913,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             leg['straight_heading_source'] = 'current_tag3'
                         elif plan.get('distance_bounds_m') and not RoutePose_Tag4DepthOnly(plan['distance_bounds_m'], tag4_trial):
                             leg['straight_heading_source'] = 'near_tag4'
+                        elif handoff.get('magnetic_reference') == 'prior_tag3_reference_retained':
+                            leg['straight_heading_source'] = 'prior_tag3_reference'
                         else:
                             leg['straight_heading_source'] = 'prior_route_reference'
                         side = leg.get('side_plan') or {}
