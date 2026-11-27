@@ -1,0 +1,39 @@
+{
+  "after_update": false,
+  "command": 0,
+  "received_at": "2026-11-28T01:36:04.125+08:00",
+  "result": {
+    "accepted": true,
+    "exception_type": "RobotControlUncertainError",
+    "exit_code": null,
+    "last_observed_status": {
+      "mission_progress": {
+        "command": "0",
+        "delivery_planned": true,
+        "direction": "outbound",
+        "phase": "cmd0_approach",
+        "trial_target_tag": 5
+      },
+      "owner": {
+        "epoch": 0,
+        "in_flight": true,
+        "mode": "auto",
+        "operation_seq": 5,
+        "session": "8e319a5e007840b189ba2a899ab97745"
+      },
+      "task_active": true
+    },
+    "ok": false,
+    "reason": "树莓派已接收任务，但未收到结束回执。请重新连接查看状态，必要时单独发送停止。",
+    "request": "0",
+    "status": "start_unconfirmed"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [
+      "已收到树莓派接收回执，任务结果待确认。",
+      "失联前最近一次状态 · 去程 · 接近中转区原始物资"
+    ],
+    "reason": "树莓派已接收任务，但未收到结束回执。请重新连接查看状态，必要时单独发送停止。"
+  }
+}
