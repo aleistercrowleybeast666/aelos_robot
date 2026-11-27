@@ -1,0 +1,56 @@
+{
+  "after_update": false,
+  "command": 0,
+  "received_at": "2026-11-28T00:49:51.821+08:00",
+  "result": {
+    "accepted": true,
+    "exception_type": "RobotControlUncertainError",
+    "exit_code": null,
+    "last_observed_status": {
+      "mission_progress": {
+        "command": "0",
+        "completed_actions": [],
+        "delivery_planned": true,
+        "departure_tag_confirmed": false,
+        "direction": "outbound",
+        "entry_completed_actions": [
+          "carry_forward",
+          "carry_forward2"
+        ],
+        "entry_planned_steps": 10,
+        "entry_target_steps": 10,
+        "expected_fresh_frames": 0,
+        "expected_tag": 3,
+        "journey": 1,
+        "last_passed_tag": null,
+        "observation_windows": 0,
+        "outbound_only": false,
+        "phase": "cmd0_corridor_leg",
+        "route_evidence": "estimated_trial",
+        "seen_tags": [],
+        "shared_outbound": false,
+        "trial_target_tag": 5
+      },
+      "owner": {
+        "epoch": 0,
+        "in_flight": true,
+        "mode": "auto",
+        "operation_seq": 20,
+        "session": "d92939d1b3cb48ed92871c126f9d670f"
+      },
+      "task_active": true
+    },
+    "ok": false,
+    "reason": "树莓派已接收任务，但未收到结束回执。请重新连接查看状态，必要时单独发送停止。",
+    "request": "0",
+    "status": "start_unconfirmed"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [
+      "已收到树莓派接收回执，任务结果待确认。",
+      "失联前最近一次状态 · 去程 · 抱物前往 Tag 3"
+    ],
+    "reason": "树莓派已接收任务，但未收到结束回执。请重新连接查看状态，必要时单独发送停止。"
+  }
+}
