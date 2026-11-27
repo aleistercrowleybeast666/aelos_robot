@@ -1,0 +1,16 @@
+{
+  "after_update": false,
+  "command": "deploy",
+  "received_at": "2026-11-28T00:00:52.015+08:00",
+  "result": {
+    "exception_type": "SshLinkError",
+    "ok": false,
+    "reason": "SSH 连接中断或机器人未响应。请确认供电和网络后重新连接。",
+    "status": "deploy_failed"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [],
+    "reason": "SSH 连接中断或机器人未响应。请确认供电和网络后重新连接。"
+  }
+}
