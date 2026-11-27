@@ -1,0 +1,1059 @@
+{
+  "after_update": false,
+  "command": 2,
+  "received_at": "2026-11-27T23:16:13.281+08:00",
+  "result": {
+    "accepted": true,
+    "command": "2",
+    "completed_returns": 0,
+    "deliveries": 0,
+    "diagnostic": {
+      "current_operation": null,
+      "epoch": 1,
+      "expected_wire_abi": 42,
+      "in_flight": false,
+      "last_key": 0,
+      "last_rejection": null,
+      "last_result": {
+        "cancelled": false,
+        "complete": true,
+        "dispatched": true,
+        "drained": true,
+        "ignored_predispatch_complete": 0,
+        "ignored_predispatch_start": 0,
+        "native": "leju_69020126ddc7958ebb1d06f76f45ff45",
+        "op": "double_carry_forward2",
+        "operation_seq": 14,
+        "protocol_completed": true,
+        "reason": "explicit automatic start",
+        "request_nonce": "dd90f1943414469bb2d1624c76c0afc2",
+        "started": true
+      },
+      "mcu_last_contact_age_s": 0.10372094499999207,
+      "mcu_last_contact_source": "request",
+      "mcu_ready": true,
+      "micro_trial": {
+        "angle_evidence": "source_nominal",
+        "boot_id": "ff0e2fd3-353d-49da-be8b-455d2388dd18",
+        "capability": null,
+        "capability_verified": false,
+        "cmd0_right5_capability_verified": false,
+        "cmd0_right5_deployment_readback_ready": false,
+        "cmd0_right5_ready": false,
+        "cmd0_route_capability_verified": false,
+        "cmd0_route_deployment_readback_ready": true,
+        "cmd0_route_ready": false,
+        "contract": "r3.single_micro_turn.v1",
+        "correction_profile_probe_supported": true,
+        "current_boot_file_readback_claimed": false,
+        "deployment_evidence_scope": "persistent_mcu_files_until_next_deployment",
+        "deployment_readback_ready": true,
+        "empty_forward4_ready": false,
+        "empty_recovery_deployment_readback_ready": false,
+        "empty_recovery_ready": false,
+        "empty_strafe_group_ready": false,
+        "guarded_trial_confirmed": false,
+        "initial_reload_boot_id": "9e2267bf-51af-4e2a-9879-867d224fe3f5",
+        "measured_degrees": null,
+        "medium_turn_capability_verified": false,
+        "medium_turn_deployment_readback_ready": true,
+        "medium_turn_ready": false,
+        "native_immediate_stop": false,
+        "nominal_degrees": 5,
+        "pair_deployment_readback_ready": false,
+        "pair_live_capability_verified": false,
+        "physical_health_verified": false,
+        "pickup_backward4_deployment_readback_ready": false,
+        "pickup_backward4_ready": false,
+        "pickup_backward6_deployment_readback_ready": false,
+        "pickup_backward6_ready": false,
+        "pickup_backward8_deployment_readback_ready": false,
+        "pickup_backward8_ready": false,
+        "pickup_level_backward8_ready": false,
+        "placement_profile_probe_supported": true,
+        "ready": false,
+        "small_strafe_capability_verified": false,
+        "small_strafe_deployment_readback_ready": true,
+        "small_strafe_profile": null,
+        "small_strafe_ready": false
+      },
+      "mission_v5_pair_ops": [],
+      "mission_v5_pair_ready": false,
+      "mission_v5_ready": false,
+      "mode": "manual",
+      "native_immediate_cancel": false,
+      "operation_seq": 14,
+      "owner_version": "r3-visual-pickup-20261109-v5",
+      "published_at_s": 1794234060.0350275,
+      "reason": "local trigger/client cancelled",
+      "recovery_gate": {
+        "body_commands": 0,
+        "epoch": 1,
+        "mcu_guard_online_status_available": false,
+        "operator": null,
+        "physical_load_sensor_confirmation": false,
+        "ready": false,
+        "reason": "cancel/takeover invalidated recovery acknowledgment",
+        "remaining_s": 0.0,
+        "session": "4f20a4e687004bb7ac8ce753922b3dde",
+        "temperature_sensor_available": false
+      },
+      "restart_requires_empty_reset": true,
+      "robot_id": 3,
+      "schema": "r3.simple.v1",
+      "session": "4f20a4e687004bb7ac8ce753922b3dde"
+    },
+    "elapsed_s": 39.671930773000014,
+    "event": "done",
+    "events": [
+      {
+        "body_commands": 0,
+        "parallel_read_only": false,
+        "sensor_preflight": "fresh magnetic and chest streams"
+      },
+      {
+        "segment_heading_reference": {
+          "claim": "straight-segment drift only; planned turn error and absolute route heading unknown",
+          "correction_actions": 0,
+          "reference": {
+            "absolute_route_heading_known": false,
+            "action_completed_monotonic": null,
+            "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+            "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+            "capture_verified": true,
+            "decision_after_monotonic": 208.46113856,
+            "decision_capture_times": [
+              208.52390815200002,
+              208.61760772600002,
+              208.71567689300002
+            ],
+            "decision_receipt_times": [
+              208.813217874,
+              208.913756522,
+              209.0126703
+            ],
+            "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+            "load": "empty",
+            "load_epoch": 2,
+            "norm": 1923.7720347009433,
+            "norm_basis": "calibrated_horizontal",
+            "offset_deg": 74.0,
+            "owner_observation_scope": [
+              "4f20a4e687004bb7ac8ce753922b3dde",
+              0
+            ],
+            "planned_turn_error_measured": false,
+            "raw_heading_deg": 286.0,
+            "raw_norm": 2165.6029183578416,
+            "received_monotonic": 209.027346708,
+            "route_heading_deg": 0.0,
+            "source": "relative_stationary_segment_start",
+            "stable_samples": 3,
+            "tag_id": null,
+            "usable_for_heading": true
+          },
+          "status": "relative_reference_established"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.7416157770000211,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "empty",
+          "journey": 1,
+          "outbound_only": false,
+          "phase": "pickup",
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true
+        }
+      },
+      {
+        "block_observation": {
+          "camera_healthy": true,
+          "candidates": [],
+          "count": null,
+          "height": 480,
+          "load": "empty",
+          "reason": "concave merged block layout without a clear bottom pair",
+          "received_monotonic": 212.001857391,
+          "scope": [
+            "4f20a4e687004bb7ac8ce753922b3dde",
+            0
+          ],
+          "staged_count_unresolved": true,
+          "stamp_ns": 1794234028223567320,
+          "status": "unknown",
+          "target": null,
+          "width": 640
+        }
+      },
+      {
+        "segment_heading_reference": {
+          "reference_source": "relative_stationary_segment_start",
+          "status": "reference_retained"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.00025122200000282646,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "grab_double",
+          "completed_monotonic": 216.123563833,
+          "completed_ros_ns": 1794234032366955757,
+          "elapsed_s": 3.7433161649999818,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 212.380247668
+        }
+      },
+      {
+        "expected_load": "double",
+        "physical_success": "unobserved",
+        "v5_action": "grab_double"
+      },
+      {
+        "stage_timing": {
+          "action": "grab_single",
+          "elapsed_s": 0.7810391289999927,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "grab_single",
+          "correction_actions": 0,
+          "field_norm_fraction_change": 0.005611876923645892,
+          "planned_turn_error_measured": false,
+          "reason": "new same-load reference established from post-pickup sample; no duplicate pre-straight sample",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1912.9760628130498,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 68.0,
+              "raw_heading_deg": 292.0,
+              "raw_norm": 2177.8487091623238,
+              "received_monotonic": 216.903414795,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "pickup": {
+          "adjustments": 0,
+          "expected_load": "double",
+          "grip_count": 2,
+          "observed_count": null,
+          "physical_grip_confirmed": false,
+          "planned_count": 2,
+          "reason_zh": "人工摆放区未确认方块数量，已执行默认双抱。",
+          "stacked_triple": false,
+          "staged_default_pair": true,
+          "status": "double_pickup_protocol_completed"
+        }
+      },
+      {
+        "segment_heading_reference": {
+          "claim": "straight-segment drift only; planned turn error and absolute route heading unknown",
+          "correction_actions": 0,
+          "reference": {
+            "absolute_route_heading_known": false,
+            "action_completed_monotonic": 216.123563833,
+            "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+            "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+            "capture_verified": true,
+            "decision_after_monotonic": 216.273563833,
+            "decision_capture_times": [
+              216.376267592,
+              216.473859166,
+              216.576172388
+            ],
+            "decision_receipt_times": [
+              216.676720221,
+              216.781413499,
+              216.877462592
+            ],
+            "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+            "load": "double",
+            "load_epoch": 3,
+            "norm": 1912.9760628130498,
+            "norm_basis": "calibrated_horizontal",
+            "offset_deg": 68.0,
+            "owner_observation_scope": [
+              "4f20a4e687004bb7ac8ce753922b3dde",
+              0
+            ],
+            "pickup_approach_heading": {
+              "empty_reading_deg": 286.0,
+              "loaded_reading_deg": 292.0,
+              "loading_residual_deg": 6.0,
+              "route_heading_deg": -6.0
+            },
+            "planned_turn_error_measured": false,
+            "raw_heading_deg": 292.0,
+            "raw_norm": 2177.8487091623238,
+            "received_monotonic": 216.965141073,
+            "route_heading_deg": -6.0,
+            "source": "relative_stationary_segment_start",
+            "stable_samples": 3,
+            "tag_id": null,
+            "usable_for_heading": true
+          },
+          "status": "relative_reference_established"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.08136735200000089,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "double",
+          "grip_count": 2,
+          "journey": 1,
+          "observed_count": null,
+          "outbound_only": false,
+          "phase": "transfer_to_entry",
+          "planned_count": 2,
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true,
+          "stacked_triple": false
+        }
+      },
+      {
+        "pickup_exit": {
+          "completed_actions": [
+            "cmd1_carry_backward8",
+            "cmd0_strafe_left2",
+            "cmd0_strafe_left2",
+            "cmd0_strafe_left4",
+            "cmd0_strafe_left3",
+            "single_small_strafe_left"
+          ],
+          "lateral_heading_checks": [
+            {
+              "action": "cmd0_strafe_left2",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": 2.0,
+              "error_after_strafe_deg": 7.0,
+              "error_before_deg": 5.0,
+              "heading_actions": [],
+              "heading_check_pending": false,
+              "heading_feedback": "measured_only",
+              "large_drift": false,
+              "residual_deg": 7.0
+            },
+            {
+              "action": "cmd0_strafe_left2",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": 1.0,
+              "error_after_strafe_deg": 8.0,
+              "error_before_deg": 7.0,
+              "heading_actions": [],
+              "heading_check_pending": false,
+              "heading_feedback": "measured_only",
+              "large_drift": false,
+              "residual_deg": 8.0
+            },
+            {
+              "action": "cmd0_strafe_left4",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": -4.0,
+              "error_after_strafe_deg": 4.0,
+              "error_before_deg": 8.0,
+              "heading_actions": [],
+              "heading_check_pending": false,
+              "heading_feedback": "measured_only",
+              "large_drift": false,
+              "residual_deg": 4.0
+            },
+            {
+              "action": "cmd0_strafe_left3",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": -2.0,
+              "error_after_strafe_deg": 2.0,
+              "error_before_deg": 4.0,
+              "heading_actions": [],
+              "heading_check_pending": false,
+              "heading_feedback": "measured_only",
+              "large_drift": false,
+              "residual_deg": 2.0
+            },
+            {
+              "action": "single_small_strafe_left",
+              "compensation_status": "within_deadband",
+              "correction_actions": 0,
+              "drift_deg": 0.0,
+              "error_after_strafe_deg": 2.0,
+              "error_before_deg": 2.0,
+              "heading_actions": [],
+              "heading_check_pending": false,
+              "heading_feedback": "measured_only",
+              "large_drift": false,
+              "residual_deg": 2.0
+            }
+          ],
+          "retreat": {
+            "completed_actions": [
+              "cmd1_carry_backward8"
+            ],
+            "continuous": true,
+            "correction_actions": 0,
+            "groups": [
+              8
+            ],
+            "heading_actions": [],
+            "heading_before_correction_deg": 5.0,
+            "heading_source": "pickup_approach",
+            "heading_status": "monitor_only",
+            "next_group_max": 2,
+            "next_group_reason_zh": "后退后仍有实测余差，本次无预计改善的转向，两跨内再测。",
+            "next_group_split": {
+              "action": "cmd0_strafe_left4",
+              "groups": [
+                2,
+                2
+              ]
+            },
+            "planned_steps": 8,
+            "residual_deg": 5.0
+          }
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd1_carry_backward8",
+          "completed_monotonic": 220.627989627,
+          "completed_ros_ns": 1794234036871416568,
+          "elapsed_s": 3.596478998000009,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 217.031510629
+        }
+      },
+      {
+        "action": "cmd1_carry_backward8",
+        "physical_success": "unobserved"
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "pickup_retreat_complete",
+          "after_ns": 1794234037021416568,
+          "boundary_valid": true,
+          "camera_healthy": true,
+          "camera_info": {
+            "can_reobserve": false,
+            "detector_corners_available": false,
+            "exposure_time_verified": false,
+            "fingerprint": "f83ce7488208d024553500ffc0c5abf0a231eca37b70f874ccaf9228e43b9252",
+            "frame_id": "chest_usb_cam",
+            "height": 480,
+            "publisher": "/usb_cam_chest",
+            "ready": true,
+            "reason": "actual CameraInfo matches verified source, frame and calibration",
+            "reprojection_residual_available": false,
+            "use_raw_chest_distortion": false,
+            "width": 640
+          },
+          "camera_info_ready": true,
+          "camera_restart_ns": 0,
+          "contract_match": true,
+          "correction_actions": 0,
+          "fault_diagnostic": false,
+          "now_ns": 1794234037574329614,
+          "recent_decoded_ids": [],
+          "recent_ids_are_diagnostic_only": true,
+          "row_counts": {
+            "buffered_rows": 0,
+            "current_rows": 0,
+            "pre_boundary_rows": 0,
+            "rejected": 0,
+            "stale_rows": 0
+          },
+          "scan": {
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 1,
+            "ids": [],
+            "observations": [],
+            "observed_ids": [],
+            "pose_usable": false,
+            "position_usable": false,
+            "samples": 0,
+            "status": "no_tag"
+          },
+          "stance_completed_ns": 1794234036871416568,
+          "target_id": 1,
+          "waited_s": 0.0
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "pickup_retreat_complete",
+          "elapsed_s": 0.7197598889999881,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "pickup_retreat_complete",
+          "correction_actions": 0,
+          "error_deg": 5.0,
+          "motion_prediction": {
+            "action": null,
+            "rejected": {
+              "single_micro_left": "insufficient_worst_case_improvement",
+              "single_micro_right": "wrong_direction"
+            },
+            "status": "no_safe_candidate"
+          },
+          "reason": "prediction selection rejected: no_safe_candidate",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1821.4718299241633,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 68.99999999999994,
+              "raw_heading_deg": 291.00000000000006,
+              "raw_norm": 2079.2436124706505,
+              "received_monotonic": 221.323155367,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left2",
+          "completed_monotonic": 223.25106194,
+          "completed_ros_ns": 1794234039494456291,
+          "elapsed_s": 1.8909420360000126,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 221.360119904
+        }
+      },
+      {
+        "action": "cmd0_strafe_left2",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.6942407770000045,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 7.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 1951.745188201309,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 67.00000000000006,
+              "raw_heading_deg": 292.99999999999994,
+              "raw_norm": 2217.0487139438324,
+              "received_monotonic": 223.941024995,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left2",
+          "completed_monotonic": 225.748527327,
+          "completed_ros_ns": 1794234041991924762,
+          "elapsed_s": 1.787680647000002,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 223.96084668
+        }
+      },
+      {
+        "action": "cmd0_strafe_left2",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7433251660000053,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 8.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2017.0945270586633,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 66.0,
+              "raw_heading_deg": 294.0,
+              "raw_norm": 2283.120233364857,
+              "received_monotonic": 226.479711808,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left4",
+          "completed_monotonic": 229.330145455,
+          "completed_ros_ns": 1794234045573551177,
+          "elapsed_s": 2.8139718689999995,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 226.516173586
+        }
+      },
+      {
+        "action": "cmd0_strafe_left4",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7640775369999915,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 4.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2069.0038630187664,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 70.0,
+              "raw_heading_deg": 290.0,
+              "raw_norm": 2323.4117155596855,
+              "received_monotonic": 230.093208362,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_cmd0_strafe_left3",
+          "completed_monotonic": 232.345275527,
+          "completed_ros_ns": 1794234048588716983,
+          "elapsed_s": 2.23670501700002,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 230.10857051
+        }
+      },
+      {
+        "action": "cmd0_strafe_left3",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.6772902779999868,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 2.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2091.3006534411124,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 72.0,
+              "raw_heading_deg": 288.0,
+              "raw_norm": 2347.601754983157,
+              "received_monotonic": 233.01959986,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_single_small_strafe_left",
+          "completed_monotonic": 234.2256066,
+          "completed_ros_ns": 1794234050469013929,
+          "elapsed_s": 1.169302980999987,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 233.056303619
+        }
+      },
+      {
+        "action": "single_small_strafe_left",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "corridor_side_boundary",
+          "elapsed_s": 0.7163341480000156,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "corridor_side_boundary",
+          "correction_actions": 0,
+          "error_deg": 2.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2128.658687841617,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 72.0,
+              "raw_heading_deg": 288.0,
+              "raw_norm": 2395.1294328282133,
+              "received_monotonic": 234.935221914,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "mission_progress": {
+          "command": "2",
+          "delivery_planned": true,
+          "direction": "outbound",
+          "expected_load": "double",
+          "expected_tag": 1,
+          "journey": 1,
+          "outbound_only": false,
+          "phase": "outbound_entry_scan",
+          "route_evidence": "estimated_trial",
+          "shared_outbound": true
+        }
+      },
+      {
+        "pickup_exit_entry": {
+          "confirmed_for_forward": false,
+          "status": "scanning",
+          "tag_id": 1
+        }
+      },
+      {
+        "terminal_stationary_reobserve": {
+          "accepted_expected_frames": 0,
+          "body_commands": 0,
+          "camera_healthy": true,
+          "camera_window_status": {
+            "ar_after_barrier": true,
+            "ar_source_matches": true,
+            "ar_stamp_age_s": 0.154648907,
+            "image_after_barrier": true,
+            "image_receipt_age_s": 0.1317012039999952,
+            "image_stamp_age_s": 0.154648907,
+            "parameters_match": true,
+            "restart_barrier_ns": 0
+          },
+          "contract_match": true,
+          "decoded_expected_frames": 0,
+          "max_wait_s": 2.0,
+          "observed_ids": [],
+          "prior_ids": [],
+          "receiver_rejections_total": 0,
+          "scan_status": "no_tag",
+          "target_id": 1
+        }
+      },
+      {
+        "terminal_tag_forward_reacquisition": {
+          "completed_actions": [
+            "carry_forward2"
+          ],
+          "decisions": [
+            {
+              "partial_geometry": null,
+              "status": "advance_unseen"
+            },
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            },
+            {
+              "partial_geometry": null,
+              "status": "wait_ambiguous"
+            }
+          ],
+          "last_forward_completed_ros_ns": 1794234054848149061,
+          "motion_groups": 1,
+          "observations": [
+            {
+              "accepted_expected_frames": 0,
+              "camera_healthy": true,
+              "camera_window_status": {
+                "ar_after_barrier": true,
+                "ar_source_matches": true,
+                "ar_stamp_age_s": 0.143443136,
+                "image_after_barrier": true,
+                "image_receipt_age_s": 0.10800303700000313,
+                "image_stamp_age_s": 0.143443136,
+                "parameters_match": true,
+                "restart_barrier_ns": 0
+              },
+              "contract_match": true,
+              "decoded_expected_frames": 0,
+              "receiver_rejections_total": 0,
+              "scan_status": "no_tag"
+            }
+          ],
+          "target_id": 1
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "double_carry_forward2",
+          "completed_monotonic": 238.604719394,
+          "completed_ros_ns": 1794234054848149061,
+          "elapsed_s": 1.5505669990000115,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 237.054152395
+        }
+      },
+      {
+        "action": "carry_forward2",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "carry_forward2",
+          "elapsed_s": 0.7662006289999965,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "carry_forward2",
+          "correction_actions": 0,
+          "error_deg": -5.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "a9a84e50366240aaa01520c5a75d8817",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "double",
+              "load_epoch": 3,
+              "norm": 2097.74100092155,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": 79.0,
+              "raw_heading_deg": 281.0,
+              "raw_norm": 2335.5018732597923,
+              "received_monotonic": 239.369741801,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "terminal_tag_reacquisition": {
+          "last_observation": {
+            "accepted_expected_frames": 0,
+            "camera_healthy": true,
+            "camera_window_status": {
+              "ar_after_barrier": true,
+              "ar_source_matches": true,
+              "ar_stamp_age_s": 0.082123571,
+              "image_after_barrier": true,
+              "image_receipt_age_s": 0.05035499999999615,
+              "image_stamp_age_s": 0.082123571,
+              "parameters_match": true,
+              "restart_barrier_ns": 0
+            },
+            "contract_match": true,
+            "decoded_expected_frames": 0,
+            "receiver_rejections_total": 0
+          },
+          "last_scan": {
+            "after_ns": 1794234057733495473,
+            "confidence_semantics": "ALVAR per-observation confidence not established; fresh-frame and geometry checks only",
+            "expected_id": 1,
+            "ids": [],
+            "now_ns": 1794234059742459058,
+            "observations": [],
+            "observed_ids": [],
+            "pose_usable": false,
+            "position_usable": false,
+            "samples": 0,
+            "status": "no_tag"
+          },
+          "target_id": 1,
+          "windows": 1
+        }
+      },
+      {
+        "visual_checkpoint_failure": {
+          "reason": "local task cancelled; no automatic resume",
+          "report": null,
+          "target_id": 1
+        }
+      },
+      {
+        "boundary_visual_observation": {
+          "action": "visual_checkpoint_failure",
+          "correction_actions": 0,
+          "fault_diagnostic": true,
+          "read_error": "local task cancelled; no automatic resume"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 8.799722771999996,
+          "stage": "visual_checkpoint",
+          "target_id": 1
+        }
+      }
+    ],
+    "exit_code": 1,
+    "expected_blocks_delivered": 0,
+    "native_immediate_stop": false,
+    "ok": false,
+    "reason": "local task cancelled; no automatic resume",
+    "return_started": false,
+    "status": "stopped_no_further_auto_macros"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [
+      "Tag 1 找码 · 已补进 2 步，每两步重扫",
+      "Tag 1 最近一窗 · 检测器报出 0 帧 · 程序接受 0 帧",
+      "连续后退 8 步 · 纠偏前 +5.00° · 未发转向 · 余差 +5.00°",
+      "中转区左跨第 1 组 · 跨后偏航 +7.00° · 未发转向",
+      "中转区左跨第 2 组 · 跨后偏航 +8.00° · 未发转向",
+      "中转区左跨第 3 组 · 跨后偏航 +4.00° · 未发转向",
+      "中转区左跨第 4 组 · 跨后偏航 +2.00° · 未发转向",
+      "中转区左跨第 5 组 · 跨后偏航 +2.00° · 未发转向",
+      "左跨后正在确认 Tag 1",
+      "人工摆放区未确认方块数量 · 已执行默认双抱，实物件数待确认",
+      "最近视觉诊断 · 自动任务已取消，后续动作未恢复"
+    ],
+    "reason": "自动任务已取消，后续动作未恢复"
+  }
+}
