@@ -115,6 +115,7 @@ class HeadingGuard:
         self.latched = False
         self.blocked = False
         self.allow_missing_magnetic = False
+        self.recheck_empty_turn_field = False
         self._nominal_retry_used = False
         self._unreliable_coarse_actions = set()
         self._confirmed_coarse_response = None
@@ -1202,7 +1203,10 @@ class HeadingGuard:
         anchor = self.reference.anchor
         recovery=self.boundary_recovery_enabled(name,load) and allow_correction
         route_feedback=self._uses_route_feedback(name,load)
-        if route_feedback:
+        # The empty return turn has its own stopping logic in MissionRobot._planned_turn.
+        # Validate its field sample before learning from the turn or comparing with its target.
+        recheck_turn = self.recheck_empty_turn_field and load == 'empty' and name == 'planned_turn_intermediate'
+        if route_feedback or recheck_turn:
             result,sample=self._recheck_magnetic_field(load,result,sample,report)
             report['sample']=result
         self._defer_expired_target(self._target_observation_faults(sample,load),report)

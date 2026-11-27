@@ -40,7 +40,7 @@ _TAG4_LEFT_PROBE_DEPTH_M = .15
 _TAG4_LEFT_CLEARANCE_FLOOR_M = .125
 # Outbound diagram, competition rules p. 4. Tag 4 is about 0.4 m
 # downstream and 0.2–0.25 m to the right of Tag 3. Discount the drawn
-# spacing for marker placement; only use it at the end of the four strafes.
+# spacing for marker placement; use it only from a settled lateral endpoint.
 _TAG3_TO_4_MIN_FORWARD_M = .33
 _TAG3_TO_4_LANE_CENTER_M = .235
 _TAG4_PARALLEL_DEPTH_DRIFT_M = .005
@@ -929,6 +929,20 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings, *, prof
         {'action':action, 'measured_deg':error, 'decision':decision})
 
 
+def _tag3_completed_right_traverse(leg):
+    """Require the planned large right strides to have completed before using the lane geometry."""
+    completed = leg.get('completed_actions') or []
+    plan = leg.get('side_plan') or {}
+    if not plan:
+        return completed == ['cmd0_strafe_right4']
+    expected = plan.get('large_count', plan.get('count'))
+    if plan.get('small_operation') or type(expected) is not int or not 4 <= expected <= _TAG3_TRIAL_MAX_RIGHT_STRIDES:
+        return False
+    counts = {action: count for (op, count), action in SIDE_ACTIONS.items() if op == 'strafe_right_once'}
+    counts['strafe_right_once'] = 1
+    return all(op in counts for op in completed) and sum(counts[op] for op in completed) == expected
+
+
 def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautious=False, native_five=False):
     """Choose one closed gait. Past depth can shorten a gait but cannot authorise a long one."""
     completed = leg.get('completed_forward_steps', 0)
@@ -1015,7 +1029,7 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
         if (completed == 0 and not cautious and requested == 8 and hint and not anchor
                 and not plan.get('partial_pose') and not plan.get('distance_bounds_m')
                 and not plan.get('camera_contract_fault') and leg.get('departure_tag_confirmed') is True
-                and leg.get('completed_actions') == ['cmd0_strafe_right4']
+                and _tag3_completed_right_traverse(leg)
                 and Cmd0Motion_ContinuousReady(robot.backend)
                 and type(stance) is int and hint['latest_stamp_ns'] > stance
                 and live and live(hint['latest_stamp_ns'])
@@ -3187,7 +3201,7 @@ def CorridorTrial_CheckTag3SideEndpoint(robot, nav, profile, leg, magnetic_repor
 
 
 def _tag3_handoff_window(robot, nav, leg):
-    """Reuse a healthy, fresh Tag-4 miss if the final strafe actually decoded only Tag 3."""
+    """Reuse the settled chest-camera window when it saw only Tag 3 on this stance."""
     if ((leg.get('departure_heading') or {}).get('magnetic_reference') != 'applied'
             or leg.get('tag3_clearance_probe') or getattr(robot, 'magnetic_route_only', False)):
         return None
@@ -3206,7 +3220,9 @@ def _tag3_handoff_window(robot, nav, leg):
             or not 0 < stance <= floor < captured <= now or restart > floor
             or now - captured > min(.25, nav.cfg['max_age_s'])*1e9):
         return None
-    return {'expected_id':4, 'detected':False, 'scan':scan, 'camera_info':report.get('camera_info') or {}}
+    return {'expected_id':4, 'detected':False, 'reused_boundary_frames':True,
+            'scan':dict(scan, after_ns=floor, now_ns=captured, camera_healthy=True, contract_match=True),
+            'camera_info':report.get('camera_info') or {}}
 
 
 def _tag2_entry_lateral_plan(robot, nav, leg, nominal, stride):
@@ -4613,10 +4629,24 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                         and abs(last_yaw[0]) <= nav.cfg['post_action_heading'].get('deadband_deg', 8.))
                         if settled_tag3:
                             side_window = _tag3_handoff_window(robot, nav, leg)
+                    elif (estimate and group_start in (2,4) and previous_op == _FORWARD_GROUP
+                          and not any(p.get('camera_contract_fault') or p.get('partial_pose') or p.get('distance_bounds_m')
+                                      for p in leg.get('tag4_approach', ()))
+                          and 'tag3_mapped_start_min_depth_m' not in leg
+                          and _tag4_confirmed_straight_heading(robot, nav, leg)):
+                        # The post-gait heading check already gave the camera time to collect fresh frames.
+                        # The same-stance Tag-3-only window is sufficient for the existing four-step decision.
+                        side_window = _tag3_handoff_window(robot, nav, leg)
+                        expected_camera = nav.cfg.get('visual_micro',{}).get('camera_info',{}).get('expected_fingerprint')
+                        if side_window and (not expected_camera or
+                                side_window['camera_info'].get('fingerprint') != expected_camera):
+                            side_window = None
                     if side_window is None:
                         plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group, boundary_first=True)
                     else:
                         plan = _tag4_longitudinal_observation(robot, nav, side_window, tag4_trial, approach_steps=scan_group)
+                        if group_start:
+                            plan['same_stance_tag3_only_window_reused'] = True
                     leg.setdefault('tag4_approach', []).append(plan)
                     if (group_start and 'tag3_mapped_start_min_depth_m' in leg
                             and not plan['distance_verified'] and not plan.get('camera_contract_fault')

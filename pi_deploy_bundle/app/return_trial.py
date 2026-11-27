@@ -9,7 +9,7 @@ from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_Ali
                                   Checkpoint_EmptyDepartureConflict, Checkpoint_EmptyBlankTime,
                                   Checkpoint_MeasureEmptyMarker as _empty_marker_geometry,
                                   Checkpoint_EmptyMarkerCurrent as _empty_marker_current,
-                                  Checkpoint_EmptyTurnAction)
+                                  Checkpoint_EmptyTurnAction, EMPTY_VISUAL_TURN_TRIGGER_DEG)
 from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
 from block_camera import BlockEvidenceExpired, BlockFrameUnavailable
 from pickup_controller import PickupObservationUnavailable
@@ -205,21 +205,23 @@ def _move(robot, nav, actions, completed, *, scan_follows=False, station_actions
             station_actions.append(action)
 
 
-def _turn(robot, step):
+def _turn(robot, step, checkpoint=None):
     robot.check()
     if robot.load_kind != 'empty':
         raise RuntimeError('return turn requires empty expected load')
+    if checkpoint is not None and abs(step['target_delta_deg']) == 180:
+        step = dict(step, next_turn_checkpoint=checkpoint)
     robot.chain_step(step, configured=True)
 
 
-def ReturnTrial_TurnAtBase(robot, step):
+def ReturnTrial_TurnAtBase(robot, step, *, scan_follows=False):
     """Drop the loaded heading reference before the empty departure turn."""
     nav = robot.ensure_navigation_io()
     nav.mag.anchor = None
     if not getattr(robot.backend, 'is_simulation', False):
         robot.check_magnetic_before_motion(configured=True)
     robot.prepare_heading_segment(fresh=True)
-    _turn(robot, step)
+    _turn(robot, step, (5, 'return') if scan_follows else None)
 
 
 def _return_camera_snapshot(robot, snapshot, tag, after):
@@ -259,11 +261,36 @@ def _return_boundary_geometry(robot, nav, tag, *, health=None, departure=None):
                                       camera_healthy=True, camera_restart_ns=restart)}
             verified = _empty_marker_geometry(robot, nav, candidate)
             if verified is not None:
-                departure.update(view=candidate, conflict=Checkpoint_EmptyDepartureConflict(robot, nav, tag, verified),
+                departure.update(view=candidate, geometry=verified, conflict=Checkpoint_EmptyDepartureConflict(robot, nav, tag, verified),
                                  stamp_ns=verified['latest_stamp_ns'])
     rows = [row for row in scan.get('observations', ()) if isinstance(row, dict) and type(row.get('stamp_ns')) is int
             and floor < row['stamp_ns'] <= now and now - row['stamp_ns'] <= nav.cfg['max_age_s'] * 1e9]
     return RoutePose_PartialCheckpointGeometry(rows, nav.cfg, tag)
+
+
+def ReturnTrial_CheckTurnMarker(robot, checkpoint):
+    """Yield a degraded half-turn to the scheduled scan only on a settled, facing marker."""
+    tag, direction = checkpoint
+    nav = robot.ensure_navigation_io()
+    goals = nav.cfg['legs'].get(direction, ())
+    target = next((point.get('tag_heading_deg') for point in goals if point['id'] == tag), None)
+    if target is None or not callable(getattr(nav.io, 'boundary_visual_snapshot', None)):
+        return None
+    # After fallback there is no magnetic sampling delay. Allow three fresh
+    # chest-camera frames to accumulate beyond the normal settling interval.
+    robot.settle_since_last_completed(nav.cfg['settle_s'] + min(.6, nav.cfg['observe_s']))
+    departure = {}
+    _return_boundary_geometry(robot, nav, tag, departure=departure)
+    geometry = departure.get('geometry')
+    if not geometry or geometry['body_forward_bounds_m'][0] <= 0:
+        return None
+    error = wrap(geometry['heading_deg'] - target)
+    micro_ready = getattr(robot.backend, 'empty_recovery_ready', lambda: False)() is True
+    limit = EMPTY_VISUAL_TURN_TRIGGER_DEG if micro_ready else nav.cfg['post_action_heading']['deadband_deg']
+    if abs(error) + geometry['max_heading_deviation_deg'] > limit:
+        return None
+    return {'tag_id': tag, 'direction': direction, 'expected_heading_deg': target,
+            'error_deg': error, 'latest_stamp_ns': geometry['latest_stamp_ns'], 'samples': geometry['samples']}
 
 
 def _return_travel(robot, nav, leg, actions):
@@ -896,7 +923,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
                      reason_zh='按接驳段剩余步数前进后空载掉头。')
     _move(robot, nav, approach[len(borrowed):], result['transfer_approach_actions'],
           station_actions=result['station_actions'])
-    _turn(robot, chain['transfer_turn'])
+    _turn(robot, chain['transfer_turn'], (1, 'outbound'))
     turn_completed_ns = robot.last_action_completed_ros_ns
     result['station_turn_completed'] = True
     leg = {'expected_id': 1, 'direction': 'outbound', 'detected': False, 'observation_windows': 0, 'ready': False}
@@ -1033,7 +1060,7 @@ def ReturnTrial_Run(robot):
 
     set_status(ReturnTrialResult.RETURNING, 'moving through the estimated empty return')
     _report_progress(robot, 'cmd2_return_leg', expected_tag=5, last_passed_tag=None, return_step='base_turn')
-    ReturnTrial_TurnAtBase(robot, chain['base_turn'])
+    ReturnTrial_TurnAtBase(robot, chain['base_turn'], scan_follows=not chain['tag5'])
     result['base_turn_completed'] = True
     estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
     route_actions = [_actions(chain[f'tag{tag}']) for tag in _RETURN_TAGS]

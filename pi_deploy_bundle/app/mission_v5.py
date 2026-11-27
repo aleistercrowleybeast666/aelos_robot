@@ -447,8 +447,13 @@ class MissionRobot(Robot):
         alias={'empty_left_turn':'left_turn','empty_right_turn':'right_turn','place_single':'stand',
                'place_double':'stand','grab_double':'grab_single',
                'carry_forward7':'carry_forward','carry_forward9':'carry_forward'}.get(op,op)
-        return_motion=(configured and self.load_kind=='empty' and getattr(self,'route_command',None)=='2'
-                       and op in _TRANSLATION_OPS and self._allows_missing_magnetic())
+        configured_empty_return = (configured and self.load_kind == 'empty' and getattr(self,'route_command',None) == '2'
+                                   and self._allows_missing_magnetic())
+        return_motion = configured_empty_return and op in _TRANSLATION_OPS
+        return_turn = (configured_empty_return and op in ('empty_right_turn','empty_left_turn')
+                       and getattr(self,'heading_turn_phase',None) == 'planned_turn_intermediate')
+        if guard is not None and return_turn:
+            guard.recheck_empty_turn_field = True
         if guard is not None and return_motion:
             guard.empty_return_feedback_action=alias
         try:
@@ -463,6 +468,8 @@ class MissionRobot(Robot):
             self.record_fall_diagnostic(native_op)
             raise
         finally:
+            if guard is not None and return_turn:
+                guard.recheck_empty_turn_field = False
             if guard is not None and return_motion:
                 guard.empty_return_feedback_action=None
         if (guard is not None and op in _TRANSLATION_OPS
@@ -506,11 +513,21 @@ class MissionRobot(Robot):
             guard.c=dict(original,stop_on_possible_overshoot=False)
         self.heading_turn_phase='planned_turn_intermediate'
         try:
-            for _ in range(step.get('repeat',1)):
+            repeats=step.get('repeat',1)
+            for completed in range(1,repeats+1):
                 before=guard.last_sample if guard is not None else None
                 self.finite(op,**motion_context)
                 self.wait(step.get('pause_s',0))
                 if configured and self.magnetic_route_only:
+                    checkpoint=step.get('next_turn_checkpoint')
+                    if (completed < repeats and checkpoint is not None and self.load_kind=='empty'
+                            and getattr(self,'route_command',None)=='2'):
+                        from return_trial import ReturnTrial_CheckTurnMarker
+                        sighting=ReturnTrial_CheckTurnMarker(self,checkpoint)
+                        if sighting:
+                            self.events.append({'return_turn_visual_handoff':dict(sighting,
+                                completed_turns=completed,configured_turns=repeats)})
+                            return
                     continue  # Complete only the remaining configured turns.
                 after=guard.last_sample
                 if not before or not after:
