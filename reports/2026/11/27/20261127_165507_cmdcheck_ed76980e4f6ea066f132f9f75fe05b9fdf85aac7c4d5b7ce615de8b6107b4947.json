@@ -1,0 +1,19 @@
+{
+  "after_update": false,
+  "command": "check",
+  "received_at": "2026-11-27T16:55:07.575+08:00",
+  "result": {
+    "activation": "ros_owner_reload",
+    "deployment": {
+      "bundle_sha256": "69897dcd16f79620faec93d957534052ed9edbb568b40b6c90945a424b710f73",
+      "id": "8509db80a3124bfbb06f933be5e65d18",
+      "path": "/home/lemon/aelos_auto_r3_python"
+    },
+    "mcu_ready": true,
+    "owner_mode": "manual",
+    "path": "/home/lemon/aelos_auto_r3_python",
+    "robot_id": 3,
+    "task_active": false
+  },
+  "schema": "r3.console.task-report.v1"
+}
