@@ -12,7 +12,7 @@ from nav_observation import summarize, wrap
 from checkpoint_alignment import RouteTagHeadingRebaseResult
 from route_pose import (RoutePose_Load, RoutePose_Measure, RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanForwardCount, RoutePose_PlanTag1ForwardTrial, RoutePose_PlanTag2ForwardTrial,
-                        TAG2_APPROACH_COUNTS)
+                        TAG2_APPROACH_COUNTS, TAG2_FAR_APPROACH_LIMIT_M)
 
 
 # Older tools import the checkpoint API from the entrance module.
@@ -46,6 +46,92 @@ def EntranceTrial_IsEntryAccepted(alignment):
             and heading.get('source') == 'trusted_tag_heading'
             and heading.get('target_heading_deg') == 0
             and observation.get('pose_usable') is True)
+
+
+def EntranceTrial_RecoverGroundHeading(robot, nav, alignment):
+    """Recover yaw at the loaded Tag 1 stance when the taught tilt alone was rejected."""
+    from corridor_trial import CorridorTrial_HeadingSnapshot
+    from nav_observation import Observation_DistinctTagRows
+    from relative_heading import reference_valid, relative_angles
+    from route_pose import RoutePose_TrialLateralHint
+
+    if not isinstance(alignment,dict):
+        return alignment
+    scan = alignment.get('scan') or {}
+    if (not isinstance(scan,dict) or robot.load_kind not in ('single','double') or alignment.get('expected_id') != 1
+            or scan.get('status') != 'id_seen_pose_untrusted'
+            or scan.get('reason') != 'insufficient tilt-compatible relative poses'
+            or scan.get('observed_ids') != [1]):
+        return alignment
+    visual=nav.cfg['visual_micro']
+    if (visual.get('execute') is not True or visual.get('confirmed_target_id')!=1
+            or not robot._allows_missing_magnetic()
+            or nav.cfg['legs']['outbound'][0].get('tag_heading_deg')!=0.):
+        return alignment
+    evidence = alignment.get('tag_observation') or scan
+    stance = robot.last_action_completed_ros_ns
+    after = scan.get('after_ns')
+    if (not isinstance(evidence,dict) or not isinstance(scan.get('observations'),(list,tuple))
+            or type(stance) is not int or type(after) is not int or not 0 < stance <= after
+            or evidence.get('camera_ready_for_motion') is False):
+        return alignment
+    camera_window=evidence.get('camera_window_status') or {}
+    if not isinstance(camera_window,dict):
+        return alignment
+    restart_stamps=(scan.get('camera_restart_ns',0),camera_window.get('restart_barrier_ns',0))
+    if any(type(t) is not int or t<0 for t in restart_stamps):
+        return alignment
+    window = dict(scan, camera_healthy=evidence.get('camera_healthy'),contract_match=evidence.get('contract_match'),
+                  camera_restart_ns=max(restart_stamps))
+    contract = dict(nav.cfg['pose_contract'])
+    contract['max_ground_tilt_deg'] = min(15.,contract['max_ground_tilt_deg'])
+    hint = RoutePose_TrialLateralHint(dict(alignment,scan=window),dict(nav.cfg,pose_contract=contract),1)
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if (not hint or not .11<=hint['distance_m']<=.35 or max(map(abs,hint['lateral_bounds_m']))>.12
+            or live is None or not live(hint['latest_stamp_ns'])):
+        return alignment
+    yaw = hint['heading_deg']
+    stamp = hint['latest_stamp_ns']
+    reference = nav.cfg.get('relative_heading_reference') or {}
+    verification = None
+    if abs(yaw)>=TAG1_CLEARANCE_YAW_DEG:
+        return alignment
+    valid = Observation_DistinctTagRows(row for row in scan['observations'] if isinstance(row,dict)
+        and row.get('id')==1 and row.get('stamp_ns')==stamp and row.get('frame_id')==contract['frame']
+        and not row.get('headers_disagree') and row.get('source_publisher')==contract['publisher']
+        and row.get('source_topic')==nav.cfg['topic'])
+    try:
+        if stamp in valid and reference_valid(reference,1):
+            twist, tilt = relative_angles([valid[stamp]['quaternion_raw'][k] for k in 'xyzw'],reference['quaternion_xyzw'])
+            if tilt<=30. and abs(wrap(twist-yaw))<=5.:
+                verification='taught_tag_twist'
+    except (KeyError,TypeError,ValueError):
+        return alignment
+    if verification is None and not robot.magnetic_route_only:
+        anchor = nav.mag.anchor or {}
+        reading = CorridorTrial_HeadingSnapshot(robot.last_heading_report or {},after=True,load=robot.load_kind)
+        completed = robot.last_action_completed_monotonic
+        stream = getattr(nav.io,'capture_stream',None)
+        if (reading and type(completed) in (float,int) and completed<reading[1]<=robot.clock()
+                and robot.clock()-reading[1]<=_TAG1_STANCE_REFERENCE_MAX_NS/1e9
+                and reading[2]==tuple(anchor.get(k) for k in ('capture_session','load_epoch','calibration_id'))
+                and (not hasattr(nav.io,'capture_stream') or (getattr(nav.io,'motion_capture_verified',False)
+                     and reading[2] == (getattr(stream,'session',None),getattr(nav.io,'magnetic_load_epoch',None),
+                                        getattr(stream,'calibration_digest',None))))
+                and ((anchor.get('tag_departure') or {}).get('tag_id')==1 or anchor.get('pickup_approach_heading'))
+                and abs(wrap(reading[0]-yaw))<=5.):
+            verification='same_stance_magnetic_heading'
+    if verification is None:
+        return alignment
+    aligned=abs(yaw)<=visual['deadband_deg']
+    window.update(status='usable',pose_usable=True,heading_only=True,position_usable=False,
+                  heading_deg=yaw,latest_stamp_ns=stamp,relative_rejection=scan['reason'],
+                  reason='corroborated near-field ground heading',heading_check=verification)
+    return dict(alignment, scan=window,pose_accepted=True,fresh_target_detected=True,
+                heading_aligned=aligned,heading_residual_advisory=not aligned,
+                error_deg=yaw,decision_fusion={'source':'trusted_tag_heading','target_heading_deg':0.,
+                    'error_deg':yaw,'predicted_only':False},
+                reason_zh='Tag 1 持物俯仰与示教不同，已交叉确认近距地面码的水平航向。')
 
 
 def _report_progress(robot, phase, result):
@@ -177,6 +263,7 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
         robot.check()
         recovery['reobserve_reason'] = str(exc)
         return None
+    alignment = EntranceTrial_RecoverGroundHeading(robot,nav,alignment)
     scan = alignment['scan']
     stamp = scan.get('latest_stamp_ns')
     completed = robot.last_action_completed_ros_ns
@@ -278,6 +365,9 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
 
 
 def _tag1_forward_plan(nav, profile, load, scan, camera_info, nominal, candidates, trial_stride):
+    if scan.get('heading_check') in ('same_stance_magnetic_heading','taught_tag_twist'):
+        return ({'status':'heading_only','tag_id':1,'position_usable':False},
+                {'status':'nominal','count':nominal,'reason':'本次恢复仅确认 Tag 1 水平航向，直行先用路线步数。'})
     pose = RoutePose_Measure(dict(scan, expected_load=load), nav.cfg, profile, 1, camera_info=camera_info)
     plan = RoutePose_PlanForwardCount(pose, profile, nominal)
     if (candidates and plan.get('reason') == 'same-load Tag 1 stride and next-checkpoint clearance unverified'):
@@ -434,7 +524,7 @@ def _tag2_boundary_replan(checkpoint, nav, settings, remaining, *, continuous=Tr
         return None
     near, far = plan['distance_bounds_m']
     left, right = plan['lateral_bounds_m']
-    if (not .02 <= near <= far <= .40 or far-near > .025 or right-left > .025
+    if (not .02 <= near <= far <= TAG2_FAR_APPROACH_LIMIT_M or far-near > .025 or right-left > .025
             or plan['max_heading_deviation_deg'] > 3.):
         return None
     if (far <= settings['target_distance_m'] + settings['deadband_m']

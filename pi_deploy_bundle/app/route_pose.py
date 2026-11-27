@@ -32,7 +32,7 @@ class RoutePoseDepartureResult(Enum):
 
 _SCHEMA = 'r3.route-pose.v1'
 _SIDE_SIGNS = {'strafe_left_once': -1, 'strafe_right_once': 1}
-_TAG2_FAR_APPROACH_LIMIT_M = 0.40
+TAG2_FAR_APPROACH_LIMIT_M = 0.40
 TAG2_APPROACH_COUNTS = (2, 4, 5, 6, 8)
 _TAG1_NOMINAL_START_M = (0.14, 0.22)
 _TAG1_TRIAL_TARGET_M = 0.18
@@ -641,7 +641,7 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
             and evidence['max_heading_deviation_deg'] <= 3. and abs(evidence['heading_deg']) > 12.):
         return dict(result, heading_to_correct_deg=evidence['heading_deg'], retreat_before_turn=True,
                     reason='Tag 2 below departure depth; verify a retreat on the approach before turning')
-    approach_range = (near, max(far, _TAG2_FAR_APPROACH_LIMIT_M))
+    approach_range = (near, max(far, TAG2_FAR_APPROACH_LIMIT_M))
     if not stable or projection[0] <= 0 or not _within((nearest, farthest), approach_range):
         return dict(result, reason='Tag 2 heading, distance or measurement spread outside trial window')
     if evidence['max_abs_yaw_deg'] > 12.0:

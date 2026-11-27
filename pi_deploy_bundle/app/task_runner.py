@@ -573,16 +573,32 @@ class Robot:
                 limit_total_angle=not getattr(self,'command0_scan_after_turn',False))
         return self.shared_micro_budget
 
-    def prepare_heading_segment(self,*,fresh=False,pickup_heading=None):
+    def prepare_heading_segment(self,*,fresh=False,pickup_heading=None,before_pickup_retreat=False):
         cfg=getattr(self,'navigation_bundle',None)
-        if (self.magnetic_route_only or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
+        pickup_recovery = (self.magnetic_route_only and fresh and (pickup_heading or before_pickup_retreat)
+                           and self.load_kind in ('single','double') and self._allows_missing_magnetic())
+        if ((self.magnetic_route_only and not pickup_recovery) or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
                 or getattr(self.backend,'is_simulation',False)):return
         nav=self.ensure_navigation_io()
         guard=self._heading_controller(nav)
         started=self.clock()
-        last_completed=None if fresh else self.last_action_completed_monotonic
+        last_completed=self.last_action_completed_monotonic if not fresh or pickup_heading or before_pickup_retreat else None
         options={'pickup_heading':pickup_heading} if pickup_heading is not None else {}
-        try:self.events.append({'segment_heading_reference':guard.before_straight(self.load_kind,action_completed_monotonic=last_completed,**options)})
+        try:
+            report=guard.before_straight(self.load_kind,action_completed_monotonic=last_completed,**options)
+            if pickup_recovery:
+                anchor = nav.mag.anchor or {}
+                if (report.get('status')=='relative_reference_established' and (before_pickup_retreat or anchor.get('pickup_approach_heading'))
+                        and anchor.get('capture_verified') and nav.io.motion_capture_verified):
+                    self.magnetic_route_only=False
+                    if not guard.budget.locked:
+                        guard.blocked=False
+                    report['pickup_reference_restored']=True
+                else:
+                    # A new relative zero after an outage cannot recreate the pre-grab target.
+                    nav.mag.anchor=None
+                    report['pickup_reference_restored']=False
+            self.events.append({'segment_heading_reference':report})
         except MagneticDataUnavailable as exc:
             if not self.defer_magnetic_route_fault(exc):raise
         finally:self.events.append({'stage_timing':{'stage':'heading_reference','elapsed_s':self.clock()-started}})
@@ -1271,6 +1287,9 @@ class Robot:
                     retried_camera_gap=True
                     self.events.append({'visual_camera_gap_recheck':{'tag_id':tag_id,**last_window}})
                     continue
+                if forward_search:
+                    from entrance_trial import EntranceTrial_RecoverGroundHeading
+                    result=EntranceTrial_RecoverGroundHeading(self,nav,result)
                 if (metric_departure or result.get('pose_accepted') or result.get('heading_aligned')
                         or result.get('status')=='blocked' or not result.get('scan_attempted')):
                     if result.get('pose_accepted'):
@@ -1859,6 +1878,11 @@ class Robot:
             fresh_target_detected=seen or result.get('fresh_target_detected',False),
             reason=('expected Tag seen in final stationary window; no alignment motion'
                     if seen else 'expected Tag absent after final stationary observation'))
+        if quick_entry and self._allows_missing_magnetic():
+            from entrance_trial import EntranceTrial_RecoverGroundHeading
+            report=EntranceTrial_RecoverGroundHeading(self,nav,report)
+            if report.get('pose_accepted'):
+                return report
         if (controller is None or not seen or not scan.get('pose_usable')
                 or not (scan.get('position_usable') or scan.get('heading_only'))
                 or goal.get('allow_turn') is not True or not nav.cfg['visual_micro'].get('execute')):

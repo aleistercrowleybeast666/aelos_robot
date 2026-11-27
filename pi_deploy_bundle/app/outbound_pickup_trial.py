@@ -163,7 +163,7 @@ def _pickup_use_retreat_tag(robot, nav, boundary, view, reserved):
             boundary['tag1_reference'] = robot.Route_RebaseTagHeading(1,after['heading_deg'],after['latest_stamp_ns']).value
 
 
-def _run_startup_retreat(robot, nav, pending, report):
+def _run_startup_retreat(robot, nav, pending, report, *, pickup_heading=None):
     """Complete the shared first-pickup retreat, then realign before the first strafe."""
     retreat_count = sum(1 for _ in takewhile(lambda op: op == 'cmd0_carry_backward2', pending))
     if not retreat_count:
@@ -177,6 +177,7 @@ def _run_startup_retreat(robot, nav, pending, report):
         report.setdefault('additional_retreats', []).append(boundary)
     else:
         report['retreat'] = boundary
+    saved_anchor=dict(getattr(getattr(nav,'mag',None),'anchor',None) or {})
     completed_groups = []
     while unrun:
         operation, strides = unrun.popleft()
@@ -198,6 +199,11 @@ def _run_startup_retreat(robot, nav, pending, report):
 
     read_tag = getattr(robot,'Pickup_ReadRetreatHeading',None)
     event_start = robot.events[-1] if robot.events else None
+    if getattr(robot,'magnetic_route_only',False):
+        if saved_anchor:
+            Checkpoint_TrackEntryHeading(robot,nav,saved_anchor)
+        if pickup_heading and robot.magnetic_route_only:
+            robot.prepare_heading_segment(fresh=True, pickup_heading=pickup_heading)
     anchor = getattr(getattr(nav,'mag',None),'anchor',None) or {}
     if read_tag is not None:
         # The guard reads the settled camera buffer during magnetic sampling,
@@ -229,7 +235,7 @@ def _run_startup_retreat(robot, nav, pending, report):
     if boundary['correction_actions'] and boundary['residual_deg'] is None:
         boundary['heading_status'] = 'post_turn_unverified'
     if boundary['residual_deg'] is None and (boundary['correction_actions']
-            or getattr(robot.backend,'is_simulation',None) is False):
+            or (callable(read_tag) and not getattr(robot.backend,'is_simulation',False))):
         boundary['next_group_max'] = 2
     return boundary
 
@@ -336,7 +342,7 @@ def _pickup_side_restore_heading(robot, nav, saved_anchor, check, remaining):
     check['next_group_max'] = 2
 
 
-def _run_pickup_exit(robot, nav, *, actions=None):
+def _run_pickup_exit(robot, nav, *, actions=None, pickup_heading=None):
     steps = robot.cfg.get('route_steps', {})
     corridor = steps.get('corridor') or CorridorTrial_DefaultChain()
     ready = getattr(robot.backend, 'small_strafe_ready', lambda: False)
@@ -354,7 +360,9 @@ def _run_pickup_exit(robot, nav, *, actions=None):
     live_pickup = (startup and getattr(robot, 'deliveries', 0) == 0 and getattr(nav, 'io', None) is not None
                    and nav.cfg['post_action_heading'].get('execute') and not getattr(robot.backend,'is_simulation',False))
     saved_anchor = dict(getattr(getattr(nav, 'mag', None), 'anchor', None) or {}) if live_pickup else {}
-    previous = _run_startup_retreat(robot, nav, pending, report) if startup else {}
+    previous = _run_startup_retreat(robot, nav, pending, report, pickup_heading=pickup_heading) if startup else {}
+    if not saved_anchor and live_pickup:
+        saved_anchor = dict(getattr(getattr(nav,'mag',None),'anchor',None) or {})
     if previous.get('side_start_authorized') is False:
         report.update(status='side_start_heading_unconfirmed', reason_zh=previous['reason_zh'])
         return report
@@ -799,12 +807,11 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             result['pickup'] = acquired
             nav = robot.ensure_navigation_io()
             nav.mag.anchor = None
-            heading_options = {'pickup_heading': pickup_heading} if pickup_heading else {}
-            robot.prepare_heading_segment(fresh=True, **heading_options)
+            robot.prepare_heading_segment(fresh=True, pickup_heading=pickup_heading, before_pickup_retreat=True)
             robot._record_progress('transfer_to_entry',observed_count=acquired['observed_count'],
                                    grip_count=acquired['grip_count'],planned_count=acquired['planned_count'],
                                    stacked_triple=acquired['stacked_triple'])
-            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions)
+            result['pickup_exit'] = _run_pickup_exit(robot, nav, actions=exit_actions, pickup_heading=pickup_heading)
 
             for key in ('next_segment','corridor_trial','checkpoint'):
                 result.pop(key,None)
@@ -930,7 +937,7 @@ class _SyntheticOutboundRobot(_OutboundPickupRobot):
     def ensure_navigation_io(self):
         return self.navigator
 
-    def prepare_heading_segment(self, *, fresh=False):
+    def prepare_heading_segment(self, *, fresh=False, pickup_heading=None, before_pickup_retreat=False):
         self.navigator.mag.anchor = {'load': self.load_kind}
 
     def settle_since_last_completed(self, seconds):

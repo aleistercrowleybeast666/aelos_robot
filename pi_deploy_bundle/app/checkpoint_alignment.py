@@ -62,7 +62,11 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     if name is None:
         return None
     selection_response = bound
-    if tag_id in (2, 3, 4):
+    stance = getattr(robot, 'last_action_completed_ros_ns', None)
+    current_stance = type(stance) is int and type(observed_at_ns) is int and observed_at_ns > stance
+    feedback_estimate = (tag_id in (2,3,4) or
+                         current_stance and robot.cfg.get('route_steps',{}).get('continue_estimated_route') is True)
+    if feedback_estimate:
         # Each corridor correction is followed by a new observation.
         # Use the estimated turn for selection and the full bound for the motion budget.
         initial = robot.cfg.get('route_steps', {}).get('micro_turn_filter', {}).get('initial_deg', MICRO_INITIAL_DEG)
@@ -78,8 +82,6 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     if abs(abs(error)-selection_response)>abs(error)-improvement:
         return None
     timeout=robot.cfg['request_timeout_s']
-    stance = getattr(robot, 'last_action_completed_ros_ns', None)
-    current_stance = type(stance) is int and type(observed_at_ns) is int and observed_at_ns > stance
     route_feedback = (robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
                       and (tag_id in (2, 3, 4) or current_stance))
     if (robot.count+reserved_actions+1>robot.cfg['max_body_macros_per_journey']
@@ -102,7 +104,7 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     robot.events.append({'visual_micro_action':name,'tag_id':tag_id,'feedback_source':'tag_only',
                         'angle_evidence':'source_nominal','physical_success':'unobserved'})
     turn = {'action':name,'before_error_deg':error}
-    if tag_id in (2, 3, 4):
+    if feedback_estimate:
         turn['selected_response_deg'] = selection_response
     return turn
 
@@ -172,7 +174,10 @@ def Checkpoint_TrackEntryHeading(robot, nav, saved_anchor=None):
             or not getattr(robot, '_allows_missing_magnetic', lambda: False)()):
         return unavailable
     robot.check()
-    if not _capture_ready_for_reference(nav.io):
+    if saved_anchor is None:
+        if not _capture_ready_for_reference(nav.io):
+            return unavailable
+    elif not MagneticLoss_IsRecoverable(getattr(nav.io, 'magnetic_capture_health', lambda: None)()):
         return unavailable
     guard = robot._heading_controller(nav)
     prior = nav.mag.anchor
@@ -189,6 +194,8 @@ def Checkpoint_TrackEntryHeading(robot, nav, saved_anchor=None):
         else:
             if saved_anchor.get('owner_observation_scope') != guard.observation_scope:
                 return unavailable
+            # Retrying the preflight would replace the stream and its load epoch.
+            # The ordinary post-action reader rebinds transient delays within the original session.
             _, sample = guard.sample(robot.load_kind, robot.last_action_completed_monotonic, stationary_retry=True)
             nav.mag.anchor = dict(saved_anchor)
             applied = not guard._target_observation_faults(sample, robot.load_kind)
@@ -288,6 +295,8 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return', local_ha
         error = wrap(geometry['heading_deg'] - goal_yaw)
         stamp = geometry['latest_stamp_ns']
         reading = {'error_deg': error, 'latest_stamp_ns': stamp, 'spread_deg': geometry['max_heading_deviation_deg']}
+        if tag == 5 and direction == 'return' and local_handoff is None:
+            reading['body_lateral_m'] = _empty_gate_offset(geometry, goal_yaw, goal.get('lateral_m', 0.))
         heading['observations'].append(reading)
         if abs(error) >= 90.:
             heading['status'] = 'orientation_inconsistent'
@@ -340,26 +349,40 @@ def Checkpoint_AlignEmptyMarker(robot, nav, leg, *, direction='return', local_ha
             return
 
 
+def _empty_gate_offset(geometry, goal_yaw, target_lateral):
+    # The measured position is expressed in the printed marker frame. Turn
+    # its right-axis into the right-axis of the intended gate crossing.
+    direction = 1 if math.cos(math.radians(goal_yaw)) > 0 else -1
+    return tuple(sorted(direction * (v - target_lateral) for v in geometry['lateral_bounds_m']))
+
+
+def _clearly_outside_gate(offset, tolerance):
+    return (offset is not None and offset[1] - offset[0] <= .04
+            and (offset[0] > tolerance or offset[1] < -tolerance))
+
+
 def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
     depth_lo, depth_hi = geometry['body_forward_bounds_m']
     error = wrap(geometry['heading_deg'] - goal_yaw)
     reading = {'heading_error_deg': error, 'body_depth_m': (depth_lo, depth_hi)}
-    if (abs(error) + geometry['max_heading_deviation_deg'] > 15.
-            or not .035 < depth_lo <= depth_hi <= .45 or depth_hi - depth_lo > .04):
+    if tag == 5:
+        lo, hi = _empty_gate_offset(geometry, goal_yaw, target_lateral)
+        reading['body_lateral_m'] = (lo, hi)
+        # A side-on glimpse gives an uncertain stride count, but distinct
+        # consistent frames still give the direction of the gate center.
+        if hi - lo > .04:
+            return None, None, reading, 'uncertain_lateral_position'
+    if (depth_lo <= 0 or depth_hi - depth_lo > .04 or tag == 5 and not .035 < depth_lo <= depth_hi <= .45
+            or abs(error) + geometry['max_heading_deviation_deg'] > 15.):
         return None, None, reading, 'pose_outside_translation_range'
     if tag == 5:
-        # ground_pose gives the robot position in the marker frame. Facing
-        # the opposite way interchanges robot-left and marker-left.
-        direction = 1 if math.cos(math.radians(goal_yaw)) > 0 else -1
-        lo, hi = sorted(direction * (v - target_lateral) for v in geometry['lateral_bounds_m'])
-        reading['body_lateral_m'] = (lo, hi)
-        if hi - lo > .04 or max(abs(lo), abs(hi)) > .30:
-            return None, None, reading, 'uncertain_lateral_position'
         tolerance = config['gate_lateral_tolerance_m']
         if lo > tolerance:
             return 'empty_strafe_left', lo - tolerance, reading, 'outside_gate_center'
         if hi < -tolerance:
             return 'empty_strafe_right', -tolerance - hi, reading, 'outside_gate_center'
+        if lo < -tolerance or hi > tolerance:
+            return None, None, reading, 'uncertain_gate_edge'
     else:
         near, far = config['side_departure_depth_m']
         if depth_lo > far:
@@ -369,7 +392,30 @@ def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
         if depth_hi < near:
             reason = 'near_before_transfer' if tag == 1 else 'near_before_side_travel'
             return 'empty_backward2', near - depth_hi, reading, reason
+        if depth_lo < near or depth_hi > far:
+            return None, None, reading, 'uncertain_depth_edge'
     return None, 0., reading, 'within_departure_band'
+
+
+def Checkpoint_EmptyDepartureConflict(robot, nav, tag, geometry):
+    config = robot.cfg.get('route_steps', {}).get('command2_empty_departure')
+    if not config or not geometry or tag not in (5, 6, 7):
+        return None
+    goal = next((item for item in nav.cfg['legs']['return'] if item['id'] == tag), {})
+    yaw = goal.get('tag_heading_deg')
+    if yaw is None:
+        return None
+    if tag == 5:
+        error = abs(wrap(geometry['heading_deg'] - yaw))
+        offset = _empty_gate_offset(geometry, yaw, goal.get('lateral_m', 0.))
+        if error > 15. or _clearly_outside_gate(offset, config['gate_lateral_tolerance_m']):
+            return 'gate_crossing_unresolved'
+    else:
+        lo, hi = geometry['body_forward_bounds_m']
+        near, far = config['side_departure_depth_m']
+        if 0. < lo <= hi <= lo + .04 and (hi < near or lo > far):
+            return 'side_departure_depth_unresolved'
+    return None
 
 
 def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
@@ -384,14 +430,30 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
         return
     report = {'actions': [], 'observations': []}
     leg['empty_departure_correction'] = report
-    previous_action, previous_gap = None, None
+    if tag == 5:
+        # A turn may lose the marker at the image edge. An earlier offset
+        # can veto crossing; it can never authorize a fresh movement.
+        heading_reads = (leg.get('empty_heading') or {}).get('observations', ())
+        if any(abs(row['error_deg']) > 15. or _clearly_outside_gate(
+                row.get('body_lateral_m'), config['gate_lateral_tolerance_m']) for row in heading_reads):
+            report['gate_crossing_unresolved'] = True
+    if leg.get('boundary_departure_conflict'):
+        report[leg['boundary_departure_conflict']] = True
+    tolerance = config['gate_lateral_tolerance_m']
+    near, far = config['side_departure_depth_m']
+    previous_action, previous_gap, previous_strides = None, None, 1
+    retried_single = False
+    retreated = False
+    retraced = False
     refreshed = False
     while True:
+        robot.check()
         geometry = Checkpoint_MeasureEmptyMarker(robot, nav, leg)
         if geometry is None:
             # A magnetic rebase can outlive the previous camera window even
             # at rest. Acquire one fresh window for this stance before giving up.
-            if not refreshed and leg.get('detected'):
+            if not refreshed and (leg.get('detected') or report.get('gate_crossing_unresolved')
+                                  or report.get('side_departure_depth_unresolved')):
                 refreshed = True
                 current = _empty_departure_rescan(robot, nav, leg)
                 if current['detected']:
@@ -402,15 +464,52 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
             tag, geometry, goal_yaw, config, goal.get('lateral_m', 0.))
         report['observations'].append(reading)
         report['status'] = status
+        conflict = Checkpoint_EmptyDepartureConflict(robot, nav, tag, geometry)
+        if conflict:
+            report[conflict] = True
+        elif status == 'within_departure_band':
+            report.pop('gate_crossing_unresolved', None)
+            report.pop('side_departure_depth_unresolved', None)
+        unresolved = report.get('gate_crossing_unresolved') or report.get('side_departure_depth_unresolved')
         if action is None:
+            if unresolved and not refreshed:
+                refreshed = True
+                refreshed_leg = _empty_departure_rescan(robot, nav, leg, reuse_cache=False)
+                if refreshed_leg['detected']:
+                    Checkpoint_AlignEmptyMarker(robot, nav, leg)
+                    continue
             return
         if tag == 5 and goal.get('allow_strafe') is not True:
             report['status'] = 'lateral_action_disabled_for_checkpoint'
             return
-        if previous_action and (action != previous_action or gap >= previous_gap - .01):
-            report['status'] = 'retain_latest_pose_after_limited_progress'
-            return
-        if len(report['actions']) >= (1 if tag == 1 else 2) or robot.count >= robot.cfg['max_body_macros_per_journey']:
+        strides = 1
+        if previous_action:
+            improvement = previous_gap - gap
+            if action != previous_action or improvement < .01:
+                if not unresolved:
+                    report['status'] = 'retain_latest_pose_after_limited_progress'
+                    return
+                # One measured, single-stride retry also handles a change of
+                # sign. If the feet remain stuck with the marker close ahead,
+                # recover the view by the supported two-step retreat once.
+                retry_gap = 2 * tolerance if tag == 5 else far - near
+                if not retried_single and gap >= retry_gap:
+                    retried_single = True
+                elif (tag == 5 and not retreated and geometry['body_forward_bounds_m'][1] < config['side_departure_depth_m'][0]
+                      and getattr(robot.backend, 'empty_recovery_ready', lambda: False)()):
+                    action = 'empty_backward2'
+                    retreated = True
+                else:
+                    report['status'] = 'retain_latest_pose_after_limited_progress'
+                    return
+            elif tag == 5 and getattr(robot.backend, 'empty_strafe_group_ready', lambda: False)():
+                # Measure the effect on this floor before batching. Reserve
+                # 50% for stride variation plus the observed pose interval.
+                lo, hi = reading['body_lateral_m']
+                stride_bound = 1.5 * improvement / previous_strides + hi - lo
+                strides = min(3, max(1, int(gap / stride_bound)))
+        if ((tag == 1 and len(report['actions']) >= 1)
+                or robot.count >= robot.cfg['max_body_macros_per_journey']):
             report['status'] = 'continue_from_latest_pose'
             return
         if (action == 'empty_backward2'
@@ -425,7 +524,8 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                 raise _EmptyMarkerExpired()
 
         try:
-            robot.finite(action, configured=True, checkpoint_follows=True, before_dispatch=verify)
+            native = action + str(strides) if strides > 1 else action
+            robot.finite(native, configured=True, checkpoint_follows=True, before_dispatch=verify)
         except _EmptyMarkerExpired:
             if not refreshed:
                 refreshed = True
@@ -435,10 +535,40 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
             report['status'] = 'pose_expired_before_translation'
             return
         robot.nav_count += 1
-        report['actions'].append(action)
-        previous_action, previous_gap = action, gap
+        report['actions'].append(native)
+        previous_action = None if tag == 5 and action == 'empty_backward2' else action
+        previous_gap, previous_strides = gap, strides
         refreshed = False
+        settled_at = robot.last_action_completed_ros_ns
         current = _empty_departure_rescan(robot, nav, leg)
+        if not leg['detected'] and unresolved:
+            # A missed post-motion window cannot clear a known cross-track error.
+            first_blank = _healthy_empty_departure_blank(nav, current, settled_at)
+            current = _empty_departure_rescan(robot, nav, leg, reuse_cache=False)
+            inverse = {'empty_strafe_right': 'empty_strafe_left', 'empty_strafe_left': 'empty_strafe_right',
+                       'empty_forward2': 'empty_backward2'}.get(action)
+            if (inverse == 'empty_backward2' and not getattr(robot.backend, 'empty_recovery_ready', lambda: False)()):
+                inverse = None
+            if (first_blank and inverse and not retraced and not leg['detected']
+                    and _healthy_empty_departure_blank(nav, current, settled_at)
+                    and (current['scan']['after_ns'] >= first_blank)
+                    and robot.count < robot.cfg['max_body_macros_per_journey']):
+                def verify_retrace():
+                    robot.check()
+                    if (robot.last_action_completed_ros_ns != settled_at or
+                            not 0 <= nav.io.ros_now_ns() - current['scan']['now_ns'] <= nav.cfg['max_age_s'] * 1e9):
+                        raise _EmptyMarkerExpired()
+                try:
+                    robot.finite(inverse, configured=True, checkpoint_follows=True, before_dispatch=verify_retrace)
+                except _EmptyMarkerExpired:
+                    report['status'] = 'retrace_stance_expired'
+                    return
+                robot.nav_count += 1
+                report['actions'].append(inverse)
+                report['view_recovery'] = {'retrace': inverse, 'after_completed_action': native}
+                retraced = True
+                previous_action = None
+                current = _empty_departure_rescan(robot, nav, leg, reuse_cache=False)
         if not leg['detected']:
             report['status'] = 'marker_lost_after_translation'
             return
@@ -450,11 +580,26 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                    detected=current['detected'])
 
 
-def _empty_departure_rescan(robot, nav, leg):
+def _empty_departure_rescan(robot, nav, leg, *, reuse_cache=True):
     current = {'expected_id': leg['expected_id'], 'observation_windows': 0, 'detected': False}
     observed, _ = Checkpoint_Observe(robot, nav, current, lambda: None,
-        quick_id=True, single_window=True, reuse_settled_cache=True)
+        quick_id=True, single_window=True, reuse_settled_cache=reuse_cache)
     current['detected'] = observed is CheckpointScanResult.CHECKPOINT_DETECTED
     leg.update(scan=current.get('scan'), camera_info=current.get('camera_info') or {},
                detected=current['detected'])
     return current
+
+
+def _healthy_empty_departure_blank(nav, current, stance):
+    scan = current.get('scan') or {}
+    camera = current.get('camera_info') or {}
+    pinned = nav.cfg['visual_micro']['camera_info']
+    floor, now = scan.get('after_ns'), scan.get('now_ns')
+    if (scan.get('status') == 'no_tag' and scan.get('observed_ids') == []
+            and scan.get('camera_healthy') is True and scan.get('contract_match') is True
+            and type(stance) is int and type(floor) is int and type(now) is int and stance <= floor < now
+            and type(scan.get('camera_restart_ns', 0)) is int and scan.get('camera_restart_ns', 0) <= stance
+            and camera.get('ready') is True and pinned.get('source_confirmed') is True
+            and camera.get('fingerprint') == pinned.get('expected_fingerprint') and camera.get('fingerprint')):
+        return now
+    return None

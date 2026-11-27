@@ -13,8 +13,8 @@ from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount
 from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime, CheckpointScanResult
 from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
-from route_pose import (TAG2_APPROACH_COUNTS, RoutePose_AdviseDeparture, RoutePose_Load, RoutePose_Measure,
-                        RoutePose_PartialCheckpointGeometry,
+from route_pose import (TAG2_APPROACH_COUNTS, TAG2_FAR_APPROACH_LIMIT_M, RoutePose_AdviseDeparture,
+                        RoutePose_Load, RoutePose_Measure, RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanSideCount, RoutePose_PlanSmallSide, RoutePose_PlanTag2ForwardTrim,
                         RoutePose_PlanTag2ForwardTrial, RoutePose_PlanTag4Longitudinal, RoutePose_PlanTag5EntryLateral,
                         RoutePose_PlanTag5Passage, RoutePose_Tag3HeadingRecovery, RoutePose_Tag3LocalHeading, RoutePose_Tag4DepthOnly,
@@ -984,9 +984,9 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
     else:
         reason = 'previous_range_minus_travel' if anchor else 'no_range_yet'
     if reason == 'no_range_yet':
-        # Only join the two middle two-step gaits inside the measured eight-step
-        # corridor segment. A later miss, partial detection or yaw drift stays short.
-        allow_four = (completed == 4 and not cautious and
+        # A short handoff can put the first settled boundary at step two.
+        # Rejoin the nominal gait only within the first eight corridor steps.
+        allow_four = (completed in (2, 4) and not cautious and
                       plan.get('healthy_miss_stance_ns') == getattr(robot, 'last_action_completed_ros_ns', None)
                       and plan.get('healthy_miss_stance_ns') is not None
                       and not any(p.get('partial_pose') or p.get('distance_bounds_m') or p.get('camera_contract_fault')
@@ -1053,7 +1053,7 @@ def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approac
             and type(scan.get('now_ns')) is int and stance <= scan['after_ns'] < scan['now_ns']
             and scan.get('camera_healthy') and scan.get('contract_match') and camera.get('ready')
             and scan.get('status') == 'no_tag' and not observation.get('partial_pose_rows')
-            and not scan.get('observed_ids') and not scan.get('samples')
+            and scan.get('observed_ids') in ([], [3]) and not scan.get('samples')
             and not any(w.get('decoded_since_boundary') or w.get('decoded_expected_frames')
                         for w in observation.get('quick_scan_windows', ()))
             and camera.get('fingerprint') and camera['fingerprint'] ==
@@ -2110,7 +2110,10 @@ def _tag2_can_turn_in_place(robot, plan, settings, live):
             or type(stance) is not int or type(stamp) is not int or not stance < stamp or not live(stamp)):
         return False
     near, far = settings['distance_window_m']
-    return (near + .10 <= depth[0] <= depth[1] <= far and depth[1] - depth[0] <= .025
+    # The upper departure bound controls when to start strafing. A centered
+    # near-field pose can guide a turn before the robot reaches that depth.
+    return (near + .10 <= depth[0] <= depth[1] <= max(far, TAG2_FAR_APPROACH_LIMIT_M)
+            and depth[1] - depth[0] <= .025
             and -.10 <= lateral[0] <= lateral[1] <= .10 and lateral[1] - lateral[0] <= .025
             and 0. <= spread <= 3. and abs(plan['heading_deg']) + spread <= 35.
             and (plan.get('projection_bounds') or (0.,))[0] >= .80)
@@ -3032,7 +3035,12 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
         info.update(peripheral, magnetic_reference='prior_tag3_reference_retained',
                     reason_zh='Tag 3 位于视野侧缘，视觉与同站姿磁航向均在直行容差内，沿用本段 Tag 3 航向参考。')
         return
-    step = turn(3, yaw, stamp, reserved_actions=reserved_actions)
+    bearing = hint.get('min_abs_body_bearing_deg')
+    aligned = (bearing is not None and bearing < _TAG3_PERIPHERAL_BODY_BEARING_DEG
+               and abs(yaw) <= nav.cfg['post_action_heading'].get('deadband_deg', 8.))
+    if aligned:
+        info['reason_zh'] = 'Tag 3 新位姿已在直行航向容差内，保留实测余差并切入直行。'
+    step = None if aligned else turn(3, yaw, stamp, reserved_actions=reserved_actions)
     if step is not None:
         info['turn'] = step
         _, fresh = _refresh_checkpoint_pose(robot, nav, profile, 3, boundary_first=True,
@@ -3050,6 +3058,8 @@ def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_
     yaw = hint['heading_deg']
     info.update(residual_deg=yaw, residual_stamp_ns=hint['latest_stamp_ns'],
                 magnetic_reference=rebase(3, yaw, hint['latest_stamp_ns']).value)
+    if aligned and info['magnetic_reference'] != 'applied':
+        info['short_first_forward'] = True
     if 'local_zero' in hint:
         info['local_zero'] = hint['local_zero']
     return hint
@@ -4218,7 +4228,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     continuous=continuous, reserved_actions=required_macros[name]+after_leg,
                     require_verified=verify_tag2, trial_plan=tag2_trial_plan if checkpoint is next_segment else None)
                 if not ready and estimate:
-                    resume_nominal(2, '已尝试起步位姿纠偏，缩短首组右跨以复查。')
+                    trim = leg.get('tag2_forward_trim') or {}
+                    detail = trim.get('last_approach_reason_zh') or '右跨起点仍待确认。'
+                    resume_nominal(2, detail + ' 缩短首组右跨，到下一站姿复查。')
                     leg['tag2_narrow_departure'] = True
                     pose = {}
                 elif not ready:
