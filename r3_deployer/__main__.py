@@ -36,7 +36,7 @@ def main(argv=None):
     for command_parser in (run, update):
         command_parser.add_argument('--drop-yaw-deg', type=int, metavar='度',
                                     choices=range(-DROP_YAW_LIMIT_DEG, DROP_YAW_LIMIT_DEG + 1),
-                                    help='放物目标转角 -30 至 +30°，负左正右。命令 2 第二趟反向。')
+                                    help='放物目标转角 -90 至 +90°，负左正右，按大转取近似值。命令 2 第二趟反向。')
     actions.add_parser('stop', help='取消机器人后续自动动作')
     actions.add_parser('status', help='读取当前机器人控制状态')
     actions.add_parser('scan', help='只读识别胸部相机视野中的标记')

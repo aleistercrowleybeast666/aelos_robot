@@ -5,6 +5,7 @@ import re
 
 VERSION = 'r3-visual-pickup-20261109-v5'
 CONTRACT = 'r3.single_micro_turn.v1'
+CAPABILITY_LIFETIME_S = 900.
 _DEVICE_IDENTITY_SHA256 = '7e4b8c1ab846f4d8e883e8376f657d098d8cadc62e691de3c18e9ad41509f0d7'
 NAMES = {op: 'r3_micro_v1_'+op for op in
          ('capability', 'single_micro_left', 'single_micro_right')}
@@ -203,12 +204,15 @@ class MicroGate:
         self.used_nonces = set()
 
     def clear(self):
+        self.clear_capabilities()
+        self.permit = None
+
+    def clear_capabilities(self):
         self.capability = None
         self.empty_recovery_receipt = None
         self.empty_group_receipt = None
         self.level_backward8_receipt = None
         self.small_profile_receipt = None
-        self.permit = None
 
     def configure(self, record):
         # Parsing a file never transmits a probe or grants a live capability.
@@ -341,7 +345,16 @@ class MicroGate:
         c = self.capability
         return bool(self.deployment_ready() and c and c['session'] == self.session and
                     c['epoch'] == epoch and c['boot_id'] == self.boot_id and
-                    0 <= self.clock()-c['verified_monotonic'] <= 900)
+                    0 <= self.clock()-c['verified_monotonic'] <= CAPABILITY_LIFETIME_S)
+
+    def reserve_task_window(self, seconds):
+        """Drop receipts that could expire before this task's own deadline."""
+        now=self.clock()
+        for receipt in (self.capability,self.level_backward8_receipt,self.small_profile_receipt):
+            if receipt and 'verified_monotonic' in receipt and not (
+                    0 <= now-receipt['verified_monotonic'] <= CAPABILITY_LIFETIME_S-seconds):
+                self.clear_capabilities()
+                break
 
     def small_strafe_profile(self,epoch):
         receipt = self.small_profile_receipt
@@ -428,9 +441,11 @@ class MicroGate:
             return 'micro_nonce_missing_or_replayed'
         if not self.deployment_ready():
             return 'micro_MCU_verified_installation_and_initial_reload_required'
-        if op in STRAFE_PROFILES and not self.small_strafe_ready(epoch, recovery_ready):
+        # These aliases inspect exports only. The physical actions below still
+        # require an explicit task permit and their normal readiness checks.
+        if op in STRAFE_PROFILES and not self.small_strafe_capability_ready(epoch):
             return 'small_strafe_profile_requires_current_small_strafe_capability'
-        if op == LEVEL_BACKWARD8_PROBE and not self.cmd0_route_ready(epoch,recovery_ready):
+        if op == LEVEL_BACKWARD8_PROBE and not self.cmd0_route_capability_ready(epoch):
             return 'level_eight_probe_requires_current_route'
         if op in EMPTY_PROBES and not self.mission_ready(epoch, recovery_ready):
             return 'empty_recovery_probe_requires_current_mission'

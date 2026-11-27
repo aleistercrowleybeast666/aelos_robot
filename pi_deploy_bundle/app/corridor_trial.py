@@ -5486,7 +5486,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
     if drop_yaw_deg:
         from base_placement import BasePlacement_TurnBeforeRelease
         _report_progress(robot, 'cmd0_delivery_release', result['checkpoint'], 5, reason_zh='已完成进场，按本次指定方向转身放物。')
-        delivery['drop_turn'] = BasePlacement_TurnBeforeRelease(robot, nav, drop_yaw_deg)
+        delivery['drop_turn'] = BasePlacement_TurnBeforeRelease(robot, drop_yaw_deg)
         robot.events.append({'base_placement_turn': delivery['drop_turn']})
     _report_progress(robot, 'cmd0_delivery_release', result['checkpoint'], 5)
     robot.action(PLACE_ACTION)

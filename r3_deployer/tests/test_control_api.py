@@ -126,7 +126,7 @@ class RobotApiTests(unittest.TestCase):
 
     def test_invalid_angle_rejected_before_connecting_or_deploying(self):
         with patch.object(self.api, 'deploy') as deploy, patch.object(self.api, '_connection') as connect:
-            for angle in (31, -31, 1.5, '0', True):
+            for angle in (91, -91, 1.5, '0', True):
                 with self.subTest(angle=angle), self.assertRaises(ValueError):
                     self.api.update_then_start(1, drop_yaw_deg=angle)
                 with self.assertRaises(ValueError):

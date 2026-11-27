@@ -33,6 +33,7 @@ _STATUS_INTERVAL_MS = 3000
 _CAMERA_STALE_S = 2.0
 _CAMERA_OFFLINE = "机器人离线，预览已关闭"
 _CONNECT_RETRY_DELAY_S = 1.0
+_BOOT_CONNECT_WINDOW_S = 90.0
 _MCU_RECONNECT_TIMEOUT_S = 60.0
 _TASK_NAMES = (
     "单程搬运原始物资",
@@ -177,6 +178,8 @@ class _ControlWindow(QMainWindow):
         self._session = None
         self._link = "disconnected"
         self._link_confirmed = False
+        self._connect_wait = None
+        self._logged_boot_times = {}
         self._last_robot = {}
         self._motion = None
         self._uncertain = None
@@ -207,6 +210,7 @@ class _ControlWindow(QMainWindow):
         view.scan_button.clicked.connect(self._request_scan)
         view.save_button.clicked.connect(self._save_settings)
         view.deployment_source.currentIndexChanged.connect(self._update_buttons)
+        view.drop_yaw.editTextChanged.connect(self._update_buttons)
         view.route_edit_button.clicked.connect(self._edit_action_chain)
         view.clear_log_button.clicked.connect(self._clear_log)
         view.open_reports_button.clicked.connect(self._open_report_directory)
@@ -250,11 +254,16 @@ class _ControlWindow(QMainWindow):
         return (self._last_robot.get("task_active") is True or owner.get("in_flight") is True
                 or owner.get("mode") == "auto")
 
+    def _boot_probe_only(self):
+        return (self._last_robot.get("boot_probe_in_flight") is True
+                and self._last_robot.get("task_active") is False
+                and (self._last_robot.get("owner") or {}).get("mode") == "manual")
+
     def _can_request_start(self):
         # A click starts the authoritative Pi preflight. Cached readiness can
         # explain a delay, but must not lock out a fresh check.
         return (self._link == "connected" and self._session is not None
-                and not self._locally_busy() and not self._reported_busy()
+                and not self._locally_busy() and (not self._reported_busy() or self._boot_probe_only())
                 and not self._needs_empty_reset())
 
     def _needs_empty_reset(self):
@@ -274,7 +283,7 @@ class _ControlWindow(QMainWindow):
             return "等待当前操作结束或确认机器人空闲。"
         if self._link != "connected":
             return "连接机器人后可启动任务。"
-        if robot_busy:
+        if robot_busy and not self._boot_probe_only():
             operation = (self._last_robot.get("owner") or {}).get("current_operation") or {}
             if operation.get("cancelled") is True:
                 return "已取消后续动作，等待 MCU 确认当前动作已结束。"
@@ -287,6 +296,8 @@ class _ControlWindow(QMainWindow):
             return "控制服务尚未就绪，可点击任务重新检查。"
         if (self._last_robot.get("owner") or {}).get("mcu_ready") is not True:
             return "MCU 握手未就绪，可点击任务重新检查。"
+        if self._boot_probe_only():
+            return "正在读取 MCU 动作能力，可启动任务。"
         return ""
 
     def _update_buttons(self, *_):
@@ -298,21 +309,22 @@ class _ControlWindow(QMainWindow):
             view.target_label.setText(f"{view.fields['host'].text()}:{view.fields['port'].text()}")
         busy = self._locally_busy()
         robot_busy = self._reported_busy()
-        can_request_start = self._can_request_start()
+        valid_angle = view.drop_yaw.lineEdit().hasAcceptableInput()
+        can_request_start = self._can_request_start() and valid_angle
         for button in view.task_buttons.values():
             button.setEnabled(can_request_start)
-        view.drop_yaw.setEnabled(not busy and not robot_busy)
+        view.drop_yaw.setEnabled(not busy and (not robot_busy or self._boot_probe_only()))
         needs_empty_reset = self._needs_empty_reset()
         view.reset_empty_button.setEnabled(self._can_reset_empty())
-        task_hint = self._task_hint_text(busy, robot_busy)
+        task_hint = self._task_hint_text(busy, robot_busy) if valid_angle else "请输入 -90 到 +90 之间的整数放物转角。"
         view.task_hint.setText(task_hint)
         view.task_hint.setVisible(bool(task_hint))
         connection_action = "重新连接" if self._link == "offline" else (
             "断开连接" if self._session else "连接机器人"
         )
-        view.connection_button.setText("连接中…" if self._link == "connecting" else connection_action)
+        view.connection_button.setText("取消等待" if self._link == "connecting" else connection_action)
         can_reconnect = self._link == "offline" and self._maintenance is None
-        view.connection_button.setEnabled(self._link != "connecting" and (not busy or can_reconnect))
+        view.connection_button.setEnabled(self._link == "connecting" or not busy or can_reconnect)
         view.camera_button.setEnabled(self._link != "offline" and (self._camera is None or not self._camera.is_set()))
         view.stop_button.setEnabled(self._stop_request is None)
         view.scan_button.setEnabled(not busy and not robot_busy and self._link == "connected" and self._probe is None)
@@ -330,7 +342,7 @@ class _ControlWindow(QMainWindow):
         view.pi_buttons["check"].setEnabled(not busy)
         for action in ("deploy", "rollback"):
             view.pi_buttons[action].setEnabled(not busy and not robot_busy)
-        view.update_start_button.setEnabled(not busy and not robot_busy and not needs_empty_reset)
+        view.update_start_button.setEnabled(not busy and not robot_busy and not needs_empty_reset and valid_angle)
         view.update_task.setEnabled(view.update_start_button.isEnabled())
 
     def _set_link(self, state, label):
@@ -439,7 +451,14 @@ class _ControlWindow(QMainWindow):
 
     def _toggle_connection(self):
         reconnect = self._link == "offline"
-        if self._link == "connecting" or (self._locally_busy() and not reconnect) or self._maintenance:
+        if self._link == "connecting":
+            self._cancel_connect_wait()
+            if self._awaiting_robot():
+                self._link_dropped()
+            else:
+                self._end_connection()
+            return
+        if (self._locally_busy() and not reconnect) or self._maintenance:
             return
         if self._session and not reconnect:
             self._end_connection()
@@ -448,6 +467,8 @@ class _ControlWindow(QMainWindow):
         if request is None:
             return
         self._session = request
+        self._connect_wait = Event()
+        self._logged_boot_times.clear()
         self._link_confirmed = False
         self._last_robot = {}
         self._camera_on_connect = self._camera is None or self._camera.is_set()
@@ -458,10 +479,16 @@ class _ControlWindow(QMainWindow):
         self._start_probe(request, "status", quiet=False)
         self._update_buttons()
 
+    def _cancel_connect_wait(self):
+        if self._connect_wait is not None:
+            self._connect_wait.set()
+            self._connect_wait = None
+
     def _link_dropped(self):
         if self._link == "offline":
             return
         pending = self._awaiting_robot()
+        self._cancel_connect_wait()
         self._probe = None
         self._last_robot = {}
         self._link_confirmed = False
@@ -477,6 +504,7 @@ class _ControlWindow(QMainWindow):
         self._update_buttons()
 
     def _end_connection(self):
+        self._cancel_connect_wait()
         self._session = None
         self._probe = None
         self._link_confirmed = False
@@ -541,20 +569,38 @@ class _ControlWindow(QMainWindow):
             return
         context = _Probe(request, action, quiet, self._uncertain, self._stop_wait, self._motion)
         self._probe = context
-        retry_connect = not quiet and action == "status" and self._link == "connecting"
+        wait = self._connect_wait if not quiet and action == "status" and self._link == "connecting" else None
 
         def read():
             api = _robot_api(request, None if quiet else self._post_log(request))
             if action != "status":
                 return api.scan()
-            try:
+            if wait is None:
                 return api.status()
-            except SshLinkError:
-                if not retry_connect:
-                    raise
-                self._post_log(request)("首次 SSH 未响应，正在重试一次连接。")
-                time.sleep(_CONNECT_RETRY_DELAY_S)
-                return api.status()
+            started = time.monotonic()
+            deadline = started + _BOOT_CONNECT_WINDOW_S
+            phase = None
+            while not wait.is_set():
+                try:
+                    status = api.status()
+                except SshLinkError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    current = "正在等待 SSH 上线…"
+                else:
+                    legacy_socket_error = (status.get("status") == "not_started_or_stopped"
+                                           and status.get("reason") in ("[Errno 2] No such file or directory",
+                                                                        "[Errno 111] Connection refused"))
+                    if status.get("status") != "owner_socket_starting" and not legacy_socket_error:
+                        return dict(status, connect_wait_s=time.monotonic() - started)
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("SSH 已连通，等待 R3 控制服务上线超时。")
+                    current = "SSH 已连通，正在等待 R3 控制服务上线…"
+                if current != phase:
+                    self._events.put(("connect_phase", context, current))
+                    phase = current
+                wait.wait(min(_CONNECT_RETRY_DELAY_S, max(0, deadline - time.monotonic())))
+            return {}
 
         self._start_worker("probe", context, "r3-status", read,
                            receipt=(request, "scan") if action == "scan" else None)
@@ -581,6 +627,8 @@ class _ControlWindow(QMainWindow):
                 self._start_probe(self._session, "status", quiet=False)
             self._update_buttons()
             return
+        if self._link == "connecting":
+            self._cancel_connect_wait()
         if isinstance(outcome, SshLinkError):
             self._link_dropped()
             return
@@ -625,8 +673,17 @@ class _ControlWindow(QMainWindow):
             self._set_link("connected", "已连接")
             if previous_link != "connected":
                 self._log(f"R3 控制服务在线，目标 {context.request.target}。")
+                if "connect_wait_s" in status:
+                    self._log(f"点击连接至控制服务响应 {status['connect_wait_s']:.2f} 秒。")
                 if not self._locally_busy():
                     self._status("已连接")
+            boot = status.get("boot_timing") or {}
+            for key, label in (("ssh_active_monotonic_s", "SSH 服务最近激活"),
+                               ("owner_endpoint_boottime_s", "当前控制服务开始监听")):
+                value = boot.get(key)
+                if type(value) in (int, float) and value > 0 and value != self._logged_boot_times.get(key):
+                    self._logged_boot_times[key] = value
+                    self._log(f"{label}在树莓派本次开机后 {value:.1f} 秒。")
             if self._camera_on_connect and self._camera is None:
                 self._camera_on_connect = False
                 self._start_camera(context.request)
@@ -643,7 +700,7 @@ class _ControlWindow(QMainWindow):
         mode = {"manual": "手动待机", "auto": "自动模式"}.get(owner.get("mode"), "模式未知")
         task = "任务运行中" if status.get("task_active") else "空闲" if _robot_idle(status) else "状态待确认"
         if owner.get("in_flight") is True:
-            task = "动作执行中"
+            task = "开机动作能力检查中" if status.get("boot_probe_in_flight") is True else "动作执行中"
         mcu = {True: "MCU 就绪", False: "MCU 未就绪"}.get(owner.get("mcu_ready"), "MCU 状态未知")
         service = "控制服务就绪" if status.get("prepared") else "控制服务未就绪"
         self.view.robot_status.setText(f"{mode}  ·  {task}\n{mcu}  ·  {service}")
@@ -666,7 +723,8 @@ class _ControlWindow(QMainWindow):
                 self._status("机器人已确认空闲")
 
     def _start_motion(self, command, *, after_update=False):
-        if self._locally_busy() or self._reported_busy():
+        can_yield_probe = command in range(3) and not after_update and self._boot_probe_only()
+        if self._locally_busy() or (self._reported_busy() and not can_yield_probe):
             return
         empty_reset = command == _RESET_EMPTY
         if empty_reset:
@@ -677,14 +735,14 @@ class _ControlWindow(QMainWindow):
                         "并已托住或移走方块。复位完成后再把机器人摆回起点。\n\n确认复位？"
                     )):
                 return
-        elif command not in range(3) or self._needs_empty_reset():
+        elif command not in range(3) or self._needs_empty_reset() or not self.view.drop_yaw.lineEdit().hasAcceptableInput():
             return
         elif after_update:
             request = self._try_request()
             if request is None or not self._confirm(
                 "部署后启动", f"将部署到 {request.target} 的 {request.values['remote_path']}。\n"
                 f"\n{request.deployment_origin}\n\n"
-                f"确认部署成功后自动启动「{_TASK_NAMES[command]}」，放物转角 {self.view.drop_yaw.value():+d}°。\n继续？"
+                f"确认部署成功后自动启动「{_TASK_NAMES[command]}」，放物转角 {int(self.view.drop_yaw.currentText()):+d}°。\n继续？"
             ):
                 return
             self._prepare_deployment(request, command=command)
@@ -698,7 +756,7 @@ class _ControlWindow(QMainWindow):
     def _queue_motion(self, request, command, *, after_update=False, mcu_readback=None, cancelled=None):
         empty_reset = command == _RESET_EMPTY
         task = _Motion(request, command, after_update, cancelled or Event())
-        angle = 0 if empty_reset else self.view.drop_yaw.value()
+        angle = 0 if empty_reset else int(self.view.drop_yaw.currentText())
         self._motion = task
         self._progress.reset(None if empty_reset else command)
         self._render_progress()
@@ -1074,6 +1132,10 @@ class _ControlWindow(QMainWindow):
                 break
             if kind == "log":
                 self._log(outcome)
+            elif kind == "connect_phase":
+                if context is self._probe and self._link == "connecting":
+                    self.view.robot_status.setText(outcome)
+                    self._log(outcome)
             elif kind == "ssh_report":
                 self._latest_report = outcome
                 self._log(f"本机操作报告已保存 · {outcome}")
@@ -1095,6 +1157,7 @@ class _ControlWindow(QMainWindow):
         ):
             event.ignore()
             return
+        self._cancel_connect_wait()
         self._stop_camera()
         self.report_dispatch.ReportDispatch_Close()
         self._poll_timer.stop()

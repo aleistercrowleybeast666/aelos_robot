@@ -1,6 +1,6 @@
 """在原UART owner内预热和接收本机触发，不增加独立守护进程。
 
-启动只加载代码、参数、身份并开放本地socket；不执行stand/begin或恢复旧任务。
+启动预热代码、参数和接口，握手后读取 MCU 动作组回执；不执行 stand/begin 或恢复旧任务。
 每次运动必须由用户显式发新命令，当前任务持有独立参数/源码快照。
 """
 import importlib.util
@@ -84,6 +84,7 @@ class GateBackend:
         self.startup_timing=None
         self.preflight_worker=None
         self.preflight_nonce=None
+        self.boot_probe=False
     def snapshot(self, *, require_mcu=True):
         r=self.gate.status()
         if r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5':raise RuntimeError('R3 owner mismatch')
@@ -186,7 +187,8 @@ class GateBackend:
 
     def call(self,op,timeout):
         preflight=self.preflight_worker
-        if preflight and (threading.current_thread() is not preflight or op not in PROBE_OPS or op in EMPTY_PROBES):
+        if ((self.boot_probe or preflight) and (op not in PROBE_OPS or op in EMPTY_PROBES)
+                or preflight and threading.current_thread() is not preflight):
             raise RuntimeError('only startup capability queries are permitted during sensor preflight')
         manual_only=op in ('begin','begin_standing','begin_align','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES)
         if manual_only:
@@ -213,7 +215,7 @@ class GateBackend:
                     row={'action':op,'submitted_s':time.monotonic()-self.execution_started}
                     self.startup_timing[stage]=row
                     first_stages.append(row)
-        if preflight:
+        if self.boot_probe or preflight:
             # The Condition releases its lock while submit waits for serial I/O.
             # Readers see the nonce and the gate slot under that same lock.
             with self.gate.cv:
@@ -277,9 +279,8 @@ class GateBackend:
         if r['mode']!=expected or r['in_flight']:raise RuntimeError('operation state did not settle')
         for row in first_stages:
             row['protocol_completed_s']=time.monotonic()-self.execution_started
-    def verify_micro(self,timeout):
-        self.check_manual_idle()
-        micro=self.current().get('micro_trial',{})
+    @staticmethod
+    def _registered_probe(micro):
         if micro.get('pickup_backward4_deployment_readback_ready') is True:
             probe=PICKUP_BACKWARD4_PROBE
         elif micro.get('pair_deployment_readback_ready') is True:
@@ -294,7 +295,21 @@ class GateBackend:
             probe=SMALL_STRAFE_PROBE
         else:
             probe='capability'
-        self.call(probe,timeout)
+        return probe
+
+    def verify_micro(self,timeout):
+        self.check_manual_idle()
+        micro=self.current().get('micro_trial',{})
+        probe=self._registered_probe(micro)
+        receipt=micro.get('capability') or {}
+        # Older baseline installations may have answered the optional pair
+        # probe, which the mission gate also accepts as a full route proof.
+        cached=(receipt.get('probe')==probe or
+                receipt.get('probe')==PAIR_PROBE and probe in (CMD0_ROUTE_PROBE,MEDIUM_TURN_PROBE,RIGHT5_ROUTE_PROBE))
+        if cached and self.startup_timing is not None:
+            self.startup_timing['reused_mcu_route_probe']=receipt['probe']
+        else:
+            self.call(probe,timeout)
         state=self.current()
         if not state.get('micro_trial',{}).get('ready'):
             raise RuntimeError('micro capability/guarded trial/recovery not ready BEFORE cleanup: '+json.dumps({k:state.get(k) for k in ('session','epoch','recovery_gate','micro_trial')}))
@@ -323,8 +338,9 @@ class GateBackend:
     def verify_pickup_capabilities(self,timeout):
         self.check_manual_idle()
         micro=self.current()['micro_trial']
-        pair_confirmed=False
-        if (micro['cmd0_route_deployment_readback_ready']
+        pair_confirmed=(self.startup_timing is not None and not micro['pair_deployment_readback_ready']
+                        and self.current().get('mission_v5_pair_ready') is True)
+        if (not pair_confirmed and micro['cmd0_route_deployment_readback_ready']
                 and not micro['pair_deployment_readback_ready']):
             try:
                 self.call(PAIR_PROBE,min(timeout,PAIR_PROBE_TIMEOUT_S))
@@ -457,8 +473,16 @@ class WarmController:
         self.identity=identity or self.check_identity
         self.listener_factory=listener_factory
         self.busy=threading.Lock();self.closed=threading.Event();self.listener=None;self.lockfile=None
+        self.boot_probe_lock=threading.Lock()
+        self.boot_probe_stopped=threading.Event()
+        self.stop_generation=0
+        self.boot_backend=None
+        self.boot_mcu_check={'state':'waiting_for_mcu','checks':{}}
+        self.boot_timing={'owner_session':gate.session,'boot_id':gate.micro.boot_id,
+                          'owner_endpoint_boottime_s':None,'ssh_active_monotonic_s':None}
         self.threads=[];self.active=None;self.prepared=False;self.prepare_error=None
         self.navigation_cache=None;self.navigation_cache_error=None
+        self.navigation_setup_lock=threading.Lock()
         self.socket_path=self.state/'control.sock'
         started=time.monotonic()
         try:
@@ -468,28 +492,83 @@ class WarmController:
             spec=importlib.util.spec_from_file_location('r3_warmed_tasks',self.project/'task_runner.py')
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             self.engine=module
-            runtime_cfg=self.engine.load(self.project/'config/runtime.json')
+            self.boot_runtime_cfg=self.engine.load(self.project/'config/runtime.json')
             micro_record=self.project/'config/micro_mcu_deployment.json'
             self.gate.micro.configure(json.loads(micro_record.read_text(encoding='utf-8')) if micro_record.exists() else None)
             self.prepared=True
-            self.prewarm_navigation(runtime_cfg)
         except Exception as exc:self.prepare_error=str(exc)
         self.prepare_s=time.monotonic()-started
 
-    def prewarm_navigation(self,runtime_cfg):
-        if runtime_cfg.get('persistent_navigation_cache') is not True:return
+    def _read_ssh_boot_timing(self):
         try:
-            import rospy
-            if not rospy.core.is_initialized():raise RuntimeError('ROS not initialized; sensor prewarm deferred')
-            from navigation_cache import PersistentNavigationCache
-            from nav_ros import RosNavigationIO
-            from checkpoint_nav import load as load_navigation
-            cfg=load_navigation(self.project)
-            if not cfg.get('enabled'):return
-            if self.navigation_cache is None:self.navigation_cache=PersistentNavigationCache(RosNavigationIO)
-            self.navigation_cache.prewarm(cfg);self.navigation_cache_error=None
+            from boot_diagnostics import BootTiming_ReadSshReady
+            self.boot_timing['ssh_active_monotonic_s']=BootTiming_ReadSshReady()
+        except Exception:
+            pass  # Optional systemd telemetry.
+
+    def _precheck_boot_mcu(self):
+        checks={}
+        def report(state,**detail):
+            self.boot_mcu_check=dict(state=state,checks=dict(checks),**detail)
+        if not self.gate.micro.deployment_ready():
+            report('deployment_unregistered')
+            return
+        backend=GateBackend(self.gate)
+        backend.boot_probe=True
+        self.boot_backend=backend
+        try:
+            while not self.closed.is_set() and not self.boot_probe_stopped.is_set():
+                if self.busy.locked():
+                    report('deferred_to_task')
+                    return
+                state=self.gate.status()
+                if state['mcu_ready'] and state['mode']=='manual' and not state['in_flight']:
+                    break
+                self.closed.wait(.1)
+            micro=self.gate.status()['micro_trial']
+            probes=[backend._registered_probe(micro)]
+            if micro['cmd0_route_deployment_readback_ready']:
+                probes.append(LEVEL_BACKWARD8_PROBE)
+            if micro['small_strafe_deployment_readback_ready']:
+                probes.append(PLACEMENT_PROFILE_PROBE)
+            for probe in probes:
+                with self.boot_probe_lock:
+                    if self.closed.is_set() or self.boot_probe_stopped.is_set() or self.busy.locked():
+                        report('deferred_to_task')
+                        return
+                    if backend.session is None:
+                        backend.ready()
+                    else:
+                        backend.check_manual_idle()
+                    report('checking',probe=probe)
+                    backend.call(probe,PAIR_PROBE_TIMEOUT_S)
+                    last=backend.current().get('last_result') or {}
+                    checks[probe]='unsupported' if last.get('probe_unavailable') else 'verified'
+            report('complete')
         except Exception as exc:
-            self.navigation_cache_error=str(exc) # Not a sensor-ready claim; explicit start retries.
+            report('deferred_to_task',reason=str(exc))
+        finally:
+            self.boot_backend=None
+
+    def prewarm_navigation(self,runtime_cfg,*,boot=False):
+        if runtime_cfg.get('persistent_navigation_cache') is not True:return
+        with self.navigation_setup_lock:
+            if self.closed.is_set() or boot and (self.busy.locked() or self.navigation_cache is not None):
+                return
+            try:
+                import rospy
+                if not rospy.core.is_initialized():raise RuntimeError('ROS not initialized; sensor prewarm deferred')
+                from navigation_cache import PersistentNavigationCache
+                from nav_ros import RosNavigationIO
+                from checkpoint_nav import load as load_navigation
+                cfg=load_navigation(self.project)
+                if not cfg.get('enabled'):return
+                cache=self.navigation_cache or PersistentNavigationCache(RosNavigationIO)
+                cache.prewarm(cfg)
+                self.navigation_cache=cache
+                self.navigation_cache_error=None
+            except Exception as exc:
+                self.navigation_cache_error=str(exc) # Explicit start retries if needed.
 
     def check_identity(self):
         import re
@@ -503,8 +582,18 @@ class WarmController:
     def status(self):
         active=self.active
         progress=getattr(active.get('backend'),'progress',None) if active else None
+        with self.gate.cv:
+            owner=self.gate.status()
+            backend=self.boot_backend
+            op=owner.get('current_operation') or {}
+            boot_probe_in_flight=bool(owner['mode']=='manual' and owner['in_flight'] and
+                backend and backend.preflight_nonce and op.get('request_nonce')==backend.preflight_nonce
+                and backend.session==owner['session'] and backend.epoch==owner['epoch']
+                and op.get('op') in PROBE_OPS-EMPTY_PROBES and op.get('cancelled') is False)
         return {'protocol':PROTOCOL,'prepared':self.prepared,'prepare_error':self.prepare_error,
-            'prepare_s':self.prepare_s,'navigation_cache_prewarm_error':self.navigation_cache_error,'navigation_cache':self.navigation_cache.status() if self.navigation_cache else {'subscriptions_prepared':False,'error':self.navigation_cache_error,'sensor_health_verified':False},'task_active':self.busy.locked(),'mission_progress':progress,'owner':self.gate.status()}
+            'boot_mcu_check':self.boot_mcu_check,'boot_probe_in_flight':boot_probe_in_flight,
+            'boot_timing':dict(self.boot_timing),
+            'prepare_s':self.prepare_s,'navigation_cache_prewarm_error':self.navigation_cache_error,'navigation_cache':self.navigation_cache.status() if self.navigation_cache else {'subscriptions_prepared':False,'error':self.navigation_cache_error,'sensor_health_verified':False},'task_active':self.busy.locked(),'mission_progress':progress,'owner':owner}
 
     def config(self,value=None):
         path=(self.project/'config/runtime.json') if value is None else Path(value)
@@ -515,6 +604,9 @@ class WarmController:
 
     def start_job(self,config=None,mode='stage1',stop_after=None,*,idle_only=False,drop_yaw_deg=None):
         if not self.prepared:raise RuntimeError('owner preparation failed: '+str(self.prepare_error))
+        with self.gate.cv:
+            stop_generation=self.stop_generation
+            start_epoch=self.gate.epoch
         if mode=='stand' and (self.busy.locked() or self.gate.status().get('mode')=='auto'):
             if idle_only:raise RuntimeError('empty reset requires idle; no active task cancelled')
             # 只取消余链；绝不把站姿排在未知的在途动作后自动执行。
@@ -526,6 +618,10 @@ class WarmController:
         prepare_started=time.monotonic()
         backend=None
         try:
+            # A cold start submitted during one asynchronous alias query waits
+            # for its ordered completion. No other boot alias may follow it.
+            with self.boot_probe_lock:
+                self.boot_probe_stopped.set()
             self.identity() # 每次任务仍检查实际机体身份
             if mode in ('0','1','2','stage1','0-full'):
                 self.gate.require_empty_start()
@@ -536,6 +632,9 @@ class WarmController:
                 cfg=dict(cfg,transfer_test=dict(cfg.get('transfer_test',{}),stop_after=stop_after))
             plan=self.engine.prepare(mode,cfg,self.project) # 未实现区域在动作前拒绝
             backend=GateBackend(self.gate);backend.ready()
+            if mode in ('0','1','2','stage1','0-full'):
+                with self.gate.cv:
+                    self.gate.micro.reserve_task_window(cfg.get('journey_timeout_s',480))
             from turn_estimator import MICRO_FILTER_ALPHA, MICRO_INITIAL_DEG, TurnEstimator
             from micro_trial import response_limit
             response_bound=response_limit(plan.get('navigation',{}).get('post_action_heading',{}))
@@ -569,7 +668,10 @@ class WarmController:
             if mode in ('0','1','2','stage1'):
                 backend.startup_timing={'owner_prepare_s':time.monotonic()-prepare_started}
             job={'done':threading.Event(),'cancel':threading.Event(),'result':None,'backend':backend,'cfg':cfg,'plan':plan,'thread':None}
-            self.active=job
+            with self.gate.cv:
+                if self.closed.is_set() or self.stop_generation!=stop_generation or self.gate.epoch!=start_epoch:
+                    raise RuntimeError('task cancelled during startup preparation')
+                self.active=job
             return job
         except BaseException:
             if backend is not None and getattr(backend,'navigation_lease',None) is not None:backend.navigation_lease.close()
@@ -617,10 +719,16 @@ class WarmController:
             self.socket_path.unlink() # 独占锁确认没有本代码的活跃端点
         self.listener=self.listener_factory() if self.listener_factory else socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         self.listener.bind(str(self.socket_path));self.listener.listen(4);self.listener.settimeout(.2)
+        if hasattr(time,'CLOCK_BOOTTIME'):
+            self.boot_timing['owner_endpoint_boottime_s']=time.clock_gettime(time.CLOCK_BOOTTIME)
         if os.name!='nt':
             if effective_uid()==0:os.chown(str(self.socket_path),0,1000)
             os.chmod(str(self.socket_path),0o660)
         thread=threading.Thread(target=self.serve,name='r3-local-trigger',daemon=True);thread.start();self.threads.append(thread)
+        for name,target in (('r3-boot-capabilities',self._precheck_boot_mcu),
+                            ('r3-boot-sensors',lambda:self.prewarm_navigation(self.boot_runtime_cfg,boot=True)),
+                            ('r3-boot-ssh-timing',self._read_ssh_boot_timing)):
+            thread=threading.Thread(target=target,name=name,daemon=True);thread.start();self.threads.append(thread)
 
     def serve(self):
         while not self.closed.is_set():
@@ -670,6 +778,8 @@ class WarmController:
             if request.get('op')=='probe_pair':
                 if not self.busy.acquire(False):raise RuntimeError('task active; cannot probe MCU')
                 try:
+                    with self.boot_probe_lock:
+                        self.boot_probe_stopped.set()
                     self.identity()
                     backend=GateBackend(self.gate);backend.ready()
                     try:
@@ -683,9 +793,12 @@ class WarmController:
                 finally:self.busy.release()
                 return
             if request.get('op')=='stop':
-                active=self.active
-                if active:self.cancel_job(active)
-                else:self.gate.cancel('explicit stop while idle; recovery acknowledgment invalidated');self.gate.publish()
+                with self.gate.cv:
+                    self.stop_generation+=1
+                    self.boot_probe_stopped.set()
+                    active=self.active
+                    if active:self.cancel_job(active)
+                    else:self.gate.cancel('explicit stop while idle; recovery acknowledgment invalidated');self.gate.publish()
                 self.send(conn,{'event':'stopped','status':'stop_requested' if active else 'already_idle','native_immediate_stop':False});return
             if request.get('op')!='start' or request.get('mode') not in ('0','1','2','0-full','stage1','stand','test-left','test-right','test-small-left','test-small-right','test-turn-left','test-turn-right','test-micro-left','test-micro-right','test-medium-left','test-medium-right') or request.get('legacy_after_home') not in (None,'0'):raise RuntimeError('unknown explicit command')
             if request.get('mode') in ('test-medium-left','test-medium-right') and request.get('legacy_after_home') is not None:raise RuntimeError('medium turn calibration requires a standalone command')
@@ -726,13 +839,20 @@ class WarmController:
 
     def close(self):
         self.closed.set()
+        self.boot_probe_stopped.set()
+        with self.gate.cv:
+            backend=self.boot_backend
+            if (backend and backend.preflight_nonce and self.gate.current
+                    and self.gate.current.get('request_nonce')==backend.preflight_nonce):
+                self.gate.cancel('owner shutdown during boot capability query')
         if self.active:self.cancel_job(self.active)
-        if self.navigation_cache is not None:self.navigation_cache.close()
         if self.listener:
             self.listener.close();self.listener=None
             try:self.socket_path.unlink()
             except FileNotFoundError:pass
         if self.lockfile:self.lockfile.close();self.lockfile=None
+        with self.navigation_setup_lock:
+            if self.navigation_cache is not None:self.navigation_cache.close()
 
 
 def install(gate):

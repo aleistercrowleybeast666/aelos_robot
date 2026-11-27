@@ -141,8 +141,12 @@ class ControlWindowTests(unittest.TestCase):
         self.assertFalse(self.view.task_buttons[0].isEnabled())
         self.assertIn("SSH 登录被拒绝", self.view.log.toPlainText())
 
-    def test_initial_ssh_reset_retries_once_and_reaches_connected_state(self):
-        replies = iter((control_window.SshLinkError("WinError 10054"), _status()))
+    def test_cold_boot_waits_for_ssh_then_owner_then_enables_routes(self):
+        replies = iter((control_window.SshLinkError("WinError 10054"),
+                        control_window.SshLinkError("WinError 10054"),
+                        {"ok":False,"status":"owner_socket_starting"},
+                        {"ok":False,"status":"not_started_or_stopped","reason":"[Errno 111] Connection refused"},
+                        dict(_status(), boot_timing={"owner_endpoint_boottime_s":36.2,"ssh_active_monotonic_s":14.7})))
 
         def status():
             reply = next(replies, _status())
@@ -157,9 +161,58 @@ class ControlWindowTests(unittest.TestCase):
                 self.view.connection_button.click()
                 self._until(lambda: self.view.connection_label.text() == "已连接")
         log = self.view.log.toPlainText()
-        self.assertEqual(log.count("正在重试一次连接"), 1)
+        self.assertEqual(log.count("正在等待 SSH 上线"), 1)
+        self.assertEqual(log.count("正在等待 R3 控制服务上线"), 1)
+        self.assertIn("14.7 秒",log)
+        self.assertIn("36.2 秒",log)
         self.assertNotIn("机器人离线", log)
         self.assertTrue(self.view.task_buttons[0].isEnabled())
+
+    def test_cold_boot_wait_can_be_cancelled_and_late_reply_is_ignored(self):
+        queried, reply = Event(), Event()
+        def status():
+            queried.set()
+            reply.wait(2)
+            return _status()
+        self.view.password.setText("test-credential")
+        with patch.object(control_window, "_robot_api", return_value=SimpleNamespace(status=status)):
+            self.view.connection_button.click()
+            self._until(queried.is_set)
+            self.view.connection_button.click()
+            reply.set()
+            self._until(lambda: not self.window._events.empty())
+            self.window._drain()
+        self.assertFalse(self.view.task_buttons[0].isEnabled())
+        self.assertIsNone(self.window._session)
+        self.assertEqual(self.window._link, "disconnected")
+
+    def test_cold_boot_deadline_and_nontransient_errors(self):
+        for result, label in ((control_window.SshLinkError("unreachable"), "机器人离线"),
+                              ({"status":"owner_socket_starting"}, "连接失败"),
+                              ({"status":"not_started_or_stopped","reason":"Robot3 CPU+machine identity mismatch"}, "连接失败")):
+            with self.subTest(result=result):
+                def status():
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+                self.view.password.setText("test-credential")
+                with patch.object(control_window, "_BOOT_CONNECT_WINDOW_S", 0), patch.object(
+                        control_window, "_robot_api", return_value=SimpleNamespace(status=status)):
+                    self.view.connection_button.click()
+                    self._until(lambda: self.view.connection_label.text() == label)
+                    self.assertFalse(self.view.task_buttons[0].isEnabled())
+
+    def test_read_only_boot_probe_can_yield_to_route_but_not_deployment(self):
+        state = dict(_status(), boot_probe_in_flight=True)
+        state["owner"]["in_flight"] = True
+        self.view.password.setText("test-credential")
+        with patch.object(control_window, "_robot_api", return_value=SimpleNamespace(status=lambda:state)):
+            self.view.connection_button.click()
+            self._until(lambda: self.view.connection_label.text() == "已连接")
+            self.assertTrue(self.view.task_buttons[1].isEnabled())
+            self.assertFalse(self.view.pi_buttons["deploy"].isEnabled())
+            state["boot_probe_in_flight"] = False
+            self._until(lambda: not self.view.task_buttons[1].isEnabled())
 
     def test_connected_mcu_not_ready_allows_fresh_preflight_and_explains_rejection(self):
         def status():
@@ -237,8 +290,16 @@ class ControlWindowTests(unittest.TestCase):
         with patch.object(control_window, "_robot_api", return_value=api):
             self.view.connection_button.click()
             self._until(lambda: self.view.task_buttons[2].isEnabled())
-            self.assertEqual(self.view.drop_yaw.value(), 0)
-            self.view.drop_yaw.setValue(-15)
+            choices = self.view.drop_yaw
+            self.assertEqual([choices.itemText(i) for i in range(choices.count())], ["-90", "-45", "0", "+45", "+90"])
+            self.assertEqual(choices.currentText(), "0")
+            choices.setCurrentIndex(4)
+            self.assertTrue(self.view.task_buttons[2].isEnabled())
+            for bad in ("", "-", "+", "91", "1.5"):
+                choices.setEditText(bad)
+                self.assertFalse(self.view.task_buttons[2].isEnabled())
+                self.assertFalse(self.view.update_start_button.isEnabled())
+            choices.setEditText("-15")
             self.view.task_buttons[2].click()
             self._until(lambda: self.window._motion is None)
             self.assertEqual(captured, [(2, -15)])

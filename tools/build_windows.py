@@ -63,6 +63,9 @@ def main():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(root / relative, target)
         shutil.copyfile(PROJECT / 'README.md', folder / 'README.md')
+        (folder / 'docs').mkdir(exist_ok=True)
+        for name in ('checkpoint-search.md', 'chest-optics.md'):
+            shutil.copyfile(PROJECT / 'docs' / name, folder / 'docs' / name)
         package_licenses(folder / 'THIRD_PARTY_LICENSES')
         archive = Path(shutil.make_archive(str(scratch / ARCHIVE_NAME), 'zip', folder.parent, folder.name))
         artifact = output / archive.name

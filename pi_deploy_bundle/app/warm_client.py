@@ -18,7 +18,7 @@ def main(argv=None,connector=None):
     p.add_argument('--idle-only',action='store_true',help='stand 只在空闲时执行')
     from transfer_test import BOUNDARIES
     p.add_argument('--stop-after',choices=BOUNDARIES)
-    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 −30 至 +30 度')
+    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 -90 至 +90 度，按约 30 度一大转就近执行')
     p.add_argument('--owner-session');p.add_argument('--owner-epoch',type=int);p.add_argument('--operator')
     for flag in ('cooled','mechanism-checked','single-target','guard-reload-checked','guarded-single-trial','stop-limits-understood'):p.add_argument('--'+flag,action='store_true')
     g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--simulate',action='store_true');g.add_argument('--device-check',action='store_true')
@@ -51,7 +51,15 @@ def main(argv=None,connector=None):
         identity()
         conn=connector() if connector else socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         conn.settimeout(5)
-        if connector is None:conn.connect(str(SOCKET))
+        if connector is None:
+            try:
+                conn.connect(str(SOCKET))
+            except (FileNotFoundError, ConnectionRefusedError) as exc:
+                if a.mode == 'status' and not a.device_check:
+                    print(json.dumps({'status':'owner_socket_starting','reason':str(exc),
+                                      'accepted':False,'body_commands':0}),file=sys.stderr)
+                    return 1
+                raise
         request={'protocol':PROTOCOL,'op':'status' if a.device_check or a.mode in ('status','cooling-check','readiness') else ('stop' if a.mode=='stop' else 'start'),'mode':a.mode,'legacy_after_home':a.legacy_after_home}
         if a.drop_yaw_deg and request['op']=='start':request['drop_yaw_deg']=a.drop_yaw_deg
         if a.idle_only:request['idle_only']=True
@@ -90,7 +98,8 @@ def main(argv=None,connector=None):
                         row=report(ROOT,row)
                     print(json.dumps(dict(row,body_commands=0,read_only=True)));return 0
                 r=row.get('owner',{})
-                if row.get('protocol')!=PROTOCOL or not row.get('prepared') or row.get('task_active') or r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5' or not r.get('mcu_ready') or r.get('mode')!='manual' or r.get('in_flight') or not 0<=time.time()-r.get('published_at_s',0)<=2:raise RuntimeError('warm owner/MCU is not ready and idle')
+                body_busy=r.get('in_flight') and row.get('boot_probe_in_flight') is not True
+                if row.get('protocol')!=PROTOCOL or not row.get('prepared') or row.get('task_active') or r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5' or not r.get('mcu_ready') or r.get('mode')!='manual' or body_busy or not 0<=time.time()-r.get('published_at_s',0)<=2:raise RuntimeError('warm owner/MCU is not ready and idle')
                 print(json.dumps(dict(row,body_commands=0,client_elapsed_s=time.monotonic()-started)));return 0
             elif event in ('recovery_confirmed','micro_confirmed'):
                 print(json.dumps(row));return 0

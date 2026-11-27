@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSettings, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
+from PySide6.QtCore import QLocale, QPoint, QRect, QSettings, Qt
+from PySide6.QtGui import QColor, QImage, QIntValidator, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QStyle,
     QStyleOptionComboBox,
     QTabWidget,
@@ -239,10 +238,19 @@ class ControlView(QWidget):
 
         tasks, task_layout = _Panel_Create("自动任务")
         angle_row = QHBoxLayout()
-        angle_label = _Label_Create("放物转角（负左，正右）")
-        self.drop_yaw = QSpinBox()
-        self.drop_yaw.setRange(-DROP_YAW_LIMIT_DEG, DROP_YAW_LIMIT_DEG)
-        self.drop_yaw.setSuffix("°")
+        angle_label = _Label_Create("放物转角（度，负左正右）")
+        self.drop_yaw = _ConsoleComboBox()
+        self.drop_yaw.setEditable(True)
+        self.drop_yaw.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.drop_yaw.setCompleter(None)
+        self.drop_yaw.addItems(["-90", "-45", "0", "+45", "+90"])
+        self.drop_yaw.setCurrentIndex(self.drop_yaw.findText("0"))
+        validator = QIntValidator(-DROP_YAW_LIMIT_DEG, DROP_YAW_LIMIT_DEG, self.drop_yaw)
+        number_locale = QLocale.c()
+        number_locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
+        validator.setLocale(number_locale)
+        self.drop_yaw.setValidator(validator)
+        self.drop_yaw.lineEdit().setPlaceholderText("-90 至 +90")
         self.drop_yaw.setAccessibleName(angle_label.text())
         angle_label.setBuddy(self.drop_yaw)
         angle_row.addWidget(angle_label)

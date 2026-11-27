@@ -15,7 +15,7 @@ from . import deploy, settings
 
 
 _ROUTES = frozenset({'0', '1', '2'})
-DROP_YAW_LIMIT_DEG = 30
+DROP_YAW_LIMIT_DEG = 90
 _ACCEPTED_PREFIX = 'R3 command accepted;'
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STATUS_TIMEOUT_S = 8
@@ -47,7 +47,7 @@ def _cancelled(event):
 
 def DropYaw_Validate(degrees):
     if type(degrees) is not int or abs(degrees) > DROP_YAW_LIMIT_DEG:
-        raise ValueError('放物转角须为 -30 到 +30 之间的整数度。')
+        raise ValueError('放物转角须为 -90 到 +90 之间的整数度。')
     return degrees
 
 

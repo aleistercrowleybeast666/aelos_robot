@@ -61,11 +61,18 @@ class Gate:
         self.recovery=RecoveryGate(self.session,self.clock)
         self.micro=MicroGate(self.session,self.clock,boot_id)
 
+    def _invalidate_idle_contact(self):
+        self._empty_stand_receipt=None
+        # The MCU can stay silent during a long physical macro. A gap while
+        # genuinely idle, however, may be a board restart or replacement.
+        if self.mode=='manual' and self.current is None:
+            self.micro.clear_capabilities()
+
     def status(self):
         with self.cv:
             contact_age=self.clock()-self.last_hello if self.seen_bridge else None
             if contact_age is None or not 0<=contact_age<=2.5:
-                self._empty_stand_receipt=None
+                self._invalidate_idle_contact()
             recovery=self.recovery.status(self.epoch)
             pair_ready=self.micro.pair_ready(self.epoch,recovery['ready'])
             return {'schema':'r3.simple.v1','robot_id':3,'session':self.session,'epoch':self.epoch,
@@ -146,7 +153,7 @@ class Gate:
         if not isinstance(params,list) or len(params)!=1 or type(params[0]) is not int:return 0
         raw=params[0]
         if raw//256==WIRE_BASE//256:
-            if not 0<=self.clock()-self.last_hello<=2.5:self._empty_stand_receipt=None
+            if not 0<=self.clock()-self.last_hello<=2.5:self._invalidate_idle_contact()
             self.seen_bridge=True;self.last_hello=self.clock();self.last_hello_source='request'
             return raw%256
         return raw if 0<=raw<=255 else 0
@@ -234,7 +241,7 @@ class Gate:
     def completed(self):
         with self.cv:
             if self.seen_bridge:
-                if not 0<=self.clock()-self.last_hello<=2.5:self._empty_stand_receipt=None
+                if not 0<=self.clock()-self.last_hello<=2.5:self._invalidate_idle_contact()
                 self.last_hello=self.clock()
                 self.last_hello_source='complete'
             c=self.current
@@ -344,7 +351,11 @@ class Gate:
                 self.current=None
                 if op=='finish':
                     self.recovery.clear('task ended; new physical inspection acknowledgment required')
-                    self.micro.clear()
+                    self.micro.permit=None
+                    # A return probe also tested the MCU's empty posture at
+                    # the time. A new trip will verify its own empty return.
+                    self.micro.empty_recovery_receipt=None
+                    self.micro.empty_group_receipt=None
                 if op in ('finish','stand'):
                     self.mode='manual';self.reason='normal stand request finished; MCU load set empty; physical pose unverified' if op=='stand' else 'chain finished'
             elif not c['dispatched'] or c['drained']:

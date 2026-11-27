@@ -617,6 +617,21 @@ class _OutboundPickupRobot(MissionRobot):
         except OSError as exc:
             raise BlockFrameUnavailable('胸部相机暂时无法连接：'+str(exc)) from exc
 
+    def subscribe_staged_camera(self):
+        """Buffer post-begin images while the stationary robot establishes its empty heading."""
+        self.check()
+        try:
+            self.camera = self._open_block_camera(count_only=True)
+            stamp = self.camera.ros_now_ns()
+        except (BlockFrameUnavailable, OSError):
+            # The normal count window retries this optional early subscription.
+            if self.camera is not None:
+                self.camera.close()
+                self.camera = None
+            return
+        self.observation_floor = max(self.observation_floor, self.clock())
+        self.observation_ros_floor = max(self.observation_ros_floor, stamp)
+
     def _create_pickup_camera(self,count_only):
         vision = self.mission.get('staged_vision')
         trial_alignment = not self.outbound_only and self.deliveries>0
@@ -781,6 +796,8 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
         backend.call('begin', timeout)
         if not Cmd0Motion_ContinuousReady(backend):
             raise NotReady('continuous backward/lateral/outbound capability unavailable before pickup')
+        if not simulation:
+            robot.subscribe_staged_camera()
         while True:
             robot.prepare_heading_segment()
             guard = robot.heading_guard
