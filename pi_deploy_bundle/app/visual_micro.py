@@ -123,6 +123,8 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
         unavailable_windows=0
         obs=summarize(window,tag_id,cfg,after_ns)
         obs.update(now_ns=window_now,after_ns=max(after_ns,window.get('after_ns',0)),
+                   decoded_expected_frames=window.get('detector_observed_expected_frames',
+                                                      window.get('detector_expected_frames')),
                    camera_healthy=True,contract_match=True)
         trusted=(obs['ids']==[tag_id] and obs.get('pose_usable')
                  and (obs.get('position_usable') or obs.get('heading_only'))

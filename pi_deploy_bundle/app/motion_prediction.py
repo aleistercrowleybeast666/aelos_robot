@@ -139,6 +139,15 @@ def select_turn(*, error_deg, captured_at_s, now_s, candidates, estimator,
                 pickup_trial=(kind=='micro' and c.get('pickup_retreat_trial') is True
                               and abs(error+delta)<=preferred_residual_band_deg
                               and worst_residual<=abs(error)+1e-9)
+                if (not pickup_trial and kind=='micro' and c.get('pickup_retreat_trial') is True
+                        and c.get('pickup_residual_confirmed') is True and c.get('adaptive_feedback') is True):
+                    # With no measured response for this load/direction the MCU's nominal
+                    # stroke can be useful even when the broad startup interval is not.
+                    # A learned response always supersedes the nominal one.
+                    trial_delta = nominal if not estimate or estimate.get('source')=='adaptive_micro_prior' else delta
+                    if lower <= abs(trial_delta) <= upper and abs(error + trial_delta) <= abs(error) - min_improvement_deg:
+                        delta = trial_delta
+                        pickup_trial = True
                 if not pickup_trial:
                     rejected[name]='insufficient_worst_case_improvement';continue
             adaptive_interval_verified=original_prediction is None
@@ -169,6 +178,8 @@ def select_turn(*, error_deg, captured_at_s, now_s, candidates, estimator,
                              original_prediction=original_prediction)
         if pickup_trial:
             candidate['pickup_retreat_trial']=True
+            if c.get('pickup_residual_confirmed'):
+                candidate['pickup_residual_confirmed']=True
         accepted.append(candidate)
     if not accepted:return dict(status='no_safe_candidate',action=None,rejected=rejected)
     def score(item):

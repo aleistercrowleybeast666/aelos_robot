@@ -528,7 +528,8 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
         else:
             status = 'dispatch_unavailable'
     check['compensation_status'] = status
-    if initial is not None and abs(initial[0]) <= deadband:
+    turn_band = heading_cfg.get('release_deg', deadband) if reuse_side_sample else deadband
+    if initial is not None and abs(initial[0]) <= turn_band:
         return CorridorLateralHeadingResult.PROCEED
     recover_heading = (getattr(robot, 'corridor_recover_tag2_heading', robot.corridor_recover_heading)
                        if tag2_to_tag3 else robot.corridor_recover_heading)

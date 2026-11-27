@@ -826,7 +826,7 @@ class HeadingGuard:
 
     def _correction_target_deg(self,name,recovery):
         # Check the settled retreat more closely before the long lateral leg.
-        if name=='pickup_retreat_complete' and recovery and not self.budget.limit_total_angle:
+        if name in PICKUP_HEADING_ACTIONS and recovery and not self.budget.limit_total_angle:
             return self.c['release_deg']
         if name=='planned_turn_complete' and recovery and not self.budget.limit_total_angle:
             return self.c['minimum_improvement_deg']
@@ -834,7 +834,8 @@ class HeadingGuard:
 
     def _can_recheck_carry(self,report):
         error=report.get('error_deg')
-        return (type(error) in (int,float) and abs(error)>self.c['deadband_deg']
+        target=self._correction_target_deg(report.get('action'), True)
+        return (type(error) in (int,float) and abs(error)>target
                 and not self.blocked and not self.budget.locked
                 and self.count<self.c['max_actions_per_journey'] and self.budget.actions<self.budget.max_actions
                 and (report.get('motion_prediction',{}).get('status')=='no_safe_candidate'
@@ -1071,15 +1072,19 @@ class HeadingGuard:
                     if exc.report and 'decision_timing' in exc.report:
                         report['rejected_decision_timing'] = exc.report['decision_timing']
                 if recheck and report.get('correction_actions',0)==0 and self._can_recheck_carry(report):
-                    if self._allow_configured_carry_followup(report,entry_followup,load):
+                    if name not in PICKUP_HEADING_ACTIONS and self._allow_configured_carry_followup(report,entry_followup,load):
                         reports.append(report)
                         break
                     first=report
                     recheck=False
                     cooldown=max(0.,self.c['cooldown_s']-(self.clock()-self.last_action))
                     if cooldown:self.io.settle(cooldown,self.check)
+                    pickup_check = (name in PICKUP_HEADING_ACTIONS
+                                    and first.get('motion_prediction',{}).get('status') == 'no_safe_candidate')
+                    # Stationary sampling starts after the current clock time, beyond the first window.
                     report=self._after_action_once(name,load,correct,allow_correction,
                                                    sample_override=self.sample(load,stationary_retry=True),
+                                                   pickup_first_error=first['error_deg'] if pickup_check else None,
                                                    excluded_turns=excluded_turns,prefer_visual_followup=prefer_visual_followup)
                     report['stationary_recheck']={'first_error_deg':first['error_deg'],'reason':first.get('reason')}
                     self._allow_short_transfer_segment(first,report)
@@ -1162,12 +1167,13 @@ class HeadingGuard:
         return reports[0]
 
     def _after_action_once(self, name, load, correct, allow_correction=True, sample_override=None,action_completed_monotonic=None,
-                           *,excluded_turns=None,prefer_visual_followup=None):
+                           *,excluded_turns=None,prefer_visual_followup=None,pickup_first_error=None):
         """Preserve this step's evidence even when the backend interrupts a turn or its measurement."""
         report = {'status': 'monitor_only', 'action': name, 'correction_actions': 0}
         try:
             return self._observe_and_correct(report, name, load, correct, allow_correction, sample_override,
-                action_completed_monotonic, excluded_turns=excluded_turns, prefer_visual_followup=prefer_visual_followup)
+                action_completed_monotonic, excluded_turns=excluded_turns, prefer_visual_followup=prefer_visual_followup,
+                pickup_first_error=pickup_first_error)
         except MicroTrialStopped:
             raise  # These errors already carry sensor-specific diagnostics.
         except Exception as exc:
@@ -1185,7 +1191,7 @@ class HeadingGuard:
             raise
 
     def _observe_and_correct(self, report, name, load, correct, allow_correction, sample_override,
-                             action_completed_monotonic, *, excluded_turns, prefer_visual_followup):
+                             action_completed_monotonic, *, excluded_turns, prefer_visual_followup, pickup_first_error):
         if sample_override is None and name=='planned_turn_complete' and self._confirmed_coarse_response is not None:
             completed,result,confirmed=self._confirmed_coarse_response
             self._confirmed_coarse_response=None
@@ -1306,6 +1312,11 @@ class HeadingGuard:
                 (not self.latched or abs(error)<=self.c['deadband_deg'])):
             report['reason'] = 'within deadband/hysteresis'
             return report
+        if pickup_first_error is not None and (pickup_first_error * error <= 0
+                or abs(error - pickup_first_error) > _STATIONARY_HEADING_SPREAD_DEG):
+            report.update(reason='pickup residual changed during stationary confirmation',
+                          reason_zh='起步小偏差两次静测不一致，按最新航向在下一组复查。')
+            return report
         if abs(error) > self.c['max_error_deg'] and not route_feedback:
             self.fault('heading error exceeds configured trial envelope: error=%s limit=%s' % (error,self.c['max_error_deg']),report)
         if load=='empty' and route_feedback:
@@ -1332,6 +1343,7 @@ class HeadingGuard:
                 adaptive_feedback=micro_trial.adaptive(self.c),bounded_crossing_feedback=recovery,
                 pickup_retreat_trial=(name in PICKUP_HEADING_ACTIONS and route_feedback and residual_driven
                     and (bool(anchor.get('pickup_approach_heading')) or (anchor.get('tag_departure') or {}).get('tag_id')==1)),
+                pickup_residual_confirmed=pickup_first_error is not None,
                 stop_on_possible_overshoot=self.c.get('stop_on_possible_overshoot',False))
                 for n,d in gains.items() if excluded_turns is None or n not in excluded_turns}
             # Medium corrections use stationary magnetic feedback at a configured carry

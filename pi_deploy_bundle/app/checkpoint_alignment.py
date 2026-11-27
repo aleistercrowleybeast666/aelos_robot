@@ -31,7 +31,7 @@ class RouteTagHeadingRebaseResult(Enum):
     UNAVAILABLE = 'unavailable'
 
 
-def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reserved_actions=0):
+def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reserved_actions=0, pickup_retreat=False):
     """Submit one camera-guided micro turn without relying on a magnetic reference."""
     from micro_trial import OPS
     from turn_estimator import MICRO_INITIAL_DEG
@@ -53,6 +53,12 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
         # fresh pose and clearance. The requested action is one micro turn.
         return None
     trigger = _TAG3_VISUAL_MICRO_TRIGGER_DEG if tag_id == 3 else visual['deadband_deg']
+    stance = getattr(robot, 'last_action_completed_ros_ns', None)
+    current_stance = type(stance) is int and type(observed_at_ns) is int and observed_at_ns > stance
+    pickup_retreat = (pickup_retreat and tag_id == 1 and current_stance
+                      and getattr(robot,'route_command',None) in ('1','2'))
+    if pickup_retreat:
+        trigger = cfg['post_action_heading']['release_deg']
     if abs(error) <= trigger:
         return None
     gains=visual['signed_nominal_delta_deg']
@@ -62,8 +68,6 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
     if name is None:
         return None
     selection_response = bound
-    stance = getattr(robot, 'last_action_completed_ros_ns', None)
-    current_stance = type(stance) is int and type(observed_at_ns) is int and observed_at_ns > stance
     feedback_estimate = (tag_id in (2,3,4) or
                          current_stance and robot.cfg.get('route_steps',{}).get('continue_estimated_route') is True)
     if feedback_estimate:
@@ -79,6 +83,8 @@ def Checkpoint_TurnFromTagHeading(robot, tag_id, error, observed_at_ns, *, reser
             anchor.get('calibration_id',''), now_s=robot.clock()) if estimator is not None else None
         if measured is not None:
             selection_response = abs(measured['degrees'])
+        if pickup_retreat and (not measured or measured.get('source') == 'adaptive_micro_prior'):
+            selection_response = abs(gains[name])
     if abs(abs(error)-selection_response)>abs(error)-improvement:
         return None
     timeout=robot.cfg['request_timeout_s']

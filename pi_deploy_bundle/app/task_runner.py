@@ -25,6 +25,7 @@ class NotReady(RuntimeError):pass
 
 class _Tag1ReacquireResult(Enum):
     ADVANCE_UNSEEN = 'advance_unseen'
+    RETREAT_UNSEEN = 'retreat_unseen'
     ADVANCE_FAR = 'advance_far'
     RETREAT_NEAR = 'retreat_near'
     WAIT_CAMERA = 'wait_camera'
@@ -391,8 +392,9 @@ class Robot:
         self.last_heading_report=None
         self.action(name,monitor_only_as='corridor_side_boundary')
 
-    def Route_TurnFromTagHeading(self, tag_id, error, observed_at_ns, *, reserved_actions=0):
-        return Checkpoint_TurnFromTagHeading(self, tag_id, error, observed_at_ns, reserved_actions=reserved_actions)
+    def Route_TurnFromTagHeading(self, tag_id, error, observed_at_ns, *, reserved_actions=0, pickup_retreat=False):
+        return Checkpoint_TurnFromTagHeading(self, tag_id, error, observed_at_ns, reserved_actions=reserved_actions,
+                                            pickup_retreat=pickup_retreat)
 
     def Route_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns, *, direction=None):
         return Checkpoint_RebaseTagHeading(self, tag_id, error_deg, observed_at_ns, direction=direction)
@@ -1261,7 +1263,7 @@ class Robot:
                                allow_missing_magnetic=self._allows_missing_magnetic(), allow_double=pair_route_enabled,
                                defer_heading_at_deg=defer_heading_at_deg)
         controller.allow_unobserved_tag=tag_id==1 and not metric_departure and self._allows_unobserved_tag()
-        forward_search=(not metric_departure and defer_visual_prediction and self._tag1_prefers_forward_search(tag_id)
+        entry_probe=(not metric_departure and defer_visual_prediction and self._tag1_supports_entry_probe(tag_id)
                         and cfg['visual_micro'].get('execute') and cfg['visual_micro'].get('confirmed_target_id')==tag_id)
         approach={'target_id':tag_id,'completed_actions':[],'observations':[]}
         stance_evidence={}
@@ -1276,9 +1278,10 @@ class Robot:
             turns=[]
             retried_camera_gap=False
             idle_windows=0
+            recheck_motion=False
             while True:
                 self.check()
-                windows=1 if forward_search else 1+cfg['visual_micro']['max_reobserve_windows']
+                windows=1 if entry_probe else 1+cfg['visual_micro']['max_reobserve_windows']
                 deadline=min(self.deadline,self.clock()+cfg['settle_s']+windows*cfg['observe_s'])
                 try:
                     result=VisualMicro_ObserveWithoutMagnetic(cfg,nav.io,tag_id,goal,
@@ -1292,9 +1295,15 @@ class Robot:
                     retried_camera_gap=True
                     self.events.append({'visual_camera_gap_recheck':{'tag_id':tag_id,**last_window}})
                     continue
-                if forward_search:
+                if entry_probe:
                     from entrance_trial import EntranceTrial_RecoverGroundHeading
                     result=EntranceTrial_RecoverGroundHeading(self,nav,result)
+                    if recheck_motion:
+                        view=result.get('scan',{})
+                        approach['observations'].append({'scan_status':view.get('status'),
+                            'decoded_expected_frames':view.get('decoded_expected_frames'),
+                            'accepted_expected_frames':view.get('samples')})
+                        recheck_motion=False
                 if (metric_departure or result.get('pose_accepted') or result.get('heading_aligned')
                         or result.get('status')=='blocked' or not result.get('scan_attempted')):
                     if result.get('pose_accepted'):
@@ -1324,14 +1333,17 @@ class Robot:
                 recovery['windows']+=result['observation_windows']
                 recovery['last_scan']=result['scan']
                 completed_groups=approach.get('motion_groups',0)
-                if forward_search:
+                if entry_probe:
                     scan=result.get('scan') or {}
                     result=dict(result,tag_observation={'camera_healthy':scan.get('camera_healthy'),
                                                         'contract_match':scan.get('contract_match')})
-                    result=self._advance_to_reacquire_tag1(nav,goal,result,self.deadline,approach,stance_evidence)
+                    # This observer checks both the fresh ID and yaw after each move.
+                    self._advance_to_reacquire_tag1(nav,goal,result,self.deadline,approach,stance_evidence,
+                                                    reobserve_in_caller=True)
                     recovery['last_scan']=result['scan']
                 if approach.get('motion_groups',0)>completed_groups:
                     idle_windows=0
+                    recheck_motion=True
                 else:
                     idle_windows+=1
                     if idle_windows>=_TAG1_IDLE_REOBSERVATIONS:
@@ -1382,7 +1394,7 @@ class Robot:
                     and cfg['visual_micro'].get('confirmed_target_id')==tag_id)
                 def needs_reobserve(result):
                     status=result.get('scan',{}).get('status')
-                    return status in _TAG1_REOBSERVE_SCANS if forward_search else status=='no_tag'
+                    return status in _TAG1_REOBSERVE_SCANS if entry_probe else status=='no_tag'
 
                 def reobserve_missing(result):
                     nonlocal deadline,motion_deadline
@@ -1392,10 +1404,10 @@ class Robot:
                         steps.append(result)
                         result=dict(result,correction_executed=False,correction_actions=0)
                     quick_entry=(tag_id==1 and self._allows_missing_magnetic())
-                    if not forward_search or moved or not result.get('tag_observation'):
+                    if not entry_probe or moved or not result.get('tag_observation'):
                         result=self._reobserve_terminal_tag(nav,goal,result,deadline,controller=controller,
-                            wait_s=_TAG1_QUICK_SCAN_S if forward_search else 5.,quick_id=quick_entry)
-                    if forward_search and needs_reobserve(result):
+                            wait_s=_TAG1_QUICK_SCAN_S if entry_probe else 5.,quick_id=quick_entry)
+                    if entry_probe and needs_reobserve(result):
                         result=self._advance_to_reacquire_tag1(nav,goal,result,deadline,approach,stance_evidence,
                                                                  controller=controller)
                     if not keep_searching or not needs_reobserve(result):return result
@@ -1406,6 +1418,8 @@ class Robot:
                         reason='已沿刚走过的两步后退，正在复核 Tag 1。'
                     elif approach['completed_actions']:
                         reason=f"已补进 {2*len(approach['completed_actions'])} 步，正在复核 Tag 1。"
+                    elif approach.get('unseen_retreat_action'):
+                        reason='取物首程已后退两步，正在复核 Tag 1。'
                     self.report_command0_phase('cmd0_entry_reacquire',reason_zh=reason)
                     recovery={'target_id':tag_id,'windows':0,'last_scan':result['scan']}
                     self.events.append({'terminal_tag_reacquisition':recovery})
@@ -1421,9 +1435,9 @@ class Robot:
                             result=dict(result,correction_executed=False,correction_actions=0)
                         completed_groups=approach.get('motion_groups',0)
                         result=self._reobserve_terminal_tag(nav,goal,result,deadline,controller=controller,
-                            record=False,wait_s=_TAG1_QUICK_SCAN_S if forward_search else 5.,quick_id=quick_entry,
-                            reuse_settled_cache=not forward_search)
-                        if forward_search and not result.get('correction_executed'):
+                            record=False,wait_s=_TAG1_QUICK_SCAN_S if entry_probe else 5.,quick_id=quick_entry,
+                            reuse_settled_cache=not entry_probe)
+                        if entry_probe and not result.get('correction_executed'):
                             result=self._advance_to_reacquire_tag1(nav,goal,result,deadline,approach,stance_evidence,
                                                                      controller=controller)
                         recovery['windows']+=1
@@ -1435,7 +1449,7 @@ class Robot:
                         else:
                             idle_windows+=1
                     if needs_reobserve(result):
-                        nominal = self._tag1_nominal_entry(nav,result) if forward_search else None
+                        nominal = self._tag1_nominal_entry(nav,result) if entry_probe else None
                         if nominal is not None:
                             reason='已识别 Tag 1，画面中的码位置稳定。沿当前磁航向按基准步数进入下一段。'
                             recovery.update(status='nominal_entry_accepted',reason_zh=reason)
@@ -1446,13 +1460,13 @@ class Robot:
                         recovery.update(status='stalled',reason_zh=reason)
                         result=dict(result,reason=reason,reason_zh=reason)
                     return result
-                if forward_search:
+                if entry_probe:
                     entry_wait=min(_TAG1_QUICK_SCAN_S,self.cfg['terminal_scan']['timeout_s'])
                     result=self._reobserve_terminal_tag(nav,goal,{'scan':{'status':'no_tag'}},
                         deadline,controller=controller,wait_s=entry_wait,quick_id=True)
                 else:
                     result=controller.checkpoint(tag_id,goal,after_ns=after_ns,deadline=deadline)
-                if keep_searching and not forward_search and goal['allow_turn'] and not result.get('fresh_target_detected'):
+                if keep_searching and not entry_probe and goal['allow_turn'] and not result.get('fresh_target_detected'):
                     self.report_command0_phase('cmd0_entry_reacquire')
                     if not self._entry_waits_for_decoded_tag(result):
                         result=self._reacquire_terminal_tag(nav,controller,goal,result,deadline)
@@ -1539,6 +1553,8 @@ class Robot:
             result['heading_residual_advisory']=True
             if not result.get('reason_zh') or result.get('stationary_reobserve_required'):
                 result['reason_zh']='Tag 1 已确认，保留实测航向余差并继续原路线。'
+        if approach.get('motion_groups'):
+            self._record_tag1_search_steps(result,approach)
         if result.get('heading_aligned') and self.magnetic_route_only:self.route_checkpoint_observed(tag_id)
         result['visual_micro']=True
         if self.heading_guard is not None:self.heading_guard.latched=False
@@ -1560,7 +1576,7 @@ class Robot:
             rows.clear()
             return decision.WAIT_CAMERA,None
         observed=scan.get('observed_ids',())
-        decoded=evidence.get('decoded_expected_frames')
+        decoded=evidence.get('decoded_expected_frames',scan.get('decoded_expected_frames'))
         stance_evidence['other_id'] |= any(tag!=1 for tag in observed)
         stance_evidence['seen'] |= (1 in observed or bool(scan.get('observations'))
                                    or type(decoded) is int and decoded>0)
@@ -1568,11 +1584,14 @@ class Robot:
                 or approach.get('retreat_action')):
             return decision.WAIT_AMBIGUOUS,None
         if not stance_evidence['seen']:
-            # At the end of the pickup strafe a blank frame provides no range.
-            # Repeating a blind probe can carry the tag underneath the chest.
+            # Only the first pickup starts at the operator's staging area.
             pickup_entry=getattr(self,'route_command','0') in ('1','2')
             if (scan.get('status')!='no_tag' or approach.get('far_probe_done')
-                    or pickup_entry and approach.get('completed_actions')):
+                    or pickup_entry and approach.get('motion_groups',0)):
+                return decision.WAIT_AMBIGUOUS,None
+            if pickup_entry and getattr(self,'deliveries',0)==0:
+                if Cmd0Motion_ContinuousReady(self.backend):
+                    return decision.RETREAT_UNSEEN,None
                 return decision.WAIT_AMBIGUOUS,None
             return decision.ADVANCE_UNSEEN,None
 
@@ -1637,7 +1656,8 @@ class Robot:
                 return decision.ADVANCE_FAR,geometry
         return decision.WAIT_AMBIGUOUS,geometry
 
-    def _advance_to_reacquire_tag1(self,nav,goal,result,deadline,approach,stance_evidence,*,controller=None):
+    def _advance_to_reacquire_tag1(self,nav,goal,result,deadline,approach,stance_evidence,*,
+                                   controller=None,reobserve_in_caller=False):
         """Change view by two steps and read a new camera window before proceeding."""
         actions=approach['completed_actions']
         reserve=self.cfg['request_timeout_s']+nav.cfg['settle_s']+_TAG1_QUICK_SCAN_S
@@ -1652,7 +1672,10 @@ class Robot:
                 self.events.append({'terminal_tag_forward_reacquisition':approach})
                 approach['decisions']=[]
             approach['decisions'].append({'status':outcome.value,'partial_geometry':geometry})
-            if outcome is _Tag1ReacquireResult.RETREAT_NEAR:
+            if outcome is _Tag1ReacquireResult.RETREAT_UNSEEN:
+                action='cmd0_carry_backward2'
+                reason='取物首程未读到 Tag 1，后退两步再扫。'
+            elif outcome is _Tag1ReacquireResult.RETREAT_NEAR:
                 action='cmd0_carry_backward2'
                 reason='Tag 1 有近距迹象，沿刚走过的两步后退，再用新画面确认。'
             elif outcome in (_Tag1ReacquireResult.ADVANCE_UNSEEN,_Tag1ReacquireResult.ADVANCE_FAR):
@@ -1669,7 +1692,9 @@ class Robot:
             self.nav_count+=1
             approach['motion_groups']=approach.get('motion_groups',0)+1
             stance_evidence.clear()
-            if outcome is _Tag1ReacquireResult.RETREAT_NEAR:
+            if outcome is _Tag1ReacquireResult.RETREAT_UNSEEN:
+                approach['unseen_retreat_action']=action
+            elif outcome is _Tag1ReacquireResult.RETREAT_NEAR:
                 approach['retreat_action']=action
             else:
                 actions.append(action)
@@ -1683,17 +1708,24 @@ class Robot:
                         'stamp_ns':geometry['latest_stamp_ns'],
                         'fingerprint':camera.get('fingerprint') if camera.get('ready') is True else None,
                         'restart_barrier_ns':window.get('restart_barrier_ns',0)}
+            if reobserve_in_caller:
+                return result
             result=self._reobserve_terminal_tag(nav,goal,result,deadline,controller=controller,
                 record=False,wait_s=_TAG1_QUICK_SCAN_S,quick_id=True)
             approach['observations'].append(dict(result.get('tag_observation') or {},
                                                  scan_status=result.get('scan',{}).get('status')))
-        if actions:
-            result['tag1_reacquire_forward_steps']=2*len(actions)
-        if approach.get('retreat_action'):
-            result['tag1_reacquire_backward_steps']=2
+        self._record_tag1_search_steps(result,approach)
         return result
 
-    def _tag1_prefers_forward_search(self, tag):
+    @staticmethod
+    def _record_tag1_search_steps(result,approach):
+        if approach['completed_actions']:
+            result['tag1_reacquire_forward_steps']=2*len(approach['completed_actions'])
+        retreats=sum(bool(approach.get(key)) for key in ('unseen_retreat_action','retreat_action'))
+        if retreats:
+            result['tag1_reacquire_backward_steps']=2*retreats
+
+    def _tag1_supports_entry_probe(self, tag):
         supported_load = self.load_kind == 'single' or (
             self.load_kind == 'double' and getattr(self,'pair_route_enabled',False))
         return (tag == 1 and getattr(self,'route_command','0') in ('0','1','2')
@@ -1766,7 +1798,7 @@ class Robot:
         tag=goal['id']
         cfg=nav.cfg
         sweep={'origin':None,'turns':0,'blocked':False}
-        measured = self._tag1_prefers_forward_search(tag)
+        measured = self._tag1_supports_entry_probe(tag)
         if measured:
             sweep['target_offsets'] = (-18.,18.,0.)
             telemetry = {'target_id': tag, 'observations': []}

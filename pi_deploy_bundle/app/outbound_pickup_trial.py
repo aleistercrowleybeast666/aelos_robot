@@ -146,9 +146,12 @@ def _pickup_use_retreat_tag(robot, nav, boundary, view, reserved):
     if abs(yaw)<=deadband:
         return
     if applied=='applied':
+        marker = robot.events[-1] if robot.events else None
         _pickup_recover_magnetic_residual(robot,boundary)
-        return
-    turn = robot.Route_TurnFromTagHeading(1,yaw,stamp,reserved_actions=reserved)
+        if (boundary['correction_actions'] or _pickup_turns_since(robot,marker)
+                or (boundary['residual_deg'] is not None and abs(boundary['residual_deg'])<=deadband)):
+            return
+    turn = robot.Route_TurnFromTagHeading(1,yaw,stamp,reserved_actions=reserved,pickup_retreat=True)
     if not turn:
         return
     boundary['correction_actions'] += 1
