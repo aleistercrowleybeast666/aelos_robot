@@ -146,11 +146,16 @@ PLACEMENT_STRAFE_CODE_SHA256 = dict(RELAXED_CARRY_HIP_CODE_SHA256, **{
     'lua/craic_auto_bridge.lua': 'f45520484bf762612ac30422d43e07dc345319a674c0409684489544c00558cf',
     'lua/craic_button_gaits.lua': '8e88a582008615204d14b28230ae071dcc597f4a60e6f47a3789ff12261d22ea',
 })
+STANDING_START_CODE_SHA256 = dict(PLACEMENT_STRAFE_CODE_SHA256, **{
+    'lua/craic_actions.lua': '045a4241b23a8e2fcd2663400f6e77fe58e5ec9c048880dfe5114b9e3ac326b6',
+    'lua/craic_auto_bridge.lua': '778427b5b57299e28f8ceb9afa56514c4f3862f45b3226cd8a5361deb92d99f7',
+})
 _PICKUP_BACKWARD_CODE_VARIANTS = (PICKUP_BACKWARD4_CODE_SHA256, PICKUP_BACKWARD6_CODE_SHA256,
                                   PICKUP_BACKWARD8_CODE_SHA256, PICKUP_BACKWARD8_TUNED_LEFT_CODE_SHA256,
                                   PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256, PICKUP_LEVEL_BACKWARD6_CODE_SHA256,
                                   EMPTY_RECOVERY_CODE_SHA256, INTERMEDIATE_STRAFE_CODE_SHA256, TRANSFER_STRAFE_CODE_SHA256,
-                                  LEVEL_BACKWARD8_CODE_SHA256, RELAXED_CARRY_HIP_CODE_SHA256, PLACEMENT_STRAFE_CODE_SHA256)
+                                  LEVEL_BACKWARD8_CODE_SHA256, RELAXED_CARRY_HIP_CODE_SHA256, PLACEMENT_STRAFE_CODE_SHA256,
+                                  STANDING_START_CODE_SHA256)
 _PAIR_ROUTE_CODE_VARIANTS = (PAIR_ROUTE_CODE_SHA256, *_PICKUP_BACKWARD_CODE_VARIANTS)
 _CMD0_PRIOR_TUNED_MICRO_SHA256 = (
     'a8156fefd6da3709882508abc7cc3e3d1a5dc499ee17eefcb3ed846abafffd14',
@@ -274,13 +279,19 @@ class MicroGate:
                 and any(_matches_readback(r.get('verified_files_sha256'), code)
                         for code in _PICKUP_BACKWARD_CODE_VARIANTS[2:]))
 
+    def standing_start_deployment_ready(self):
+        record = self.deployment or {}
+        return (self.cmd0_route_deployment_ready() and
+                _matches_readback(record.get('verified_files_sha256'), STANDING_START_CODE_SHA256))
+
     def repeated_single_ready(self):
         r=self.deployment or {}
         actions = r.get('verified_files_sha256',{}).get('lua/craic_actions.lua')
         return bool(self.deployment_ready() and r.get('single_grab_policy')=='repeat_after_success_empty_only'
                     and actions in (REQUIRED_CODE_SHA256['lua/craic_actions.lua'],
                                     PAIR_ROUTE_CODE_SHA256['lua/craic_actions.lua'],
-                                    PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256['lua/craic_actions.lua']))
+                                    PICKUP_BACKWARD8_LOW_RELEASE_CODE_SHA256['lua/craic_actions.lua'],
+                                    STANDING_START_CODE_SHA256['lua/craic_actions.lua']))
 
     def mission_ready(self, epoch, recovery_ready):
         r=self.deployment or {}
@@ -510,7 +521,9 @@ class MicroGate:
                     empty_recovery_deployment_readback_ready=(self.deployment_ready()
                         and any(_matches_readback(self.deployment['verified_files_sha256'], code)
                                 for code in (EMPTY_RECOVERY_CODE_SHA256,INTERMEDIATE_STRAFE_CODE_SHA256,TRANSFER_STRAFE_CODE_SHA256,
-                                             LEVEL_BACKWARD8_CODE_SHA256,RELAXED_CARRY_HIP_CODE_SHA256,PLACEMENT_STRAFE_CODE_SHA256))),
+                                             LEVEL_BACKWARD8_CODE_SHA256,RELAXED_CARRY_HIP_CODE_SHA256,PLACEMENT_STRAFE_CODE_SHA256,
+                                             STANDING_START_CODE_SHA256))),
+                    standing_start_deployment_readback_ready=self.standing_start_deployment_ready(),
                     empty_strafe_group_ready=self.empty_strafe_group_ready(epoch,recovery_ready),
                     empty_forward4_ready=self.empty_forward4_ready(epoch,recovery_ready),
                     correction_profile_probe_supported=True, placement_profile_probe_supported=True,

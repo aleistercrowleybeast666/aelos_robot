@@ -81,6 +81,9 @@ class GateBackend:
         self.gate=gate;self.session=None;self.epoch=None
         self.cancelled=threading.Event();self.progress=None
         self.empty_probe_attempts={}
+        self.startup_timing=None
+        self.preflight_worker=None
+        self.preflight_nonce=None
     def snapshot(self, *, require_mcu=True):
         r=self.gate.status()
         if r.get('robot_id')!=3 or r.get('owner_version')!='r3-visual-pickup-20261109-v5':raise RuntimeError('R3 owner mismatch')
@@ -99,6 +102,58 @@ class GateBackend:
     def check_manual_idle(self):
         r=self.current() # keep the original session and cancellation epoch
         if r['mode']!='manual' or r.get('in_flight'):raise RuntimeError('manual-idle observation interrupted')
+    def verify_during_sensor_preflight(self,verify,sensors,timeout):
+        """One serial probe worker while the task thread supervises sensors."""
+        self.check_manual_idle()
+        started=time.monotonic()
+        # At most one normal probe plus optional pair, level and gait revisions.
+        deadline=started+timeout+6*PAIR_PROBE_TIMEOUT_S+2.
+        errors=[];probe_times=[];sensor_times=[]
+        def probes():
+            probe_times.append(time.monotonic())
+            try:
+                verify(timeout)
+                self._verify_small_strafe_profile(timeout)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                probe_times.append(time.monotonic())
+        def check():
+            if errors:raise errors[0]
+            with self.gate.cv:
+                state=self.current(require_mcu=False);active=state.get('current_operation') or {}
+                if (state['mode']!='manual' or state.get('in_flight') and
+                        (not self.preflight_nonce or active.get('request_nonce')!=self.preflight_nonce
+                         or active.get('op') not in PROBE_OPS or active.get('cancelled'))):
+                    raise RuntimeError('manual-idle preflight interrupted by another operation')
+                if not state.get('in_flight') and not state.get('mcu_ready'):
+                    raise RuntimeError('MCU handshake missing/stale')
+            if time.monotonic()>=deadline:raise RuntimeError('startup preflight timed out before motion')
+        worker=threading.Thread(target=probes,name='r3-startup-capabilities',daemon=True)
+        self.preflight_worker=worker
+        try:
+            worker.start()
+            sensor_times.append(time.monotonic())
+            sensors(check_idle=check)
+            sensor_times.append(time.monotonic())
+            while worker.is_alive():
+                check()
+                worker.join(.05)
+            check()
+            self.check_manual_idle()
+            return probe_times[-1]>sensor_times[-1]
+        except BaseException:
+            self.cancel()  # Wakes a pending gate.submit, also fences this backend on return.
+            if worker.ident is not None:worker.join(1.)
+            if worker.is_alive():raise RuntimeError('startup probe did not drain; no motion permitted')
+            raise
+        finally:
+            if self.startup_timing is not None and len(probe_times)==2 and len(sensor_times)==2:
+                overlap=min(probe_times[1],sensor_times[1])-max(probe_times[0],sensor_times[0])
+                self.startup_timing['preflight']={'probe_s':probe_times[1]-probe_times[0],
+                    'sensor_s':sensor_times[1]-sensor_times[0],'overlap_s':max(0.,overlap),
+                    'elapsed_s':time.monotonic()-started}
+            self.preflight_worker=None
     def check(self):
         state=self.current(require_mcu=False)
         if state['mode']!='auto':raise RuntimeError('automatic mode cancelled')
@@ -124,21 +179,52 @@ class GateBackend:
                 raise RuntimeError('MCU handshake missing/stale')
             self.cancelled.wait(min(0.05,remaining))
             state=self.current(require_mcu=False)
+    def standing_start_available(self):
+        state=self.current()
+        return (state['mode']=='manual' and not state['in_flight'] and state.get('standing_start_supported') is True
+                and bool(state.get('empty_stand_receipt')) and not state['restart_requires_empty_reset'])
+
     def call(self,op,timeout):
-        manual_only=op in ('begin','begin_align','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES)
+        preflight=self.preflight_worker
+        if preflight and (threading.current_thread() is not preflight or op not in PROBE_OPS or op in EMPTY_PROBES):
+            raise RuntimeError('only startup capability queries are permitted during sensor preflight')
+        manual_only=op in ('begin','begin_standing','begin_align','stand') or (op in PROBE_OPS and op not in EMPTY_PROBES)
         if manual_only:
             if self.session is None:self.ready()
             else:
                 r=self.current()
                 if r['mode']!='manual' or r['in_flight']:raise RuntimeError('owner became busy before begin')
         else:self.check()
-        if op in ('begin', 'begin_align'):
+        if op in ('begin', 'begin_standing', 'begin_align'):
             self._verify_small_strafe_profile(timeout)
         before=self.current(require_mcu=manual_only);sequence=before.get('operation_seq',0);nonce=uuid.uuid4().hex
         text='R3AUTO|{}|{}|{}|{}'.format(self.session,self.epoch,op,nonce)
         if op=='grab_single' and getattr(self,'usage_file',None) is not None:
             self.usage_file.write_text(json.dumps(dict(boot_id=self.gate.micro.boot_id,session=self.session,attempted=True,evidence='conservatively consumed before grab submission; not a physical success claim')))
-        ok=self.gate.submit(text,timeout)
+        first_stages=[]
+        preparation_call=None
+        if (self.startup_timing is not None and 'first_route_action' not in self.startup_timing
+                and (op in PROBE_OPS or op in ('begin','begin_standing','begin_align'))):
+            preparation_call={'action':op,'submitted_s':time.monotonic()-self.execution_started}
+            self.startup_timing.setdefault('preparation_calls',[]).append(preparation_call)
+        if self.startup_timing is not None and op not in PROBE_OPS and op not in ('begin','begin_standing','begin_align','finish'):
+            for stage in (('first_body',) if op=='stand' else ('first_body','first_route_action')):
+                if stage not in self.startup_timing:
+                    row={'action':op,'submitted_s':time.monotonic()-self.execution_started}
+                    self.startup_timing[stage]=row
+                    first_stages.append(row)
+        if preflight:
+            # The Condition releases its lock while submit waits for serial I/O.
+            # Readers see the nonce and the gate slot under that same lock.
+            with self.gate.cv:
+                self.current()
+                self.preflight_nonce=nonce
+                try:ok=self.gate.submit(text,timeout)
+                finally:self.preflight_nonce=None
+        else:
+            ok=self.gate.submit(text,timeout)
+        if preparation_call is not None:
+            preparation_call['returned_s']=time.monotonic()-self.execution_started
         if not ok and not manual_only:
             detail=self.gate.status();rejection=detail.get('last_rejection') or {}
             if (detail.get('session')==self.session and detail.get('epoch')==self.epoch
@@ -152,6 +238,17 @@ class GateBackend:
         if not ok:
             detail=self.gate.status()
             result=detail.get('last_result') or {}
+            if op=='begin_standing' and detail.get('session')==self.session and detail.get('epoch')==self.epoch:
+                rejected=detail.get('last_rejection') or {}
+                absent=(result.get('request_nonce')==nonce and result.get('op')==op
+                        and result.get('standing_unavailable') is True and result.get('started') is False
+                        and result.get('cancelled') is False and result.get('drained') is True)
+                if (detail.get('mode')=='manual' and not detail.get('in_flight') and (absent or
+                        (rejected.get('request_nonce')==nonce and rejected.get('code')=='empty_stand_not_reusable'))):
+                    # task_runner is loaded under a private module name by the owner;
+                    # use the shared exception module on both sides.
+                    from cmd0_motion import StandingStartUnavailable
+                    raise StandingStartUnavailable('当前站姿回执不可复用，恢复独立站姿后起步')
             if (op in PICKUP_BACKWARD6_OPS and result.get('op')==op and result.get('request_nonce')==nonce
                     and result.get('retreat_unavailable') is True and result.get('started') is False
                     and result.get('cancelled') is False and result.get('drained') is True
@@ -178,6 +275,8 @@ class GateBackend:
                 not all(result.get(k) is True for k in ('dispatched','started','complete','drained')) or
                 result.get('cancelled') is not False):raise RuntimeError('fresh nonce/sequence START+COMPLETE evidence missing')
         if r['mode']!=expected or r['in_flight']:raise RuntimeError('operation state did not settle')
+        for row in first_stages:
+            row['protocol_completed_s']=time.monotonic()-self.execution_started
     def verify_micro(self,timeout):
         self.check_manual_idle()
         micro=self.current().get('micro_trial',{})
@@ -206,11 +305,16 @@ class GateBackend:
         micro = self.current().get('micro_trial',{})
         if ('small_strafe_profile' in micro and micro['small_strafe_profile'] is None
                 and micro.get('small_strafe_ready') is True):
-            self.call(SMALL_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
-            if micro.get('correction_profile_probe_supported') and self.small_strafe_profile()=='intermediate_v2':
-                self.call(CORRECTION_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
-            if micro.get('placement_profile_probe_supported') and self.small_strafe_profile()=='transfer_v3':
-                self.call(PLACEMENT_PROFILE_PROBE, min(timeout,PAIR_PROBE_TIMEOUT_S))
+            # Each named probe identifies one complete gait revision. An ordered
+            # pre-START decline permits the next probe, while ambiguous replies
+            # still raise from call() before begin.
+            for supported,probe in ((micro.get('placement_profile_probe_supported'),PLACEMENT_PROFILE_PROBE),
+                                    (micro.get('correction_profile_probe_supported'),CORRECTION_PROFILE_PROBE),
+                                    (True,SMALL_PROFILE_PROBE)):
+                if supported:
+                    self.call(probe,min(timeout,PAIR_PROBE_TIMEOUT_S))
+                    if self.small_strafe_profile() is not None:
+                        break
 
     def verify_mission_v5(self,timeout):
         self.verify_micro(timeout)
@@ -265,6 +369,9 @@ class GateBackend:
         return frozenset(state.get('mission_v5_pair_ops',()))
     def report_progress(self,progress):
         self.progress=dict(progress)
+    def loaded_micro_ready(self):
+        return self.current().get('micro_trial',{}).get('ready') is True
+
     def check_micro(self):
         self.check()
         if not self.current().get('micro_trial',{}).get('ready'):raise RuntimeError('micro current session capability or physical inspection expired')
@@ -406,7 +513,7 @@ class WarmController:
         if path.parent!=root or path.suffix!='.json':raise RuntimeError('config must be a JSON file directly in project/config')
         return self.engine.load(path)
 
-    def start_job(self,config=None,mode='stage1',stop_after=None,*,idle_only=False):
+    def start_job(self,config=None,mode='stage1',stop_after=None,*,idle_only=False,drop_yaw_deg=None):
         if not self.prepared:raise RuntimeError('owner preparation failed: '+str(self.prepare_error))
         if mode=='stand' and (self.busy.locked() or self.gate.status().get('mode')=='auto'):
             if idle_only:raise RuntimeError('empty reset requires idle; no active task cancelled')
@@ -416,12 +523,15 @@ class WarmController:
             else:self.gate.cancel('stand requested: cancel existing auto before retry')
             raise RuntimeError('stand cancelled remaining auto task; wait for native completion and manual safety inspection, then explicitly retry stand; no stand queued')
         if not self.busy.acquire(False):raise RuntimeError('another local task is active')
+        prepare_started=time.monotonic()
         backend=None
         try:
             self.identity() # 每次任务仍检查实际机体身份
             if mode in ('0','1','2','stage1','0-full'):
                 self.gate.require_empty_start()
             cfg=self.config(config) # 每次任务重读参数；不保存或恢复旧队列
+            if drop_yaw_deg is not None:
+                cfg=dict(cfg,drop_yaw_deg=drop_yaw_deg)
             if stop_after is not None:
                 cfg=dict(cfg,transfer_test=dict(cfg.get('transfer_test',{}),stop_after=stop_after))
             plan=self.engine.prepare(mode,cfg,self.project) # 未实现区域在动作前拒绝
@@ -456,6 +566,8 @@ class WarmController:
                 backend.usage_file=None if repeated else usage
                 self.gate.authorize_operator_start()
 
+            if mode in ('0','1','2','stage1'):
+                backend.startup_timing={'owner_prepare_s':time.monotonic()-prepare_started}
             job={'done':threading.Event(),'cancel':threading.Event(),'result':None,'backend':backend,'cfg':cfg,'plan':plan,'thread':None}
             self.active=job
             return job
@@ -465,6 +577,7 @@ class WarmController:
 
     def execute(self,job):
         started=time.monotonic()
+        job['backend'].execution_started=started
         try:
             if job['cancel'].is_set() or self.closed.is_set():raise RuntimeError('trigger closed before execution')
             result=self.engine.execute(job['plan'],job['backend'])
@@ -478,6 +591,9 @@ class WarmController:
                     expected_blocks_delivered=getattr(exc,'expected_blocks_delivered',0),
                     completed_returns=getattr(exc,'completed_returns',0),return_started=getattr(exc,'return_started',False))
         finally:
+            timing=getattr(job['backend'],'startup_timing',None)
+            if timing is not None and job['result'] is not None:
+                job['result']['startup_timing']=timing
             if getattr(job['backend'],'navigation_lease',None) is not None:job['backend'].navigation_lease.close()
             try:
                 _write_runtime_report(self.project,job['result'])
@@ -531,7 +647,12 @@ class WarmController:
             first,extra=data.split(b'\n',1)
             if extra:raise RuntimeError('one trigger request at a time')
             request=json.loads(first)
-            if request.get('protocol')!=PROTOCOL or set(request)-{'protocol','op','mode','legacy_after_home','config','expected_owner_version','one_step_confirmed','recovery','stop_after','micro_trial','idle_only'}:raise RuntimeError('unknown trigger schema')
+            if request.get('protocol')!=PROTOCOL or set(request)-{'protocol','op','mode','legacy_after_home','config','expected_owner_version','one_step_confirmed','recovery','stop_after','micro_trial','idle_only','drop_yaw_deg'}:raise RuntimeError('unknown trigger schema')
+            if 'drop_yaw_deg' in request:
+                if request.get('op') != 'start':
+                    raise ValueError('放物转角仅适用于搬运命令')
+                from base_placement import BasePlacement_ValidateYaw
+                BasePlacement_ValidateYaw(request.get('mode'),request['drop_yaw_deg'])
             if request.get('op')=='confirm_recovery':
                 if self.busy.locked():raise RuntimeError('task active; cannot acknowledge recovery')
                 self.identity()
@@ -573,7 +694,8 @@ class WarmController:
             idle_only=request.get('idle_only',False)
             if type(idle_only) is not bool or idle_only and request['mode']!='stand':
                 raise RuntimeError('idle-only applies only to an explicit stand request')
-            job=self.start_job(request.get('config'),request['mode'],request.get('stop_after'),idle_only=idle_only)
+            options={'drop_yaw_deg':request['drop_yaw_deg']} if 'drop_yaw_deg' in request else {}
+            job=self.start_job(request.get('config'),request['mode'],request.get('stop_after'),idle_only=idle_only,**options)
             source='action_chains_v5.py' if 'mission_v5' in job['plan'] else 'routes.py'
             self.send(conn,{'event':'accepted','protocol':PROTOCOL,'command':request['mode'],'route_source':source})
             thread=threading.Thread(target=self.execute,args=(job,),daemon=True);job['thread']=thread

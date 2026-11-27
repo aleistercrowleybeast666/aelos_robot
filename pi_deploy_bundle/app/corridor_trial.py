@@ -4,13 +4,15 @@ from enum import Enum
 from math import isfinite, radians, sin
 from statistics import median
 
-from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_IsFresh, VisualCameraUnavailable
+from checkpoint_errors import (Checkpoint_AllScanWindowsHealthy, VisualCamera_GetFreshnessCheck,
+                               VisualCamera_IsFresh, VisualCameraUnavailable)
 from checkpoint_alignment import Checkpoint_TrackEntryHeading
 from action_chains_v5 import COMMAND0_OUTBOUND, COMMAND0_DELIVERY
 from cmd0_motion import (Cmd0Motion_ContinuousReady, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          Cmd0Motion_SmallStrafeProfile, LEGACY_SMALL_STRAFE_LIMIT_M,
                          PLACE_ACTION, SIDE_ACTIONS, SMALL_SIDE_ACTIONS)
-from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime, CheckpointScanResult
+from checkpoint_scan import (Checkpoint_CorrectMissedTravel, Checkpoint_FromBoundary, Checkpoint_Observe,
+                             Checkpoint_OptionalScanTime, CheckpointScanResult)
 from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
 from route_pose import (TAG2_APPROACH_COUNTS, TAG2_FAR_APPROACH_LIMIT_M, RoutePose_AdviseDeparture,
@@ -2303,6 +2305,15 @@ def _tag2_recheck_before_strafe(robot, nav, profile, leg, checkpoint, *, heading
             and type(now) is int and type(stance) is int and stance <= cutoff <= scan_at <= now
             and now - scan_at <= nav.cfg['max_age_s'] * 1e9
             and camera_status is not None and camera_ready()):
+        if Checkpoint_CorrectMissedTravel(robot,nav,checkpoint,reserved_actions=reserved_actions):
+            _, retried = _refresh_checkpoint_pose(robot,nav,profile,2,quick_id=True,
+                                                  reuse_settled_cache=True,advisory_windows=2)
+            recheck.update(status='reobserved_after_travel_drift',motion_history=checkpoint['missed_travel_heading'])
+            if retried.get('detected'):
+                return retried,True
+            refreshed = retried.get('checkpoint_not_seen') or {}
+            return {}, (refreshed.get('cause') == 'tag_not_visible' and Checkpoint_AllScanWindowsHealthy(refreshed)
+                        and not refreshed.get('seen_tags') and not retried.get('partial_pose_rows'))
         recheck.update(status='unseen_continue_estimated', reused_healthy_windows=miss['healthy_windows'])
         return {}, True
     deadband = nav.cfg['post_action_heading'].get('deadband_deg')
@@ -4113,7 +4124,7 @@ def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None, *, profile=
     return applied == 'applied'
 
 
-def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=0):
+def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=0, drop_yaw_deg=None):
     """Run the estimated suffix in order, recording intermediate marks that are missed."""
     entry_detected = next_segment.get('detected') is True
     result = {'status': CorridorTrialResult.ROUTE_UNAVAILABLE.value, 'reason': 'preparing corridor trial',
@@ -5221,6 +5232,12 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 miss_policy='hold_load_for_placement' if expected_id == _CHECKPOINTS[-1] and not estimate else 'continue_estimated',
                 next_stationary_id=5 if expected_id == 4 and not chain[_TAG5_LEG] else None,
                 advisory_windows=2 if expected_id == 3 else None)
+        if (estimate and observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN
+                and Checkpoint_CorrectMissedTravel(robot,nav,leg,reserved_actions=after_leg)):
+            leg['missed_travel_heading']['initial_miss'] = leg.pop('checkpoint_not_seen')
+            observed,reason = Checkpoint_Observe(robot,nav,leg,
+                lambda: _report_progress(robot,'cmd0_corridor_wait',previous_id,expected_id,leg=leg),
+                quick_id=True, advisory_windows=2, reuse_settled_cache=True, miss_policy='continue_estimated')
         if expected_id == 5 and use_tag5_passage and observed is CheckpointScanResult.CHECKPOINT_NOT_SEEN:
             probe = _tag5_partial_forward_probe(robot, nav, tag5_alignment, leg, chain[_DROP][:-1])
             if probe is not None:
@@ -5464,6 +5481,13 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                 delivery.setdefault('heading_correction_boundaries', []).append({
                     'after_action': action, 'before_action': base_actions[index+1],
                     'monitor_report': getattr(robot, 'last_heading_report', None)})
+    if drop_yaw_deg is None:
+        drop_yaw_deg = robot.cfg.get('drop_yaw_deg', 0)
+    if drop_yaw_deg:
+        from base_placement import BasePlacement_TurnBeforeRelease
+        _report_progress(robot, 'cmd0_delivery_release', result['checkpoint'], 5, reason_zh='已完成进场，按本次指定方向转身放物。')
+        delivery['drop_turn'] = BasePlacement_TurnBeforeRelease(robot, nav, drop_yaw_deg)
+        robot.events.append({'base_placement_turn': delivery['drop_turn']})
     _report_progress(robot, 'cmd0_delivery_release', result['checkpoint'], 5)
     robot.action(PLACE_ACTION)
     delivery['completed_actions'].append(PLACE_ACTION)

@@ -75,7 +75,8 @@ class BlockCamera:
                 if not self.closed and generation==self.generation:self.fault=str(exc)
         self.changed.set()
 
-    def observe(self,after_monotonic,after_ros_ns,check,timeout_s=None,expected_load='empty',scope=None,*,count_only=False):
+    def observe(self,after_monotonic,after_ros_ns,check,timeout_s=None,expected_load='empty',scope=None,*,
+                count_only=False,previous_count_frame=None):
         if self.staged_publisher is not None and not (count_only or self.trial_alignment):
             raise ValueError('trial HSV is only scoped to the operator-staged block count')
         if scope is None:scope=self.scope
@@ -86,6 +87,9 @@ class BlockCamera:
         if type(timeout) not in (int,float) or not 0<timeout<=20:raise ValueError('bounded timeout required')
         settle=self.cfg['settle_s'];mono_boundary=after_monotonic+settle
         ros_boundary=after_ros_ns+int(settle*1e9)
+        if previous_count_frame is not None:
+            mono_boundary=max(mono_boundary,previous_count_frame['received_monotonic'])
+            ros_boundary=max(ros_boundary,previous_count_frame['stamp_ns'])
         deadline=self.clock()+timeout;window=ConfirmedWindow(self.cfg,count_only=count_only)
         seen=0;last_eligible=None;invalid_frames=0
         reason='no fresh post-settle images'

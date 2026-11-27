@@ -94,6 +94,9 @@ class RobotApiTests(unittest.TestCase):
             result = self.api.start('1')
         self.assertTrue(result['ok'])
         self.assertTrue(result['accepted'])
+        self.assertEqual(set(result['client_startup_timing']),
+                         {'ssh_connect_s', 'device_check_s', 'dispatch_to_accept_s'})
+        self.assertTrue(all(seconds >= 0 for seconds in result['client_startup_timing'].values()))
         self.assertTrue(check.commands[0].endswith('status --device-check'))
         self.assertEqual(len(motion.commands), 1)
         self.assertTrue(motion.commands[0].endswith('warm_client.py 1'))
@@ -112,6 +115,24 @@ class RobotApiTests(unittest.TestCase):
         self.assertEqual(outcome['reason'], 'MCU 握手未就绪，任务未发送。')
         self.assertTrue(check.commands[0].endswith('status --device-check'))
         self.assertFalse(unused_motion.commands)
+
+    def test_release_angle_reaches_warm_client_only_on_dispatch(self):
+        check = self.ready()
+        motion = FakeChannel([_line(event='done', status='task_complete')])
+        with patch.object(self.api, '_connection', return_value=self.connection(check, motion)):
+            self.api.start(2, drop_yaw_deg=-20)
+        self.assertTrue(check.commands[0].endswith('status --device-check'))
+        self.assertTrue(motion.commands[0].endswith('2 --drop-yaw-deg -20'))
+
+    def test_invalid_angle_rejected_before_connecting_or_deploying(self):
+        with patch.object(self.api, 'deploy') as deploy, patch.object(self.api, '_connection') as connect:
+            for angle in (31, -31, 1.5, '0', True):
+                with self.subTest(angle=angle), self.assertRaises(ValueError):
+                    self.api.update_then_start(1, drop_yaw_deg=angle)
+                with self.assertRaises(ValueError):
+                    self.api.start(2, drop_yaw_deg=angle)
+            deploy.assert_not_called()
+            connect.assert_not_called()
 
     def test_loaded_owner_preflight_rejects_start_without_sending_motion(self):
         owner = {'robot_id': 3, 'mode': 'manual', 'in_flight': False, 'restart_requires_empty_reset': True}
@@ -238,7 +259,7 @@ class RobotApiTests(unittest.TestCase):
                 self.api, 'start', side_effect=control_api.RobotControlUncertainError('lost',accepted=True)
         ) as start:
             result = self.api.update_then_start(1)
-        start.assert_called_once_with('1', cancel_event=None)
+        start.assert_called_once_with('1', cancel_event=None, drop_yaw_deg=0)
         self.assertEqual(result['deployment'], report)
         self.assertEqual(result['start']['status'], 'start_unconfirmed')
         self.assertTrue(result['start']['accepted'])

@@ -519,6 +519,21 @@ def _route_notes(result):
     if entrance_miss and not any(_as_dict(row).get("tag_id") == entrance_miss.get("tag_id") for row in missing):
         missing.insert(0, entrance_miss)
     lines = _entry_search_notes(events)
+    host = _as_dict(result.get("client_startup_timing"))
+    fields = (("SSH 连接", "ssh_connect_s"), ("启动前状态核对", "device_check_s"),
+              ("发令至树莓派接收", "dispatch_to_accept_s"))
+    startup = [f"{label} {value:.2f} 秒" for label, key in fields
+               if type(value := host.get(key)) in (float, int) and math.isfinite(value) and value >= 0]
+    if startup:
+        lines.append("上位机启动耗时 · " + " · ".join(startup))
+    for item in events:
+        turn = _as_dict(item.get("base_placement_turn"))
+        if turn:
+            basis = {"measured": "实测", "estimated_from_completed_actions": "按动作估计",
+                     "no_turn": "未转身"}.get(turn.get("basis"), "回执")
+            target = _angle_label("目标", turn.get("requested_deg"))
+            applied = _angle_label(basis, turn.get("applied_deg"))
+            lines.append(" · ".join(part for part in ("大本营放物转角", target, applied) if part))
     entry_fallback = entrance.get("entry_fallback")
     if entry_fallback:
         lines.append(str(entry_fallback))

@@ -21,7 +21,7 @@ _MCU_ERROR='MCU ERROR; automatic requests blocked'
 VALID_KEYS=frozenset([0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,
  0xC9,0xCA,0xCB,0xCD,0xCE,0xCF,0xDC,0xDE,0xDF,0xE9,0xEA,0xEB,
  0xED,0xEF,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6])
-NAMES={op:'r3_simple_'+op for op in ('begin','begin_align','free_forward','grab_single','carry_forward','left_turn','right_turn','carry_forward2','carry_forward4','strafe_left_once','strafe_right_once','stand','finish')}
+NAMES={op:'r3_simple_'+op for op in ('begin','begin_standing','begin_align','free_forward','grab_single','carry_forward','left_turn','right_turn','carry_forward2','carry_forward4','strafe_left_once','strafe_right_once','stand','finish')}
 NAMES.update({op:'r3_simple_'+op for op in ('empty_forward2', 'empty_left_turn', 'empty_right_turn', 'empty_strafe_left', 'empty_strafe_right', 'place_single', 'carry_forward7', 'carry_forward9')})
 MISSION_OPS=frozenset(('empty_forward2', 'empty_left_turn', 'empty_right_turn', 'empty_strafe_left', 'empty_strafe_right', 'place_single', 'carry_forward7', 'carry_forward9'))
 NAMES.update(MICRO_NAMES)
@@ -55,6 +55,8 @@ class Gate:
         self.last_wire_key=0
         self.last_rejection=None;self.last_result=None;self.operation_seq=0
         self._may_hold_load=False
+        self._empty_stand_receipt=None
+        self._standing_start_unsupported=False
         self._accepted_nonces=set()
         self.recovery=RecoveryGate(self.session,self.clock)
         self.micro=MicroGate(self.session,self.clock,boot_id)
@@ -62,6 +64,8 @@ class Gate:
     def status(self):
         with self.cv:
             contact_age=self.clock()-self.last_hello if self.seen_bridge else None
+            if contact_age is None or not 0<=contact_age<=2.5:
+                self._empty_stand_receipt=None
             recovery=self.recovery.status(self.epoch)
             pair_ready=self.micro.pair_ready(self.epoch,recovery['ready'])
             return {'schema':'r3.simple.v1','robot_id':3,'session':self.session,'epoch':self.epoch,
@@ -70,9 +74,11 @@ class Gate:
                 'mcu_last_contact_age_s':contact_age,
                 'mcu_last_contact_source':self.last_hello_source,
                 'in_flight':self.current is not None,'published_at_s':time.time(),
+                'empty_stand_receipt':dict(self._empty_stand_receipt) if self._empty_stand_receipt else None,
+                'standing_start_supported':not self._standing_start_unsupported and self.micro.standing_start_deployment_ready(),
                 'restart_requires_empty_reset':self.mode=='manual' and self._may_hold_load,
                 'operation_seq':self.operation_seq,'native_immediate_cancel':False,'last_rejection':self.last_rejection,'last_result':self.last_result,
-                'current_operation':None if not self.current else {k:self.current.get(k) for k in ('op','dispatched','started','complete','cancelled','drained')},
+                'current_operation':None if not self.current else {k:self.current.get(k) for k in ('op','request_nonce','dispatched','started','complete','cancelled','drained')},
                 'recovery_gate':recovery,
                 'micro_trial':self.micro.status(self.epoch,recovery['ready']),
                 'mission_v5_ready':self.micro.mission_ready(self.epoch,recovery['ready']),
@@ -82,8 +88,9 @@ class Gate:
 
     def cancel(self,reason,key=0,force_epoch=False):
         with self.cv:
+            self._empty_stand_receipt=None
             c=self.current
-            if (reason==_MCU_ERROR and c and (c['op'] in OPTIONAL_PROBES or c['op'] in PICKUP_BACKWARD6_OPS)
+            if (reason==_MCU_ERROR and c and (c['op'] in OPTIONAL_PROBES or c['op'] in PICKUP_BACKWARD6_OPS or c['op']=='begin_standing')
                     and c['dispatched'] and not c['started'] and not c['cancelled']):
                 # Installed UART owners report unknown aliases through cancel.
                 # Defer classification until the next ordered idle REQ.
@@ -139,6 +146,7 @@ class Gate:
         if not isinstance(params,list) or len(params)!=1 or type(params[0]) is not int:return 0
         raw=params[0]
         if raw//256==WIRE_BASE//256:
+            if not 0<=self.clock()-self.last_hello<=2.5:self._empty_stand_receipt=None
             self.seen_bridge=True;self.last_hello=self.clock();self.last_hello_source='request'
             return raw%256
         return raw if 0<=raw<=255 else 0
@@ -181,6 +189,10 @@ class Gate:
                     c['probe_unavailable']=True
                     c['drained']=True
                     self.cv.notify_all()
+                elif (c['op']=='begin_standing' and bridge_idle and c.get('mcu_error_before_start')
+                      and not c['started'] and not c['cancelled']):
+                    c.update(standing_unavailable=True,drained=True)
+                    self.cv.notify_all()
                 elif (c['op'] in PICKUP_BACKWARD6_OPS and bridge_idle
                       and c.get('mcu_error_before_start') and not c['started'] and not c['cancelled']):
                     c.update(retreat_unavailable=True,drained=True)
@@ -197,13 +209,17 @@ class Gate:
                     if not c or c['native']!=name or c['cancelled'] or c['epoch']!=self.epoch:continue
                     c['dispatched']=True
                     if c['op'] in _ACQUIRE_LOAD:self._may_hold_load=True
+                else:
+                    self._empty_stand_receipt=None
                 return name,0
             return 'default',0
 
     def started(self):
         with self.cv:
             c=self.current
-            if not c:return # 保留旧手动/服务的完成语义
+            if not c:
+                self._empty_stand_receipt=None
+                return # 外部服务或手动动作
             if c['cancelled']:
                 c.pop('cancelled_idle_at',None)
                 return
@@ -218,10 +234,13 @@ class Gate:
     def completed(self):
         with self.cv:
             if self.seen_bridge:
+                if not 0<=self.clock()-self.last_hello<=2.5:self._empty_stand_receipt=None
                 self.last_hello=self.clock()
                 self.last_hello_source='complete'
             c=self.current
-            if not c:return
+            if not c:
+                self._empty_stand_receipt=None
+                return
             if not c['dispatched']:
                 c['ignored_predispatch_complete']+=1
                 return
@@ -253,7 +272,10 @@ class Gate:
             if self.current:return reject('native_in_flight_or_not_drained')
             if self.queue:return reject('existing_queue_not_empty')
             if type(timeout) not in (float,int) or not 1<=timeout<=120:return reject('invalid_timeout')
-            if op=='begin' and self._may_hold_load:return reject('previous_load_requires_explicit_empty_reset')
+            if op in ('begin','begin_standing') and self._may_hold_load:return reject('previous_load_requires_explicit_empty_reset')
+            if op=='begin_standing' and (not nonce or not self._empty_stand_receipt
+                    or self._standing_start_unsupported or not self.micro.standing_start_deployment_ready()):
+                return reject('empty_stand_not_reusable')
             if op in EMPTY_PROBES or op in EMPTY_RECOVERY_OPS or op in EMPTY_GROUP_OPS or op=='empty_forward4':
                 if self.mode != 'auto' or self._may_hold_load:
                     return reject('empty_automatic_return_required')
@@ -262,11 +284,13 @@ class Gate:
             denial=self.micro.admit(op,nonce,self.epoch,self.recovery.status(self.epoch)['ready'])
             if denial:return reject(denial)
             if op in MISSION_OPS and not self.micro.mission_ready(self.epoch,self.recovery.status(self.epoch)['ready']):return reject('mission_v5_verified_installation_and_live_capability_required')
-            if op in ('begin','begin_align','stand'):
+            if op in ('begin','begin_standing','begin_align','stand'):
                 if self.mode!='manual':return reject('manual_idle_required')
                 if not self.recovery.status(self.epoch)['ready']:return reject('current_session_recovery_inspection_required')
                 self.mode='auto';self.last_key=0;self.reason='explicit stand' if op=='stand' else 'explicit automatic start'
             elif op not in PROBE_OPS and self.mode!='auto':return reject('automatic_mode_required')
+            if op not in PROBE_OPS and op!='finish':
+                self._empty_stand_receipt=None
             self.operation_seq+=1
             if nonce is not None:self._accepted_nonces.add(nonce)
             native = HASHES[op]
@@ -281,12 +305,12 @@ class Gate:
                 'started':False,'complete':False,'cancelled':False,'drained':False,
                 'ignored_predispatch_start':0,'ignored_predispatch_complete':0,'waiter_active':True}
             self.current=c;self.queue.append(c['native']);deadline=self.clock()+timeout
-            while not (c['complete'] or c['cancelled'] or c.get('probe_unavailable') or c.get('retreat_unavailable')):
+            while not (c['complete'] or c['cancelled'] or c.get('probe_unavailable') or c.get('retreat_unavailable') or c.get('standing_unavailable')):
                 left=deadline-self.clock()
                 if left<=0:self.cancel('automatic request timed out; no further queue');break
                 self.cv.wait(left)
             ok=(c['complete'] and not c['cancelled'] and not c.get('probe_unavailable')
-                and not c.get('retreat_unavailable') and c['epoch']==self.epoch)
+                and not c.get('retreat_unavailable') and not c.get('standing_unavailable') and c['epoch']==self.epoch)
             self.last_result={'op':op,'native':c['native'],'request_nonce':nonce,'operation_seq':c['operation_seq'],'protocol_completed':bool(ok),'reason':self.reason,
                 **{k:c[k] for k in ('dispatched','started','complete','cancelled','drained',
                                     'ignored_predispatch_start','ignored_predispatch_complete')}}
@@ -307,7 +331,14 @@ class Gate:
                 self.last_result['probe_unavailable']=True
             if c.get('retreat_unavailable'):
                 self.last_result['retreat_unavailable']=True
+            if c.get('standing_unavailable') and c['epoch']==self.epoch and not c['cancelled']:
+                self._standing_start_unsupported=True
+                self.last_result['standing_unavailable']=True
+                self.mode='manual'
             if ok:
+                if op in _RELEASE_LOAD and nonce and c['dispatched'] and c['started'] and c['drained']:
+                    self._empty_stand_receipt={'session':self.session,'epoch':self.epoch,
+                                              'sequence':c['operation_seq'],'operation':op}
                 if op in PROBE_OPS:self.micro.complete_probe(c,self.epoch)
                 if op in _RELEASE_LOAD:self._may_hold_load=False
                 self.current=None

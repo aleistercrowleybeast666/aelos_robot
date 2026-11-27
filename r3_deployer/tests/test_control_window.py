@@ -227,6 +227,22 @@ class ControlWindowTests(unittest.TestCase):
                 self._until(lambda: self.view.task_buttons[0].isEnabled())
                 self.assertEqual(self.view.connection_label.text(), "已连接")
 
+    def test_gui_sends_selected_release_angle(self):
+        captured = []
+        def run(command, *, cancel_event, drop_yaw_deg):
+            captured.append((command, drop_yaw_deg))
+            return {"ok": True, "accepted": True, "event": "done", "status": "task_complete"}
+        self.view.password.setText("test-credential")
+        api = SimpleNamespace(status=_status, start=run)
+        with patch.object(control_window, "_robot_api", return_value=api):
+            self.view.connection_button.click()
+            self._until(lambda: self.view.task_buttons[2].isEnabled())
+            self.assertEqual(self.view.drop_yaw.value(), 0)
+            self.view.drop_yaw.setValue(-15)
+            self.view.task_buttons[2].click()
+            self._until(lambda: self.window._motion is None)
+            self.assertEqual(captured, [(2, -15)])
+
     def test_power_off_during_task_keeps_uncertainty_until_manual_reconnect(self):
         off = Event()
         started = Event()

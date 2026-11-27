@@ -10,7 +10,7 @@ from checkpoint_alignment import (Checkpoint_AlignEmptyMarker as ReturnTrial_Ali
                                   Checkpoint_MeasureEmptyMarker as _empty_marker_geometry,
                                   Checkpoint_EmptyMarkerCurrent as _empty_marker_current,
                                   Checkpoint_EmptyTurnAction, EMPTY_VISUAL_TURN_TRIGGER_DEG)
-from checkpoint_scan import Checkpoint_Observe, CheckpointScanResult
+from checkpoint_scan import Checkpoint_CorrectMissedTravel, Checkpoint_Observe, CheckpointScanResult
 from block_camera import BlockEvidenceExpired, BlockFrameUnavailable
 from pickup_controller import PickupObservationUnavailable
 from nav_observation import summarize, wrap
@@ -209,19 +209,24 @@ def _turn(robot, step, checkpoint=None):
     robot.check()
     if robot.load_kind != 'empty':
         raise RuntimeError('return turn requires empty expected load')
-    if checkpoint is not None and abs(step['target_delta_deg']) == 180:
+    if checkpoint is not None and (abs(step['target_delta_deg']) == 180 or checkpoint == (5, 'return')):
         step = dict(step, next_turn_checkpoint=checkpoint)
     robot.chain_step(step, configured=True)
 
 
-def ReturnTrial_TurnAtBase(robot, step, *, scan_follows=False):
+def ReturnTrial_TurnAtBase(robot, step, *, scan_follows=False, drop_turn=None):
     """Drop the loaded heading reference before the empty departure turn."""
     nav = robot.ensure_navigation_io()
     nav.mag.anchor = None
     if not getattr(robot.backend, 'is_simulation', False):
         robot.check_magnetic_before_motion(configured=True)
     robot.prepare_heading_segment(fresh=True)
-    _turn(robot, step, (5, 'return') if scan_follows else None)
+    if drop_turn and drop_turn['applied_deg']:
+        from base_placement import BasePlacement_ReturnTurn
+        step = BasePlacement_ReturnTurn(step, drop_turn['applied_deg'])
+    if step['repeat']:
+        _turn(robot, step, (5, 'return') if scan_follows else None)
+    return dict(step)
 
 
 def _return_camera_snapshot(robot, snapshot, tag, after):
@@ -1006,7 +1011,7 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     return leg
 
 
-def ReturnTrial_Run(robot):
+def ReturnTrial_Run(robot, *, drop_turn=None):
     """Follow expected return markers, then hand off at confirmed Tag 1."""
     result = {'status': ReturnTrialResult.ROUTE_UNAVAILABLE.value, 'reason': '',
               'checkpoint': None, 'direction': 'return', 'station_reached': False,
@@ -1060,7 +1065,8 @@ def ReturnTrial_Run(robot):
 
     set_status(ReturnTrialResult.RETURNING, 'moving through the estimated empty return')
     _report_progress(robot, 'cmd2_return_leg', expected_tag=5, last_passed_tag=None, return_step='base_turn')
-    ReturnTrial_TurnAtBase(robot, chain['base_turn'], scan_follows=not chain['tag5'])
+    result['base_turn'] = ReturnTrial_TurnAtBase(robot, chain['base_turn'], scan_follows=not chain['tag5'],
+                                                drop_turn=drop_turn)
     result['base_turn_completed'] = True
     estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
     route_actions = [_actions(chain[f'tag{tag}']) for tag in _RETURN_TAGS]
@@ -1090,6 +1096,13 @@ def ReturnTrial_Run(robot):
                                                try_transfer_probe=can_probe and tag == 1, early=early or departure.get('view'))
         reserved = (sum(len(group) for group in route_actions[index+1:]) + chain['transfer_turn']['repeat']
                     + len(_actions(chain['station_side'])))
+        if (estimate and boundary is None and not departure.get('conflict') and not leg.get('detected')
+                and observed in (CheckpointScanResult.CHECKPOINT_NOT_SEEN, CheckpointScanResult.MOTION_NOT_STARTED)
+                and Checkpoint_CorrectMissedTravel(robot,nav,leg,reserved_actions=reserved)):
+            leg['missed_travel_heading']['initial_miss'] = leg.pop('checkpoint_not_seen')
+            boundary = _return_boundary_geometry(robot,nav,tag)
+            observed,reason = _observe_departure(robot,nav,profile,leg,previous,
+                                                  try_transfer_probe=can_probe and tag==1)
         if tag == 7 and estimate:
             midpoint = leg.get('tag7_midroute_check')
             for attempt in range(2 if midpoint else 1):

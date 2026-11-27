@@ -15,6 +15,7 @@ from . import deploy, settings
 
 
 _ROUTES = frozenset({'0', '1', '2'})
+DROP_YAW_LIMIT_DEG = 30
 _ACCEPTED_PREFIX = 'R3 command accepted;'
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STATUS_TIMEOUT_S = 8
@@ -42,6 +43,12 @@ class RobotControlUncertainError(RuntimeError):
 
 def _cancelled(event):
     return event is not None and event.is_set()
+
+
+def DropYaw_Validate(degrees):
+    if type(degrees) is not int or abs(degrees) > DROP_YAW_LIMIT_DEG:
+        raise ValueError('放物转角须为 -30 到 +30 之间的整数度。')
+    return degrees
 
 
 def _skipped():
@@ -89,6 +96,7 @@ class _Reply:
         self.stdout_result = None
         self.stderr_result = None
         self.accepted = False
+        self.accepted_monotonic = None
         self.bytes_read = 0
 
     def feed(self, data, stderr):
@@ -112,6 +120,8 @@ class _Reply:
             return
         if not stderr and line.startswith(_ACCEPTED_PREFIX):
             self.accepted = True
+            if self.accepted_monotonic is None:
+                self.accepted_monotonic = time.monotonic()
             self.log('树莓派已接受自动命令，正在等待任务结果。')
             return
         try:
@@ -183,6 +193,7 @@ class RobotApi:
             if _cancelled(cancel_event):
                 return _skipped()
             try:
+                dispatch_started = time.monotonic()
                 channel.exec_command(command)
                 deadline = time.monotonic() + timeout
                 exit_code = None
@@ -211,6 +222,8 @@ class RobotApi:
                         if stopping and (result.get('event') != 'stopped'
                                          or result.get('status') not in ('stop_requested', 'already_idle')):
                             raise RuntimeError('停止请求没有返回确认回执。')
+                        if motion and reply.accepted_monotonic is not None and arguments[0] in _ROUTES:
+                            result['client_dispatch_to_accept_s'] = reply.accepted_monotonic - dispatch_started
                         return result
                     if exit_code is None:
                         if not transport.is_active():
@@ -236,14 +249,18 @@ class RobotApi:
         with self._connection() as (transport, log):
             return self._exchange(transport, log, ['status'])
 
-    def start(self, command, *, cancel_event=None):
+    def start(self, command, *, cancel_event=None, drop_yaw_deg=0):
         """Explicitly run route 0, 1 or 2 and wait for its final R3 response."""
         route = self._route(command)
+        angle = DropYaw_Validate(drop_yaw_deg)
         if _cancelled(cancel_event):
             return _skipped()
         self._require_default_path()
+        started = time.monotonic()
         with self._connection() as (transport, log):
+            connected = time.monotonic()
             ready = self._exchange(transport, log, ['status', '--device-check'], cancel_event=cancel_event)
+            checked = time.monotonic()
             if ready.get('status') == 'cancelled_before_dispatch':
                 return ready
             if not ready['ok'] or ready.get('event') != 'status' or ready.get('protocol') != 'r3.warm.v1':
@@ -257,7 +274,14 @@ class RobotApi:
                            'exit_code': None, 'reason': EMPTY_RESET_REQUIRED_MESSAGE, 'preflight': ready}
             if RobotStart_EmptyResetStatus(empty_reset):
                 return empty_reset
-            result = self._exchange(transport, log, [route], motion=True, cancel_event=cancel_event)
+            arguments = [route]
+            if angle:
+                arguments.extend(['--drop-yaw-deg', str(angle)])
+            result = self._exchange(transport, log, arguments, motion=True, cancel_event=cancel_event)
+            result['client_startup_timing'] = {'ssh_connect_s': connected - started,
+                                               'device_check_s': checked - connected}
+            if 'client_dispatch_to_accept_s' in result:
+                result['client_startup_timing']['dispatch_to_accept_s'] = result.pop('client_dispatch_to_accept_s')
             if RobotStart_EmptyResetStatus(result):
                 result['reason_zh'] = EMPTY_RESET_REQUIRED_MESSAGE
             return result
@@ -287,9 +311,10 @@ class RobotApi:
             raise RuntimeError('部署没有返回可确认的回执。')
         return dict(result, ok=result.get('status') == 'deployed')
 
-    def update_then_start(self, command, *, cancel_event=None, mcu_readback=None):
+    def update_then_start(self, command, *, cancel_event=None, mcu_readback=None, drop_yaw_deg=0):
         """Deploy, verify activation and only then dispatch the explicitly chosen route."""
         route = self._route(command)
+        angle = DropYaw_Validate(drop_yaw_deg)
         self._require_default_path()
         if _cancelled(cancel_event):
             return {'ok': False, 'deployment': None, 'start': _skipped()}
@@ -306,7 +331,7 @@ class RobotApi:
                 'exit_code': None, 'reason': '部署回执尚未确认正式路径和控制节点已激活。',
             }}
         try:
-            started = self.start(route, cancel_event=cancel_event)
+            started = self.start(route, cancel_event=cancel_event, drop_yaw_deg=angle)
         except RobotControlUncertainError as exc:
             started = exc.as_result()
         except Exception as exc:

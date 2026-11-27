@@ -438,7 +438,7 @@ class DeploymentTransactionTests(unittest.TestCase):
     def test_current_empty_return_overlay_registers_the_exact_manifest_and_owner_gate(self):
         baseline = self._mcu_receipt()
         files = self._private_mcu_manifest(settings.DEFAULT_MCU_OVERLAY)
-        self.assertEqual(files, {**baseline['files'], **remote._MCU_PLACEMENT_STRAFE_SHA256})
+        self.assertEqual(files, {**baseline['files'], **remote._MCU_STANDING_START_SHA256})
         readback = dict(baseline, files=files)
         self.assertEqual(remote.validate_mcu_readback(readback,baseline['files']),readback)
         boot = 'ae8ca915-435e-4481-a85d-b097ed2a2f14'
@@ -446,7 +446,8 @@ class DeploymentTransactionTests(unittest.TestCase):
         self.mocks['_reload'].return_value = {'owner': {'micro_trial': {
             'cmd0_route_deployment_readback_ready': True, 'medium_turn_deployment_readback_ready': True,
             'cmd0_right5_deployment_readback_ready': True, 'pair_deployment_readback_ready': True,
-            'pickup_backward8_deployment_readback_ready': True, 'empty_recovery_deployment_readback_ready': True}}}
+            'pickup_backward8_deployment_readback_ready': True, 'empty_recovery_deployment_readback_ready': True,
+            'standing_start_deployment_readback_ready': True}}}
         with patch.object(remote,'_boot_id',return_value=boot):
             result = remote._commit(self.target,self.ticket,readback)
         self.assertTrue(result['mcu_readback_registered'])
@@ -476,6 +477,14 @@ class DeploymentTransactionTests(unittest.TestCase):
                      'lua/craic_single_micro.lua': remote._MCU_PICKUP_BACKWARD8_SHA256['lua/craic_single_micro.lua']})
         with self.assertRaisesRegex(ValueError, 'MCU 回执与受支持的动作包不符'):
             remote.validate_mcu_readback(mixed, expected)
+
+    def test_standing_start_requires_both_new_files(self):
+        baseline = self._mcu_receipt()
+        for key in ('lua/craic_actions.lua', 'lua/craic_auto_bridge.lua'):
+            files = {**baseline['files'], **remote._MCU_STANDING_START_SHA256,
+                     key: remote._MCU_PLACEMENT_STRAFE_SHA256[key]}
+            with self.subTest(path=key), self.assertRaisesRegex(ValueError, 'MCU 回执与受支持的动作包不符'):
+                remote.validate_mcu_readback(dict(baseline, files=files), baseline['files'])
 
     def test_tuned_receipt_rejects_missing_extra_or_changed_files(self):
         readback = self._mcu_receipt()

@@ -301,6 +301,7 @@ class _ControlWindow(QMainWindow):
         can_request_start = self._can_request_start()
         for button in view.task_buttons.values():
             button.setEnabled(can_request_start)
+        view.drop_yaw.setEnabled(not busy and not robot_busy)
         needs_empty_reset = self._needs_empty_reset()
         view.reset_empty_button.setEnabled(self._can_reset_empty())
         task_hint = self._task_hint_text(busy, robot_busy)
@@ -683,7 +684,7 @@ class _ControlWindow(QMainWindow):
             if request is None or not self._confirm(
                 "部署后启动", f"将部署到 {request.target} 的 {request.values['remote_path']}。\n"
                 f"\n{request.deployment_origin}\n\n"
-                f"确认部署成功后自动启动「{_TASK_NAMES[command]}」。\n继续？"
+                f"确认部署成功后自动启动「{_TASK_NAMES[command]}」，放物转角 {self.view.drop_yaw.value():+d}°。\n继续？"
             ):
                 return
             self._prepare_deployment(request, command=command)
@@ -697,6 +698,7 @@ class _ControlWindow(QMainWindow):
     def _queue_motion(self, request, command, *, after_update=False, mcu_readback=None, cancelled=None):
         empty_reset = command == _RESET_EMPTY
         task = _Motion(request, command, after_update, cancelled or Event())
+        angle = 0 if empty_reset else self.view.drop_yaw.value()
         self._motion = task
         self._progress.reset(None if empty_reset else command)
         self._render_progress()
@@ -704,7 +706,8 @@ class _ControlWindow(QMainWindow):
             self._status(f"正在{_RESET_EMPTY_LABEL}…")
         else:
             operation_name = "正在部署，完成后检查并启动" if after_update else "正在检查并启动"
-            self._status(f"{operation_name}「{_TASK_NAMES[command]}」")
+            suffix = f" · 放物转角 {angle:+d}°" if angle else ""
+            self._status(f"{operation_name}「{_TASK_NAMES[command]}」{suffix}")
         self._log(self.view.status_label.text())
         self._update_buttons()
 
@@ -712,14 +715,16 @@ class _ControlWindow(QMainWindow):
             try:
                 log = self._post_log(request)
                 api = _robot_api(request, log)
+                options = {"drop_yaw_deg": angle} if angle else {}
                 if empty_reset:
                     outcome = api.reset_empty(cancel_event=task.cancelled)
                 elif mcu_readback is not None:
                     _wait_for_mcu_owner(request, task.cancelled, log)
-                    outcome = api.update_then_start(command, cancel_event=task.cancelled, mcu_readback=mcu_readback)
+                    outcome = api.update_then_start(command, cancel_event=task.cancelled,
+                                                    mcu_readback=mcu_readback, **options)
                 else:
                     action = api.update_then_start if after_update else api.start
-                    outcome = action(command, cancel_event=task.cancelled)
+                    outcome = action(command, cancel_event=task.cancelled, **options)
             except Exception as exc:
                 outcome = exc
             result = _motion_result(task, outcome)

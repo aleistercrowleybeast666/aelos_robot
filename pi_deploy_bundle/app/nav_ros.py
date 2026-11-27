@@ -272,6 +272,9 @@ class RosNavigationIO:
     def observe_checkpoint_id(self, tag_id, after_ns, timeout, check):
         return self.observe(tag_id, after_ns, timeout, check, quick_id=True)
 
+    def observe_preflight(self, after_ns, timeout, check):
+        return self.observe(None, max(after_ns, self.ros_now_ns()), timeout, check)
+
     def observe(self,tag_id,after_ns,timeout,check,*,quick_id=False):
         start_ros=self.ros_now_ns()
         reuse=self.cfg.get('reuse_post_completion_observations',False) is True
@@ -295,11 +298,17 @@ class RosNavigationIO:
             check()
             with self.lock:
                 now_ns=self.ros_now_ns();floor=max(barrier,self.restart_barrier)
-                unique={(r['stamp_ns'], None if quick_id else r['frame_id']) for r in self.rows
-                        if r['id']==tag_id and eligible(r,floor,now_ns) and (not quick_id or valid_for_id(r))}
-                if len(unique)>=required and (not require_healthy_streams or
-                        (self.parameters_ok and self._camera_healthy(now_ns,self.clock(),floor))):
-                    break
+                if tag_id is None:
+                    # Preflight checks fresh image and detector heartbeats, even on a blank floor.
+                    if (self.parameters_ok and self._camera_healthy(now_ns,self.clock(),floor)
+                            and self.visual_camera_status().get('ready')):
+                        break
+                else:
+                    unique={(r['stamp_ns'], None if quick_id else r['frame_id']) for r in self.rows
+                            if r['id']==tag_id and eligible(r,floor,now_ns) and (not quick_id or valid_for_id(r))}
+                    if len(unique)>=required and (not require_healthy_streams or
+                            (self.parameters_ok and self._camera_healthy(now_ns,self.clock(),floor))):
+                        break
             self.changed.wait(min(.05,max(0,deadline-self.clock())));self.changed.clear()
         check()
         with self.lock:

@@ -589,6 +589,19 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
 
     if estimate and not EntranceTrial_IsEntryAccepted(entry_alignment):
         result['entry_fallback'] = 'Tag 1 找码后仍未取得位姿，按预设步数走向 Tag 2。'
+        search = entry_alignment or {}
+        if (type(search.get('tag1_search_completed_ns')) is int
+                and search['tag1_search_completed_ns'] == robot.last_action_completed_ros_ns):
+            net = search.get('tag1_reacquire_forward_steps',0) - search.get('tag1_reacquire_backward_steps',0)
+            # Without a Tag 1 pose this is a nominal displacement only. Keep
+            # the Tag 2 boundary scans active to supersede it as soon as visible.
+            if net:
+                remaining = max(2, target_steps - net)
+                adjusted, exact = EntranceTrial_PlanForward(remaining,continuous=continuous,legacy=legacy)
+                if exact == remaining and robot.count + len(adjusted) <= robot.cfg['max_body_macros_per_journey']:
+                    operations, planned_steps, target_steps = adjusted, exact, remaining
+                    result.update(target_steps=remaining,planned_steps=remaining,entry_search_net_steps=net,
+                        entry_fallback=f'Tag 1 尚未定位，找码净位移 {net:+d} 步已合入路线，继续向 Tag 2 走 {remaining} 步。')
         entry_alignment = camera_info = None
     if camera_info is not None:
         snapshot = getattr(nav.io, 'preflight_health_snapshot', None)

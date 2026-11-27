@@ -3,16 +3,17 @@ import collections,json,math,time,types,threading
 from enum import Enum
 from pathlib import Path
 
-from checkpoint_alignment import (Checkpoint_RebaseTagHeading, Checkpoint_TurnAtTag5,
+from checkpoint_alignment import (Checkpoint_RebaseTagHeading, Checkpoint_TrackEntryHeading, Checkpoint_TurnAtTag5,
                                   Checkpoint_TurnFromTagHeading, RouteTagHeadingRebaseResult)
 from checkpoint_errors import (VisualCamera_GetFreshnessCheck,
                                VisualCamera_DiagnoseWindow, VisualCamera_Read,
                                VisualCameraUnavailable, VisualMicroStopped)
-from checkpoint_scan import Checkpoint_FromBoundary, Checkpoint_ReadScanTime, Checkpoint_ReadWindow
+from checkpoint_scan import (Checkpoint_FromBoundary, Checkpoint_LastTravelDrift, Checkpoint_ReadPreflightWindow,
+                             Checkpoint_ReadScanTime, Checkpoint_ReadWindow)
 from transfer_test import BoundaryReached, MACRO_BOUNDARIES
 from cmd0_motion import (COMMAND0_TRANSFER_FORWARD_STEPS, TRANSFER_FORWARD9_ACTION, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady, Cmd0Motion_LoadRouteSteps,
-                         FORWARD_ACTIONS as CMD0_FORWARD_ACTIONS, SIDE_ACTIONS as CMD0_SIDE_ACTIONS,
+                         StandingStartUnavailable, FORWARD_ACTIONS as CMD0_FORWARD_ACTIONS, SIDE_ACTIONS as CMD0_SIDE_ACTIONS,
                          PLACE_ACTION as CMD0_PLACE_ACTION, PICKUP_BACKWARD4_ACTION, PICKUP_BACKWARD6_ACTION,
                          PICKUP_BACKWARD8_ACTION, PICKUP_EXIT_ACTIONS)
 from heading_guard import (CARRY_HEADING_ACTIONS, CORRIDOR_HEADING_ACTIONS,
@@ -91,6 +92,9 @@ def load_routes(project):
     return module
 
 def prepare(mode,cfg,project,capabilities=(),simulation=False):
+    if 'drop_yaw_deg' in cfg:
+        from base_placement import BasePlacement_ValidateYaw
+        BasePlacement_ValidateYaw(mode, cfg['drop_yaw_deg'])
     if mode=='0' and cfg.get('transfer_test',{}).get('stop_after','terminal_scan')=='terminal_scan':
         cfg=dict(cfg,route_steps=Cmd0Motion_LoadRouteSteps(project))
     if mode in ('1','2'):
@@ -188,11 +192,17 @@ class Robot:
     def completed_call(self,name,timeout_s):
         """Backend return means protocol COMPLETE, never physical posture confirmation."""
         started=self.clock()
+        self._last_search_travel = None
+        before = getattr(getattr(self,'heading_guard',None),'last_sample',None)
+        travel = None
+        if isinstance(before,dict) and any(kind in name for kind in ('forward','backward','strafe')):
+            travel = (name, started, self.last_action_completed_monotonic, before)
         try:result=self.backend.call(name,timeout_s)
         except BaseException:
             self.events.append({'stage_timing':{'stage':'protocol_action','action':name,'started_monotonic':started,'elapsed_s':self.clock()-started,'protocol_completed':False}})
             raise
         completed=self.clock()
+        self._last_search_travel = travel
         self.last_action_completed_monotonic=completed
         nav=getattr(self,'navigator',None)
         io=getattr(nav,'io',None)
@@ -208,7 +218,7 @@ class Robot:
                 self.last_boundary_visual=None
         timing['completed_ros_ns']=self.last_action_completed_ros_ns
         self.events.append({'stage_timing':timing})
-        if name=='stand':
+        if name in ('stand','begin_standing'):
             # Preflight samples/anchors are never a post-stand baseline.
             self.heading_guard=None;self.last_heading_report=None
             if nav is not None:nav.mag.anchor=None
@@ -607,11 +617,11 @@ class Robot:
         except MagneticDataUnavailable as exc:
             if not self.defer_magnetic_route_fault(exc):raise
         finally:self.events.append({'stage_timing':{'stage':'heading_reference','elapsed_s':self.clock()-started}})
-    def sensor_preflight(self):
+    def sensor_preflight(self,*,check_idle=None):
         if getattr(self.backend,'is_simulation',False):return
         nav=self.ensure_navigation_io()
         if nav is None:raise RuntimeError('transfer sensor monitoring must be configured before first stand')
-        checker=getattr(self.backend,'check_manual_idle',None)
+        checker=check_idle or getattr(self.backend,'check_manual_idle',None)
         if checker is None:raise RuntimeError('manual-idle sensor preflight unavailable')
         from micro_trial import active
         from heading_guard import HeadingGuard, MicroTrialStopped
@@ -633,14 +643,14 @@ class Robot:
             if time.monotonic()-wall_started>wall_limit:raise RuntimeError('sensor preflight reader deadline exceeded')
         def camera():
             target=nav.cfg['legs']['outbound'][0]['id']
-            w=Checkpoint_ReadWindow(nav.io,target,0,camera_s,reader_check,classify_errors=False)
+            w=Checkpoint_ReadPreflightWindow(nav.io,target,0,camera_s,reader_check)
             if retry_camera:
                 expected=visual['camera_info']['expected_fingerprint']
                 issue=VisualCamera_DiagnoseWindow(w,w.get('camera_info',{}),expected)
                 if issue is not None and issue[2]:
                     camera_attempts.append({'reason':issue[0],'reason_zh':issue[1]})
                     reader_check()
-                    w=Checkpoint_ReadWindow(nav.io,target,nav.io.ros_now_ns(),camera_s,reader_check,classify_errors=False)
+                    w=Checkpoint_ReadPreflightWindow(nav.io,target,nav.io.ros_now_ns(),camera_s,reader_check)
                     issue=VisualCamera_DiagnoseWindow(w,w.get('camera_info',{}),expected)
                 if issue is not None:
                     raise RuntimeError(issue[0]+' BEFORE stand')
@@ -1586,8 +1596,16 @@ class Robot:
         if not stance_evidence['seen']:
             # Only the first pickup starts at the operator's staging area.
             pickup_entry=getattr(self,'route_command','0') in ('1','2')
-            if (scan.get('status')!='no_tag' or approach.get('far_probe_done')
-                    or pickup_entry and approach.get('motion_groups',0)):
+            if scan.get('status')!='no_tag' or approach.get('far_probe_done') or approach.get('drift_probe_done'):
+                return decision.WAIT_AMBIGUOUS,None
+            drift = Checkpoint_LastTravelDrift(self,nav)
+            if drift:
+                if drift['drift_deg'] < 0:
+                    return decision.ADVANCE_UNSEEN,drift
+                if Cmd0Motion_ContinuousReady(self.backend):
+                    return decision.RETREAT_UNSEEN,drift
+                return decision.WAIT_AMBIGUOUS,drift
+            if (pickup_entry or approach.get('probe_reference_unavailable')) and approach.get('motion_groups'):
                 return decision.WAIT_AMBIGUOUS,None
             if pickup_entry and getattr(self,'deliveries',0)==0:
                 if Cmd0Motion_ContinuousReady(self.backend):
@@ -1671,7 +1689,11 @@ class Robot:
             if 'decisions' not in approach:
                 self.events.append({'terminal_tag_forward_reacquisition':approach})
                 approach['decisions']=[]
-            approach['decisions'].append({'status':outcome.value,'partial_geometry':geometry})
+            drift = geometry if geometry and 'drift_deg' in geometry else None
+            step = {'status':outcome.value, 'partial_geometry':None if drift else geometry}
+            if drift:
+                step['motion_history'] = drift
+            approach['decisions'].append(step)
             if outcome is _Tag1ReacquireResult.RETREAT_UNSEEN:
                 action='cmd0_carry_backward2'
                 reason='取物首程未读到 Tag 1，后退两步再扫。'
@@ -1687,10 +1709,28 @@ class Robot:
                         f'Tag 1 尚未读到，按入口路线前探两步再扫（第 {len(actions)+1} 组）。')
             else:
                 break
+            if drift:
+                reason = ('上一步顺时针偏转，后退两步再找 Tag 1。' if drift['drift_deg'] > 0
+                          else '上一步逆时针偏转，前探两步再找 Tag 1。')
+                approach['drift_probe_done'] = True
+            if (outcome in (_Tag1ReacquireResult.ADVANCE_UNSEEN,_Tag1ReacquireResult.RETREAT_UNSEEN)
+                    and self.magnetic_route_only and 'probe_relative_reference' not in approach):
+                # A changed field invalidates the old map heading. A fresh
+                # stationary reference can still measure drift during this probe.
+                reference = Checkpoint_TrackEntryHeading(self,nav)
+                approach['probe_relative_reference'] = reference.value
+                approach['probe_reference_unavailable'] = reference is not RouteTagHeadingRebaseResult.APPLIED
             self.report_command0_phase('cmd0_entry_reacquire',reason_zh=reason)
             self.action(action,monitor_only_as='carry_forward2')
             self.nav_count+=1
             approach['motion_groups']=approach.get('motion_groups',0)+1
+            approach['last_probe_stance_ns'] = self.last_action_completed_ros_ns
+            if action == 'cmd0_carry_backward2':
+                approach['backward_steps'] = approach.get('backward_steps',0) + 2
+            if drift:
+                # Re-sample the course at the cleared stance before selecting a turn.
+                self.monitor_heading('carry_forward2',one_turn_before_scan=True)
+                approach['last_probe_stance_ns'] = self.last_action_completed_ros_ns
             stance_evidence.clear()
             if outcome is _Tag1ReacquireResult.RETREAT_UNSEEN:
                 approach['unseen_retreat_action']=action
@@ -1719,11 +1759,12 @@ class Robot:
 
     @staticmethod
     def _record_tag1_search_steps(result,approach):
+        if approach.get('motion_groups'):
+            result['tag1_search_completed_ns'] = approach.get('last_probe_stance_ns')
         if approach['completed_actions']:
             result['tag1_reacquire_forward_steps']=2*len(approach['completed_actions'])
-        retreats=sum(bool(approach.get(key)) for key in ('unseen_retreat_action','retreat_action'))
-        if retreats:
-            result['tag1_reacquire_backward_steps']=2*retreats
+        if approach.get('backward_steps'):
+            result['tag1_reacquire_backward_steps']=approach['backward_steps']
 
     def _tag1_supports_entry_probe(self, tag):
         supported_load = self.load_kind == 'single' or (
@@ -1983,6 +2024,27 @@ def _run_configured_transfer(robot, chain):
     return robot.scan_ar()
 
 
+def Startup_VerifySensorsAndCapabilities(robot,verify,timeout):
+    parallel=getattr(robot.backend,'verify_during_sensor_preflight',None)
+    if parallel is None:
+        verify(timeout)
+        robot.sensor_preflight()
+        return
+    if parallel(verify,robot.sensor_preflight,timeout):
+        # A slow serial response can outlive previously fresh camera or
+        # magnetic data. Reuse the route's own bounded recheck/fallback.
+        nav=robot.ensure_navigation_io()
+        try:
+            health=VisualCamera_Read(lambda _:nav.io.preflight_health_snapshot(),robot.backend.check_manual_idle)
+        except VisualCameraUnavailable:
+            health={}
+        if (not health.get('camera_healthy') or
+                nav.cfg.get('visual_micro',{}).get('execute') and not health.get('camera_info',{}).get('ready') or
+                not robot.magnetic_route_only and nav.cfg.get('magnetic',{}).get('enabled')
+                and not nav.io.motion_capture_verified):
+            robot.sensor_preflight()
+
+
 def execute(plan,backend,robot_factory=Robot):
     if 'outbound_pickup' in plan:
         from outbound_pickup_trial import OutboundPickup_Run
@@ -1994,10 +2056,13 @@ def execute(plan,backend,robot_factory=Robot):
     if mode in TURN_TEST_STEPS:
         from micro_step_test import execute_micro_step
         return execute_micro_step(plan,backend)
-    def diagnostic_monitor(name,load_kind):
+    def diagnostic_monitor(name,load_kind,*,automatic_stand=None):
         if getattr(backend,'is_simulation',False):return []
         monitor=robot_factory(backend,cfg,plan['project']);monitor.navigation_bundle=plan.get('navigation');monitor.load_kind=load_kind
-        if name=='stand':
+        if automatic_stand is not None:
+            monitor.last_action_completed_monotonic=automatic_stand.last_action_completed_monotonic
+            monitor.last_action_completed_ros_ns=automatic_stand.last_action_completed_ros_ns
+        elif name=='stand':
             def manual_check():
                 checker=getattr(backend,'check_manual_idle',None)
                 if checker is None:raise RuntimeError('manual-idle observation check unavailable')
@@ -2055,6 +2120,7 @@ def execute(plan,backend,robot_factory=Robot):
         h=plan.get('navigation',{}).get('post_action_heading',{})
         from micro_trial import active
         micro_active=active(plan.get('navigation',{}))
+        check_sensors=(mode in ('0','stage1') and cfg.get('transfer_test',{}).get('preflight_sensor_streams'))
         transfer_nine=(robot.command0_scan_after_turn
                        and cfg.get('route_steps',{}).get('transfer_forward_steps')==9)
         if (micro_active or transfer_nine) and not getattr(backend,'is_simulation',False):
@@ -2064,18 +2130,40 @@ def execute(plan,backend,robot_factory=Robot):
             if verifier is None:
                 if transfer_nine:raise NotReady('启动前无法核验中转区连续 9 步的 MCU 能力')
                 raise RuntimeError('fresh micro capability backend unavailable BEFORE motion')
-            started=robot.clock()
-            try:verifier(cfg['request_timeout_s'])
-            finally:robot.events.append({'stage_timing':{'stage':'micro_capability','elapsed_s':robot.clock()-started}})
+            def verify_startup(timeout):
+                started=robot.clock()
+                try:verifier(timeout)
+                finally:robot.events.append({'stage_timing':{'stage':'micro_capability','elapsed_s':robot.clock()-started}})
+            if check_sensors:
+                Startup_VerifySensorsAndCapabilities(robot,verify_startup,cfg['request_timeout_s'])
+                check_sensors=False
+            else:
+                verify_startup(cfg['request_timeout_s'])
         if mode in ('0','stage1'):
-            if cfg.get('transfer_test',{}).get('preflight_sensor_streams'):
+            if check_sensors:
                 robot.sensor_preflight()
-            # 只有显式任务开始才归位；失败/取消/未知完成不begin、不走、不抓。
-            robot.completed_call('stand',cfg['request_timeout_s'])
-            if not plan.get('navigation',{}).get('skip_initial_stand_monitor',False):
-                robot.events.extend(diagnostic_monitor('stand','empty'))
-            robot.events.append({'initial_stand':'protocol_completed','may_release_object':True,'physical_posture_confirmed':False})
-        backend.call('begin',cfg['request_timeout_s'])
+            # The operator's stand button always runs its own native action. Only
+            # command 0 may combine the next begin with the MCU-local posture check.
+            combined = False
+            stand_monitor = not plan.get('navigation',{}).get('skip_initial_stand_monitor',False)
+            if mode=='0' and getattr(backend,'standing_start_available',lambda: False)():
+                try:
+                    robot.completed_call('begin_standing',cfg['request_timeout_s'])
+                    combined = True
+                except StandingStartUnavailable:
+                    pass  # The owner proved the optional native action never started.
+            if combined:
+                robot.events.append({'initial_stand':'checked_at_mcu_on_begin','may_release_object':False,
+                                     'physical_posture_confirmed':False})
+                if stand_monitor:
+                    robot.events.extend(diagnostic_monitor('stand','empty',automatic_stand=robot))
+            else:
+                robot.completed_call('stand',cfg['request_timeout_s'])
+                if stand_monitor:
+                    robot.events.extend(diagnostic_monitor('stand','empty'))
+                robot.events.append({'initial_stand':'protocol_completed','may_release_object':True,'physical_posture_confirmed':False})
+        if mode not in ('0','stage1') or not combined:
+            backend.call('begin',cfg['request_timeout_s'])
         if mode in ('0','stage1'):
             try:
                 chain=cfg.get('route_steps',{}).get('command0_transfer') if robot.command0_scan_after_turn else None

@@ -32,6 +32,11 @@ def main(argv=None):
     run = actions.add_parser('run', help='启动指定自动机器人命令')
     run.add_argument('command', choices=('0', '1', '2'),
                      help='0 单程搬运原始物资，1 单程搬运转运物资，2 连续搬运转运物资')
+    from .control_api import DROP_YAW_LIMIT_DEG
+    for command_parser in (run, update):
+        command_parser.add_argument('--drop-yaw-deg', type=int, metavar='度',
+                                    choices=range(-DROP_YAW_LIMIT_DEG, DROP_YAW_LIMIT_DEG + 1),
+                                    help='放物目标转角 -30 至 +30°，负左正右。命令 2 第二趟反向。')
     actions.add_parser('stop', help='取消机器人后续自动动作')
     actions.add_parser('status', help='读取当前机器人控制状态')
     actions.add_parser('scan', help='只读识别胸部相机视野中的标记')
@@ -58,6 +63,10 @@ def main(argv=None):
     restore.add_argument('drive')
     restore.add_argument('backup', type=Path)
     args = parser.parse_args(argv)
+    angle = getattr(args, 'drop_yaw_deg', None)
+    if args.action in ('update', 'deploy') and angle is not None and args.run is None:
+        parser.error('--drop-yaw-deg 在部署时需要与 --run 一起使用')
+    start_options = {'drop_yaw_deg': angle} if angle is not None else {}
     try:
         values = settings.load()
         if args.action in ('config', 'update', 'deploy'):
@@ -103,7 +112,7 @@ def main(argv=None):
                 from .control_api import RobotApi
 
                 api = RobotApi(values, secret, log=lambda line: print(line, file=sys.stderr, flush=True))
-                result = api.start(args.run)
+                result = api.start(args.run, **start_options)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 return 0 if result.get('ok') else 1
         elif args.action in ('run', 'stop', 'status', 'scan') or getattr(args, 'run', None):
@@ -112,9 +121,9 @@ def main(argv=None):
             secret = None if settings.password_for(values) else getpass('SSH 密码：')
             api = RobotApi(values, secret, log=lambda line: print(line, file=sys.stderr, flush=True))
             if args.action == 'run':
-                result = api.start(args.command)
+                result = api.start(args.command, **start_options)
             elif args.action in ('update', 'deploy'):
-                result = api.update_then_start(args.run)
+                result = api.update_then_start(args.run, **start_options)
             else:
                 result = getattr(api, args.action)()
             print(json.dumps(result, ensure_ascii=False, indent=2))

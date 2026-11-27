@@ -34,6 +34,16 @@ class ControlCliTests(unittest.TestCase):
         api.update_then_start.assert_called_once_with('2')
         api.start.assert_not_called()
 
+    def test_release_angle_is_forwarded_for_direct_and_combined_start(self):
+        _, _, api = self.run_command(['run', '0', '--drop-yaw-deg', '-15'])
+        api.start.assert_called_once_with('0', drop_yaw_deg=-15)
+        _, _, api = self.run_command(['update', '--run', '2', '--drop-yaw-deg', '20'])
+        api.update_then_start.assert_called_once_with('2', drop_yaw_deg=20)
+
+    def test_release_angle_rejected_without_route(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            __main__.main(['update', '--drop-yaw-deg', '10'])
+
     def test_update_source_override_does_not_change_saved_values(self):
         saved = dict(settings.DEFAULTS)
         with patch.object(settings, 'load', return_value=saved), \

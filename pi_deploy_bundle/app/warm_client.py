@@ -18,10 +18,17 @@ def main(argv=None,connector=None):
     p.add_argument('--idle-only',action='store_true',help='stand 只在空闲时执行')
     from transfer_test import BOUNDARIES
     p.add_argument('--stop-after',choices=BOUNDARIES)
+    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 −30 至 +30 度')
     p.add_argument('--owner-session');p.add_argument('--owner-epoch',type=int);p.add_argument('--operator')
     for flag in ('cooled','mechanism-checked','single-target','guard-reload-checked','guarded-single-trial','stop-limits-understood'):p.add_argument('--'+flag,action='store_true')
     g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--simulate',action='store_true');g.add_argument('--device-check',action='store_true')
     a=p.parse_args(argv)
+    if a.drop_yaw_deg is not None:
+        from base_placement import BasePlacement_ValidateYaw
+        try:
+            BasePlacement_ValidateYaw(a.mode, a.drop_yaw_deg)
+        except ValueError as exc:
+            p.error(str(exc))
     if a.idle_only and (a.mode!='stand' or a.check or a.simulate or a.device_check):
         p.error('--idle-only 只用于实机 stand')
     if a.mode=='scan':
@@ -35,6 +42,7 @@ def main(argv=None,connector=None):
         from run_auto import main as offline
         args=[a.mode]+([a.legacy_after_home] if a.legacy_after_home else [])+(['--check'] if a.check else ['--simulate'])
         if a.config:args+=['--config',str(a.config)]
+        if a.drop_yaw_deg:args+=['--drop-yaw-deg',str(a.drop_yaw_deg)]
         if a.stop_after:args+=['--stop-after',a.stop_after]
         return offline(args)
     conn=None;stream=None;accepted=False;last_status=None;started=time.monotonic()
@@ -45,6 +53,7 @@ def main(argv=None,connector=None):
         conn.settimeout(5)
         if connector is None:conn.connect(str(SOCKET))
         request={'protocol':PROTOCOL,'op':'status' if a.device_check or a.mode in ('status','cooling-check','readiness') else ('stop' if a.mode=='stop' else 'start'),'mode':a.mode,'legacy_after_home':a.legacy_after_home}
+        if a.drop_yaw_deg and request['op']=='start':request['drop_yaw_deg']=a.drop_yaw_deg
         if a.idle_only:request['idle_only']=True
         if a.mode=='cooling-confirm':
             if not a.owner_session or a.owner_epoch is None or not a.operator or not all((a.cooled,a.mechanism_checked,a.single_target,a.guard_reload_checked)):
@@ -86,6 +95,11 @@ def main(argv=None,connector=None):
             elif event in ('recovery_confirmed','micro_confirmed'):
                 print(json.dumps(row));return 0
             elif event=='done':
+                startup=row.get('startup_timing') or {}
+                first=startup.get('first_route_action')
+                if first:
+                    print('启动耗时 · 控制节点准备 {:.2f} 秒 · 开始执行后 {:.2f} 秒请求首个路线动作 {}'.format(
+                        startup['owner_prepare_s'], first['submitted_s'], first['action']),flush=True)
                 if row.get('status')=='single_medium_response_observed':
                     print('中转实测 · 磁力计 {:+.1f}° · Tag {:+.1f}°'.format(
                         row['magnetic_delta_deg'],row['visual_delta_deg']),flush=True)
@@ -123,6 +137,11 @@ def main(argv=None,connector=None):
                             print('右跨转直行 · 进入近处 Tag 4 观测范围。', flush=True)
                     if corridor.get('release_protocol_completed'):
                         delivery=corridor.get('delivery',{})
+                        turn=delivery.get('drop_turn')
+                        if turn:
+                            basis={'measured':'实测','no_turn':'未转动'}.get(turn['basis'],'按动作回执估算')
+                            print('大本营放物转向 · 设定 {:+d}° · {} {:+.1f}°'.format(
+                                turn['requested_deg'],basis,turn['applied_deg']),flush=True)
                         steps=delivery.get('approach_steps')
                         advance='持物前进 {} 步'.format(steps) if type(steps) is int else '持物前进'
                         operation=delivery.get('release_operation')

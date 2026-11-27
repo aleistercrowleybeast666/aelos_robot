@@ -24,7 +24,7 @@ from mission_v5 import MissionRobot, PAIR_MOTION_OPS, VISUAL_PICKUP_OPS, default
 from micro_trial import MEDIUM_OPS, OPS as MICRO_OPS
 from pickup_controller import PickupObservationUnavailable, validate as validate_pickup
 from route_pose import RoutePose_TrialLateralHint
-from task_runner import NotReady, Robot
+from task_runner import NotReady, Robot, Startup_VerifySensorsAndCapabilities
 from transfer_test import validate as validate_transfer
 from checkpoint_errors import VisualCamera_IsFresh, VisualCamera_Read, VisualCameraUnavailable
 
@@ -588,8 +588,8 @@ class _OutboundPickupRobot(MissionRobot):
         self.pair_route_enabled = True
         self.pickup_active = True
 
-    def sensor_preflight(self):
-        return super().sensor_preflight(magnetic_optional=True)
+    def sensor_preflight(self,*,check_idle=None):
+        return super().sensor_preflight(magnetic_optional=True,check_idle=check_idle)
 
     def finite(self, op, observation=None, **options):
         if (self.pickup_active and not getattr(self.backend, 'is_simulation', False)
@@ -772,10 +772,11 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
     try:
         if not simulation:
             verify_pickup = getattr(backend, 'verify_pickup_capabilities', None) or backend.verify_cmd0_continuous
-            verify_pickup(timeout)
-            if backend.current().get('mission_v5_ready') is not True:
-                raise NotReady('取物需要当前会话的 MCU 抓取和路线能力回执')
-            robot.sensor_preflight()
+            def verify_startup(timeout):
+                verify_pickup(timeout)
+                if backend.current().get('mission_v5_ready') is not True:
+                    raise NotReady('取物需要当前会话的 MCU 抓取和路线能力回执')
+            Startup_VerifySensorsAndCapabilities(robot,verify_startup,timeout)
 
         backend.call('begin', timeout)
         if not Cmd0Motion_ContinuousReady(backend):
@@ -862,14 +863,17 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                 if segment['detected'] or segment.get('continue_estimated') is True:
                     turns_at_base = plan['mode'] == '2' and result['completed_returns'] == 0
                     extra_home_steps = steps.get('command2_before_base_turn_extra_steps', 0) if turns_at_base else 0
+                    yaw = robot.cfg.get('drop_yaw_deg', 0)
+                    delivery_yaw = -yaw if plan['mode'] == '2' and second_trip else yaw
                     corridor = CorridorTrial_Run(robot, segment, entry_alignment=alignment,
-                                                  extra_home_steps=extra_home_steps)
+                                                  extra_home_steps=extra_home_steps, drop_yaw_deg=delivery_yaw)
                     delivered = corridor['release_protocol_completed']
                     result.update(status='task_complete' if delivered else 'stage3_trial_unconfirmed',
                                   stage=4 if delivered else 3, checkpoint=corridor['checkpoint'],
                                   corridor_trial=corridor, reason=corridor['reason'], release_protocol_completed=delivered)
             if not result['release_protocol_completed']:
                 break
+            drop_turn = result['corridor_trial'].get('delivery', {}).get('drop_turn')
             robot.deliveries+=1
             robot.blocks_delivered+=acquired['planned_count']
             result.update(deliveries=robot.deliveries,expected_blocks_delivered=robot.blocks_delivered)
@@ -886,7 +890,7 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
                     result['base_turn_trial'] = end
                     robot.events.append({'base_turn_trial': end})
                     robot._record_progress('cmd2_base_turn', expected_tag=5, last_passed_tag=result.get('checkpoint'))
-                    ReturnTrial_TurnAtBase(robot, turn)
+                    end['turn'] = ReturnTrial_TurnAtBase(robot, turn, drop_turn=drop_turn)
                     end['protocol_completed'] = True
                     result['reason'] = '大本营已完成放物、起立和空载掉头，本轮结束。'
                 break
@@ -895,7 +899,7 @@ def OutboundPickup_Run(plan, backend, robot_factory=_OutboundPickupRobot):
             from return_trial import ReturnTrial_DefaultChain, ReturnTrial_ReachPickupStation, ReturnTrial_Run
             _restart_leg_budget(robot)
             result['return_started']=True
-            returned=ReturnTrial_Run(robot)
+            returned=ReturnTrial_Run(robot, drop_turn=drop_turn)
             result['return_trial']=returned
             if not returned['station_reached']:
                 result.update(status='return_trial_unconfirmed', checkpoint=returned.get('checkpoint'), reason=returned['reason'])
@@ -968,7 +972,7 @@ class _SyntheticOutboundRobot(_OutboundPickupRobot):
 
     def chain_step(self, step, **options):
         super().chain_step(step, **options)
-        if self.load_kind == 'empty' and abs(step.get('target_delta_deg', 0)) == 180:
+        if self.load_kind == 'empty' and 'target_delta_deg' in step:
             # The dry-run backend models completed turns at the commanded angle.
             self.navigator.mag.anchor = {'load':'empty', 'planned_group_target':True}
             self.last_heading_report = {'error_deg':0., 'simulation_only':True, 'sample':{'reference':{

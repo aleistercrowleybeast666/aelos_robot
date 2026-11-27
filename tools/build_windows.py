@@ -40,17 +40,28 @@ def package_licenses(destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=PROJECT / 'dist')
+    parser.add_argument('--mcu-overlay', type=Path, metavar='目录',
+                        help='随便携版附带已核验的 R3 MCU 读回对照文件')
     args = parser.parse_args()
     if os.name != 'nt' or struct.calcsize('P') != 8 or os.environ.get('PROCESSOR_ARCHITECTURE') != 'AMD64':
         parser.error('Use a Windows x64 Python environment.')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if args.mcu_overlay is not None:
+        sys.path.insert(0, str(PROJECT))
+        from r3_deployer.usb_mode import _overlay
+        root, expected, _ = _overlay(args.mcu_overlay, args.mcu_overlay / 'MANIFEST.json')
     with TemporaryDirectory(prefix='aelos-r3-build-') as temp:
         scratch = Path(temp)
         subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm',
                         '--distpath', str(scratch / 'dist'), '--workpath', str(scratch / 'build'),
                         str(PROJECT / 'tools' / 'r3_windows.spec')], cwd=PROJECT, check=True)
         folder = scratch / 'dist' / 'AelosR3Control'
+        if args.mcu_overlay is not None:
+            for relative in (*expected, 'MANIFEST.json'):
+                target = folder / 'mcu_overlay' / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / relative, target)
         shutil.copyfile(PROJECT / 'README.md', folder / 'README.md')
         package_licenses(folder / 'THIRD_PARTY_LICENSES')
         archive = Path(shutil.make_archive(str(scratch / ARCHIVE_NAME), 'zip', folder.parent, folder.name))

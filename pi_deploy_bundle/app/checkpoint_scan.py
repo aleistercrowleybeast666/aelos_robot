@@ -1,11 +1,12 @@
 """Chest-camera checkpoint observations shared by outbound and return routes."""
 
 from enum import Enum
+from math import isfinite
 
-from checkpoint_errors import (VisualCamera_GetFreshnessCheck,
+from checkpoint_errors import (Checkpoint_AllScanWindowsHealthy, VisualCamera_GetFreshnessCheck,
                                Checkpoint_ClassifyStreamGap, Checkpoint_RecordMiss, CheckpointStreamResult,
                                VisualCamera_Read, VisualCameraUnavailable)
-from nav_observation import Observation_DistinctTagRows, summarize
+from nav_observation import Observation_DistinctTagRows, summarize, wrap
 from route_pose import RoutePose_PartialCheckpointGeometry
 
 
@@ -22,6 +23,77 @@ _HEALTHY_WINDOWS_BEFORE_MISS = 4
 _MAX_POLICY_WINDOWS = 2 * _HEALTHY_WINDOWS_BEFORE_MISS
 _PARTIAL_POSE_HISTORY_NS = 6_000_000_000
 _PARTIAL_POSE_HISTORY_FRAMES = 8
+
+
+def Checkpoint_LastTravelDrift(robot, nav):
+    """Compare the settled samples bracketing one completed, uncorrected translation."""
+    travel = getattr(robot, '_last_search_travel', None)
+    guard = getattr(robot, 'heading_guard', None)
+    if not isinstance(travel,tuple) or not guard or guard.blocked or robot.magnetic_route_only:
+        return None
+    action, started, previous, before = travel
+    after = guard.last_sample or {}
+    completed = robot.last_action_completed_monotonic
+    stance = robot.last_action_completed_ros_ns
+    scope = (getattr(robot.backend,'session',None), getattr(robot.backend,'epoch',None))
+    if (not scope[0] or scope != guard.observation_scope or not getattr(nav.io,'motion_capture_verified',False)
+            or type(stance) is not int or stance <= 0
+            or type(previous) not in (int,float) or type(completed) not in (int,float)
+            or not previous <= started < completed or after.get('action_completed_monotonic') != completed
+            or set(guard._target_observation_faults(after, robot.load_kind)) - {'sample_stale'}):
+        return None
+    now = robot.clock()
+    for sample, lower, upper in ((before,previous,started),(after,completed,now)):
+        times = sample.get('decision_capture_times') or ()
+        if (sample.get('owner_observation_scope') != scope or sample.get('load') != robot.load_kind
+                or sample.get('capture_verified') is not True or not sample.get('usable_for_heading')
+                or not times or not all(type(t) in (int,float) and lower < t <= upper
+                                       and upper-t <= _PARTIAL_POSE_HISTORY_NS/1e9 for t in times)
+                or not all(type(sample.get(k)) in (int,float) and isfinite(sample[k])
+                           for k in ('norm','raw_heading_deg')) or sample['norm'] <= 0):
+            return None
+    target = guard.reference.anchor or {}
+    norm = target.get('norm')
+    if (not before.get('capture_session') or not before.get('calibration_id')
+            or type(before.get('load_epoch')) is not int
+            or type(norm) not in (int,float) or not isfinite(norm) or norm <= 0
+            or not all(type(target.get(k)) in (int,float) and isfinite(target[k])
+                       for k in ('offset_deg','route_heading_deg'))
+            or any(before.get(k) != after.get(k) for k in ('capture_session','load_epoch','calibration_id','norm_basis'))
+            or abs(before['norm']/norm-1.) > nav.cfg['magnetic']['max_norm_fraction_change']
+            or abs(after['norm']/before['norm'] - 1.) > nav.cfg['magnetic']['max_norm_fraction_change']):
+        return None
+    sign = nav.cfg['magnetic']['heading_sign']
+    drift = wrap(sign * (after['raw_heading_deg'] - before['raw_heading_deg']))
+    error = wrap(sign * after['raw_heading_deg'] + target['offset_deg'] - target['route_heading_deg'])
+    deadband = nav.cfg['post_action_heading']['deadband_deg']
+    # A gait can also correct a preceding error. Its direction alone does not
+    # justify a search when the current course is already close or disagrees.
+    if not (deadband < abs(drift) <= 40. and deadband < abs(error) <= 40. and drift*error > 0):
+        return None
+    return {'action':action, 'drift_deg':drift, 'remaining_heading_deg':error,
+            'stance_ns':stance}
+
+
+def Checkpoint_CorrectMissedTravel(robot, nav, checkpoint, *, reserved_actions):
+    """Try the route heading once at a healthy blank waypoint before changing its depth."""
+    miss = checkpoint.get('checkpoint_not_seen') or {}
+    if (miss.get('cause') != 'tag_not_visible' or not Checkpoint_AllScanWindowsHealthy(miss)
+            or miss.get('seen_tags') or checkpoint.get('partial_pose_rows')
+            or checkpoint.get('stationary_handoff_tag') or checkpoint.get('missed_travel_heading')):
+        return False
+    drift = Checkpoint_LastTravelDrift(robot, nav)
+    if drift is None or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']:
+        return False
+    robot.check()
+    checkpoint['missed_travel_heading'] = drift
+    if robot.load_kind == 'empty':
+        robot._await_heading(drift['action'], configured=True)
+    else:
+        boundary = 'corridor_side_boundary' if 'strafe' in drift['action'] else 'carry_forward2'
+        robot.monitor_heading(boundary, reserved_route_actions=reserved_actions, one_turn_before_scan=True)
+    drift['stance_changed'] = robot.last_action_completed_ros_ns != drift['stance_ns']
+    return drift['stance_changed']
 
 
 def Checkpoint_ReadScanTime(io):
@@ -42,6 +114,14 @@ def Checkpoint_OptionalScanTime(io, check):
         except VisualCameraUnavailable:
             check()
     return None
+
+
+def Checkpoint_ReadPreflightWindow(io, tag, after_ns, timeout_s, check):
+    """Check the streams without requiring the first route tag in staging."""
+    read = getattr(io, 'observe_preflight', None)
+    if read is not None:
+        return read(after_ns, timeout_s, check)
+    return io.observe(tag, after_ns, timeout_s, check)
 
 
 def Checkpoint_ReadWindow(io, tag, after_ns, timeout_s, check, *, quick_id=False, classify_errors=True):

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse,json,re,sys
 from pathlib import Path
-import task_runner
 from r3_chain import Simulation,RosMacros
 ROOT=Path(__file__).resolve().parent
 
@@ -11,13 +10,23 @@ def identity():
     if row.get('robot_id')!=3 or not m or row.get('cpu_serial')!=m[1] or row.get('machine_id')!=Path('/etc/machine-id').read_text().strip():raise RuntimeError('Robot3 CPU+machine identity mismatch')
 
 def main(argv=None):
+    # The warm SSH client imports identity() for every check and start.
+    # Only the standalone planner needs to load the route engine here.
+    import task_runner
     p=argparse.ArgumentParser(description='R3区域路线：0到障碍区前扫码；stand松手恢复空载站姿；status只读诊断；1/2缺项时动作前拒绝。')
     p.add_argument('mode',nargs='?',choices=['0','1','2','0-full','stage1','stand','stop','status','scan',*task_runner.CALIBRATION_STEPS,*task_runner.TURN_TEST_STEPS,'cooling-check','cooling-confirm'],default='0');p.add_argument('legacy_after_home',nargs='?',choices=['0'])
     p.add_argument('--config',type=Path,default=ROOT/'config/runtime.json');p.add_argument('--json',action='store_true',help='scan仅输出JSON');p.add_argument('--entry',action='store_true',help='scan采集入口坐标');p.add_argument('--save-image',type=Path);p.add_argument('--one-step',action='store_true',help='明确测试一次完整离散动作，不是精确微小步')
     from transfer_test import BOUNDARIES
     p.add_argument('--stop-after',choices=BOUNDARIES)
+    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 −30 至 +30 度')
     g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--simulate',action='store_true');g.add_argument('--device-check',action='store_true')
     a=p.parse_args(argv);backend=None;lock=None
+    if a.drop_yaw_deg is not None:
+        from base_placement import BasePlacement_ValidateYaw
+        try:
+            BasePlacement_ValidateYaw(a.mode, a.drop_yaw_deg)
+        except ValueError as exc:
+            p.error(str(exc))
     try:
         if a.mode in ('cooling-check','cooling-confirm'):
             from warm_client import main as warm
@@ -34,6 +43,7 @@ def main(argv=None):
         if a.stop_after and a.mode not in ('0','stage1'):
             raise RuntimeError('--stop-after only applies to command 0/stage1; never silently ignore a requested stop boundary')
         cfg=task_runner.load(a.config)
+        if a.drop_yaw_deg is not None:cfg=dict(cfg,drop_yaw_deg=a.drop_yaw_deg)
         if a.stop_after:cfg=dict(cfg,transfer_test=dict(cfg.get('transfer_test',{}),stop_after=a.stop_after))
         plan=task_runner.prepare(a.mode,cfg,ROOT,simulation=a.simulate) # 在创建SDK/ROS/硬件接口之前检查
         if a.check:

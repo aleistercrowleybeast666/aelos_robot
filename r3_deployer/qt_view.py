@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QStyle,
     QStyleOptionComboBox,
     QTabWidget,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .qt_theme import ConsoleTheme, Theme_Apply, Theme_System
+from .control_api import DROP_YAW_LIMIT_DEG
 
 
 _TASKS = {
@@ -236,6 +238,18 @@ class ControlView(QWidget):
         right.addWidget(state)
 
         tasks, task_layout = _Panel_Create("自动任务")
+        angle_row = QHBoxLayout()
+        angle_label = _Label_Create("放物转角（负左，正右）")
+        self.drop_yaw = QSpinBox()
+        self.drop_yaw.setRange(-DROP_YAW_LIMIT_DEG, DROP_YAW_LIMIT_DEG)
+        self.drop_yaw.setSuffix("°")
+        self.drop_yaw.setAccessibleName(angle_label.text())
+        angle_label.setBuddy(self.drop_yaw)
+        angle_row.addWidget(angle_label)
+        angle_row.addStretch(1)
+        angle_row.addWidget(self.drop_yaw)
+        task_layout.addLayout(angle_row)
+        task_layout.addWidget(_Label_Create("连续搬运第二趟向相反方向放物", role="muted"))
         self.task_buttons = {}
         for number, title in _TASKS.items():
             button = _Button_Create(title, "task")

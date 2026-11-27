@@ -34,6 +34,10 @@ _PICKUP_EXIT_AVAILABLE = frozenset((*PICKUP_EXIT_ACTIONS, *SIDE_ACTIONS.values()
     'strafe_left_once', 'strafe_right_once', PICKUP_MATCH_OUTBOUND_STRAFES))
 
 
+class StandingStartUnavailable(RuntimeError):
+    """The optional start was declined before any physical action began."""
+
+
 class PickupRetreatUnavailable(RuntimeError):
     """The MCU returned an unsupported action before entering the retreat."""
 

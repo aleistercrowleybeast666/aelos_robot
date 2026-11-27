@@ -8,9 +8,12 @@ import copy
 import json
 import math
 from pathlib import Path
+import threading
+import time
 import types
 
 from checkpoint_errors import VisualCamera_IsFresh, VisualCamera_Read, VisualCameraUnavailable
+from checkpoint_scan import Checkpoint_ReadPreflightWindow
 from task_runner import Robot, NotReady
 from pickup_controller import PickupController, validate as validate_pickup
 from block_camera import BlockCameraContractLost, BlockEvidenceExpired, BlockFrameUnavailable
@@ -223,13 +226,13 @@ class MissionRobot(Robot):
         finally:
             self.deadline=deadline+self.clock()-started
 
-    def sensor_preflight(self, *, magnetic_optional=False):
-        """Read magnetic and chest streams in order on the route's task thread."""
+    def sensor_preflight(self, *, magnetic_optional=False, check_idle=None):
+        """Keep owner checks and magnetic fallback on the task thread during startup."""
         nav = self.ensure_navigation_io()
         cfg = nav.cfg
 
         def check():
-            self.backend.check_manual_idle()
+            (check_idle or self.backend.check_manual_idle)()
             if self.clock() >= self.deadline:
                 raise RuntimeError('V5 preflight timed out before begin')
 
@@ -253,13 +256,52 @@ class MissionRobot(Robot):
                 return True
             return bool(sample and sample.get('capture_verified') and nav.io.motion_capture_verified)
 
+        def read_camera(reader_check):
+            window=_read_chest(lambda callback: Checkpoint_ReadPreflightWindow(
+                nav.io,cfg['legs']['outbound'][0]['id'],nav.io.ros_now_ns(),cfg['observe_s'],callback),reader_check)
+            self._check_camera(window,'before begin')
+
+        def sample_both():
+            if check_idle is None:
+                read_camera(check)
+                return heading_ready()
+            # Independent camera reader. Magnetic checks run on this task thread
+            # so cancellation and any route fallback still use the normal owner.
+            cancelled=threading.Event()
+            errors=[]
+            end=time.monotonic()+cfg['observe_s']+1.
+            def camera_check():
+                if cancelled.is_set():raise RuntimeError('startup camera reader cancelled')
+                if time.monotonic()>=end:raise RuntimeError('startup camera reader exceeded its deadline')
+            def camera():
+                try:read_camera(camera_check)
+                except BaseException as exc:errors.append(exc)
+            reader=threading.Thread(target=camera,name='r3-preflight-pickup-camera',daemon=True)
+            reader.start()
+            try:
+                verified=heading_ready()
+                while reader.is_alive():
+                    check()
+                    camera_check()
+                    reader.join(.02)
+                if errors:raise errors[0]
+                return verified
+            finally:
+                cancelled.set()
+                reader.join(.5)
+                if reader.is_alive():
+                    reason='startup camera reader did not stop; no motion permitted'
+                    poison=getattr(nav.io,'poison',None)
+                    if poison is not None:poison(reason)
+                    else:
+                        close=getattr(nav.io,'close',None)
+                        if close is not None:close()
+                    raise RuntimeError(reason)
+
         for attempt in range(_SENSOR_RECHECKS):
             check()
             try:
-                window = _read_chest(lambda guard: nav.io.observe(cfg['legs']['outbound'][0]['id'],
-                                     nav.io.ros_now_ns(), cfg['observe_s'], guard), check)
-                self._check_camera(window, 'before begin')
-                if heading_ready() and _read_chest(lambda _: nav.io.preflight_health_snapshot(), check).get('camera_healthy'):
+                if sample_both() and _read_chest(lambda _: nav.io.preflight_health_snapshot(), check).get('camera_healthy'):
                     check()
                     break
             except _ChestUnavailable as exc:
@@ -282,7 +324,7 @@ class MissionRobot(Robot):
         self.events.append({
             'sensor_preflight': ('fresh chest stream; following visual route after magnetic loss'
                                  if self.magnetic_route_only else 'fresh magnetic and chest streams'),
-            'parallel_read_only': False,
+            'parallel_read_only': check_idle is not None,
             'body_commands': 0,
         })
 
@@ -327,6 +369,15 @@ class MissionRobot(Robot):
         mono=max(self.last_action_completed_monotonic or 0,self.observation_floor)
         ros=max(self.last_action_completed_ros_ns or 0,self.observation_ros_floor)
         options={'count_only':True} if count_only else {}
+        if (count_only and self.last_block and self.last_block.get('scope')==self.scope()
+                and self.last_block.get('load')==self.load_kind
+                and self.last_block.get('received_monotonic')==self.observation_floor
+                and self.last_block.get('stamp_ns')==self.observation_ros_floor):
+            # The preceding frame has already passed the settle barrier. A new
+            # motion still has its own full settle interval in both clocks.
+            options['previous_count_frame']=self.last_block
+            mono=self.last_action_completed_monotonic or 0
+            ros=self.last_action_completed_ros_ns or 0
         try:
             row=self.camera.observe(mono,ros,self.check,expected_load=self.load_kind,scope=self.scope(),**options)
         except BlockCameraContractLost:
@@ -336,8 +387,8 @@ class MissionRobot(Robot):
             self.camera.close()
             self.camera=None
             raise
-        self.observation_floor=max(mono,row.get('received_monotonic',mono))
-        self.observation_ros_floor=max(ros,row.get('stamp_ns',ros))
+        self.observation_floor=max(self.observation_floor,mono,row.get('received_monotonic',mono))
+        self.observation_ros_floor=max(self.observation_ros_floor,ros,row.get('stamp_ns',ros))
         self.last_block=row
         return row
 
