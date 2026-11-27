@@ -131,7 +131,8 @@ def _pickup_recover_magnetic_residual(robot, boundary, boundary_name='pickup_ret
 
 def _pickup_use_retreat_tag(robot, nav, boundary, view, reserved):
     yaw, stamp = view['heading_deg'], view['latest_stamp_ns']
-    deadband = nav.cfg['post_action_heading']['deadband_deg']
+    guard = nav.cfg['post_action_heading']
+    deadband = guard.get('release_deg', guard['deadband_deg'])
     if stamp <= robot.last_action_completed_ros_ns or not VisualCamera_IsFresh(nav.io.visual_motion_ready,stamp):
         # The guard yielded without moving for this observation. A camera
         # restart or expired frame must give that decision back to the magnet.
@@ -237,6 +238,10 @@ def _run_startup_retreat(robot, nav, pending, report, *, pickup_heading=None):
     if boundary['residual_deg'] is None and (boundary['correction_actions']
             or (callable(read_tag) and not getattr(robot.backend,'is_simulation',False))):
         boundary['next_group_max'] = 2
+    elif (boundary['residual_deg'] is not None and not boundary['correction_actions']
+          and abs(boundary['residual_deg']) > nav.cfg['post_action_heading'].get('release_deg', 4.)):
+        boundary['next_group_max'] = 2
+        boundary['next_group_reason_zh'] = '后退后仍有实测余差，本次无预计改善的转向，两跨内再测。'
     return boundary
 
 
@@ -451,6 +456,7 @@ def _tag1_pickup_adjustment_limits(steps):
 def _tag1_pickup_exit_actions(approach):
     # The turn precedes pickup. Undo the actual walk in the same body frame, in reverse order.
     reverse = {'empty_forward2': ('back', 2), 'empty_forward4': ('back', 4), 'free_forward': ('back', 5),
+               'empty_backward2': ('forward', 2),
                'empty_strafe_left': ('strafe_right_once', 1), 'empty_strafe_right': ('strafe_left_once', 1)}
     for count in (2, 3):
         reverse[f'empty_strafe_left{count}'] = ('strafe_right_once', count)
@@ -462,6 +468,8 @@ def _tag1_pickup_exit_actions(approach):
             if count % 2:
                 raise ValueError('接驳取物区同一段连续前进须为偶数步，以便按后退动作的两步单位原路返回')
             actions.extend(['cmd0_carry_backward2'] * (count // 2))
+        elif direction == 'forward':
+            actions.extend(['carry_forward2'] * (count // 2))
         else:
             actions.extend(CorridorTrial_GroupStrafes(direction, count, continuous=True, monitor_every=4))
     return tuple(actions)
@@ -662,15 +670,23 @@ def _acquire_near_tag1(robot):
     robot._record_progress('waiting_blocks', direction='return', reason_zh='正在 Tag 1 附近观察接驳方块。')
 
     def adjust(name,row):
-        op = _PICKUP_ADJUSTMENTS[name]
+        op = 'empty_backward2' if name == 'pickup_retreat' else _PICKUP_ADJUSTMENTS[name]
+        target = row.get('pickup_target') or row.get('target') or {}
+        if (op in ('empty_strafe_left','empty_strafe_right') and 'y' in target
+                and target['y'] >= robot.pickup.cfg['target_y_min']):
+            op = 'empty_backward2'
         forward = moves.count('empty_forward2')
-        lateral = len(moves)-forward
-        if (op=='empty_forward2' and forward>=forward_limit) or (op!='empty_forward2' and lateral>=lateral_limit):
+        lateral = sum(action.startswith('empty_strafe') for action in moves)
+        if (op == 'empty_backward2' and (moves.count(op) >= 2
+                or not getattr(robot.backend,'empty_recovery_ready',lambda:False)())):
+            return False
+        if (op=='empty_forward2' and forward>=forward_limit) or (op.startswith('empty_strafe') and lateral>=lateral_limit):
             return False
         robot._record_progress('start_wall_pickup', direction='return', reason_zh='已定位接驳方块，开始短步进近。')
         # Revalidate the same image at submission. After motion, pickup requires
         # fresh frames from the new stance before another step or a grab.
-        robot.finite(op, observation=row, checkpoint_follows=True,
+        options = {'configured': True} if op == 'empty_backward2' else {}
+        robot.finite(op, observation=row, checkpoint_follows=True, **options,
                      before_dispatch=lambda:robot.verify_block_observation(row))
         moves.append(op)
         event['approach_steps'] = 2*moves.count('empty_forward2')
@@ -691,13 +707,17 @@ def _acquire_near_tag1(robot):
             else:
                 try:
                     acquired = robot.pickup.acquire(adjust=adjust,allow_stacked=True)
+                    if (acquired.get('reason') == 'too_close' and getattr(robot,'last_block',None)
+                            and robot.last_block.get('status') == 'target'):
+                        adjust('pickup_retreat',robot.last_block)
                 except (BlockFrameUnavailable,BlockEvidenceExpired,PickupObservationUnavailable) as exc:
                     if robot.pickup.attempted:
                         raise
                     acquired = {'status':'no_pickup','reason':str(exc),'vision_unresolved':True}
                 if (robot.cfg.get('route_steps',{}).get('continue_estimated_route') is True
                         and acquired['status']=='no_pickup'
-                        and acquired.get('reason') in ('target_changed','too_close','outside_handoff_adjustment_range','adjustment_budget')
+                        and acquired.get('reason') in ('target_changed','too_close','outside_handoff_adjustment_range',
+                                                       'adjustment_budget','concave merged block layout without a clear bottom pair')
                         and acquired.get('reason_code')!='double_load_capability_unavailable'):
                     unresolved_checks = unresolved_checks + 1 if len(moves)==completed_moves else 0
                     if (unresolved_checks>=3 or attempt+1==_TAG1_PICKUP_RECHECKS

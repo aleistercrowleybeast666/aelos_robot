@@ -19,11 +19,19 @@ def Checkpoint_ClassifyStreamGap(stream, *, allow_recovery):
     return CheckpointStreamResult.UNKNOWN_GAP
 
 
-def Checkpoint_RecordMiss(result, expected_id, seen_ids, healthy_windows, policy, cause, temporary_gaps):
+def Checkpoint_AllScanWindowsHealthy(miss):
+    """Compare windows from the same scan, also accepting older single-scan reports."""
+    count = miss.get('current_scan_windows', miss.get('observation_windows'))
+    return (type(count) is int and count > 0 and miss.get('healthy_windows') == count
+            and not miss.get('temporary_camera_gaps'))
+
+
+def Checkpoint_RecordMiss(result, expected_id, seen_ids, healthy_windows, policy, cause, temporary_gaps, *, current_scan_windows):
     """Store the evidence and operator message for a completed, unsuccessful scan."""
     result['checkpoint_not_seen'] = {
         'tag_id': expected_id, 'seen_tags': sorted(seen_ids),
         'healthy_windows': healthy_windows, 'observation_windows': result['observation_windows'],
+        'current_scan_windows': current_scan_windows,
         'policy': policy, 'cause': cause, 'temporary_camera_gaps': temporary_gaps,
     }
     if cause == 'temporary_camera_gap':

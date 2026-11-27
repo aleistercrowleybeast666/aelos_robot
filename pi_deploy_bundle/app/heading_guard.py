@@ -825,8 +825,9 @@ class HeadingGuard:
                 and self.boundary_recovery_enabled(phase,load))
 
     def _correction_target_deg(self,name,recovery):
-        # A straight carry may continue inside its existing deadband. Only the
-        # final turn keeps the finer residual target used before the entrance scan.
+        # Check the settled retreat more closely before the long lateral leg.
+        if name=='pickup_retreat_complete' and recovery and not self.budget.limit_total_angle:
+            return self.c['release_deg']
         if name=='planned_turn_complete' and recovery and not self.budget.limit_total_angle:
             return self.c['minimum_improvement_deg']
         return self.c['deadband_deg']
@@ -1026,7 +1027,7 @@ class HeadingGuard:
 
     def after_action(self,name,load,correct,allow_correction=True,action_completed_monotonic=None,*,
                      entry_followup=None,transfer_turn_pending=False,prefer_visual_followup=None,
-                     tag2_clearance_on_worsening=False,initial_observation=None):
+                     tag2_clearance_on_worsening=False,initial_observation=None,one_turn_before_scan=False):
         self._nominal_retry_used=False
         count=self.c.get('micro_trial',{}).get('max_actions_per_checkpoint',1) if self.c.get('micro_trial',{}).get('bounded_route_mode') else 1
         if name=='planned_turn_complete' and self.c.get('micro_trial',{}).get('bounded_route_mode'):count=self.c['micro_trial'].get('max_actions_per_turn_group',count)
@@ -1087,6 +1088,9 @@ class HeadingGuard:
                 _attach_heading_history(exc, name, reports)
                 raise
             reports.append(report)
+            if one_turn_before_scan and route_feedback:
+                report['next_heading_check'] = 'after_short_forward_or_current_tag4'
+                return report
             if report.get('correction_actions',0)!=1:break
             if (report.get('motion_prediction') or {}).get('pickup_retreat_trial'):
                 # The actual post-turn reading is available. Do not repeat or

@@ -142,7 +142,8 @@ class PickupController:
     def Pickup_AcquireAtHandoff(self, observation):
         """Resolve a failed alignment at the configured return pickup station."""
         alignment_reason=observation['reason']
-        if alignment_reason in ('target_changed','too_close','outside_handoff_adjustment_range','adjustment_budget'):
+        if alignment_reason in ('target_changed','too_close','outside_handoff_adjustment_range','adjustment_budget',
+                                'concave merged block layout without a clear bottom pair'):
             try:
                 counted=self.Pickup_AcquireStaged(allow_stacked=True)
             except (BlockFrameUnavailable,BlockEvidenceExpired,PickupObservationUnavailable) as exc:

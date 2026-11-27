@@ -31,7 +31,9 @@
   "command2_before_base_turn_extra_steps": 2,
   "command2_empty_departure": {
     "gate_lateral_tolerance_m": 0.055,
-    "side_departure_depth_m": [0.12, 0.21]
+    "side_departure_depth_m": [0.12, 0.21],
+    "tag6_side_departure_depth_m": [0.15, 0.24],
+    "handoff_strafe_min_depth_m": 0.18
   },
   "corridor": {
     "tag2_to_tag3": [
@@ -60,14 +62,14 @@
       {"op": "empty_forward2", "repeat": 4}
     ],
     "tag7": [
-      {"op": "empty_strafe_left", "repeat": 6},
+      {"op": "empty_strafe_left", "repeat": 7},
       {"op": "empty_forward2", "repeat": 4}
     ],
     "tag1": [
       {"op": "empty_strafe_right", "repeat": 9}
     ],
     "transfer_approach": [
-      {"op": "empty_forward2", "repeat": 4}
+      {"op": "empty_forward2", "repeat": 6}
     ],
     "transfer_turn": {"op": "empty_right_turn", "repeat": 6, "target_delta_deg": 180},
     "station_side": [

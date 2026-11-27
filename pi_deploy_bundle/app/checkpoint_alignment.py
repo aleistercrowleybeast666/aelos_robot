@@ -361,11 +361,17 @@ def _clearly_outside_gate(offset, tolerance):
             and (offset[0] > tolerance or offset[1] < -tolerance))
 
 
+def _empty_departure_depth(config, tag):
+    if tag == 6:
+        return config.get('tag6_side_departure_depth_m', config['side_departure_depth_m'])
+    return config['side_departure_depth_m']
+
+
 def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
     depth_lo, depth_hi = geometry['body_forward_bounds_m']
     error = wrap(geometry['heading_deg'] - goal_yaw)
     reading = {'heading_error_deg': error, 'body_depth_m': (depth_lo, depth_hi)}
-    if tag == 5:
+    if tag in (1, 5):
         lo, hi = _empty_gate_offset(geometry, goal_yaw, target_lateral)
         reading['body_lateral_m'] = (lo, hi)
         # A side-on glimpse gives an uncertain stride count, but distinct
@@ -375,7 +381,10 @@ def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
     if (depth_lo <= 0 or depth_hi - depth_lo > .04 or tag == 5 and not .035 < depth_lo <= depth_hi <= .45
             or abs(error) + geometry['max_heading_deviation_deg'] > 15.):
         return None, None, reading, 'pose_outside_translation_range'
-    if tag == 5:
+    near, far = _empty_departure_depth(config, tag)
+    if tag == 1 and depth_hi < near:
+        return 'empty_backward2', near - depth_hi, reading, 'near_before_transfer'
+    if tag in (1, 5):
         tolerance = config['gate_lateral_tolerance_m']
         if lo > tolerance:
             return 'empty_strafe_left', lo - tolerance, reading, 'outside_gate_center'
@@ -383,11 +392,8 @@ def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
             return 'empty_strafe_right', -tolerance - hi, reading, 'outside_gate_center'
         if lo < -tolerance or hi > tolerance:
             return None, None, reading, 'uncertain_gate_edge'
-    else:
-        near, far = config['side_departure_depth_m']
+    if tag != 5:
         if depth_lo > far:
-            if tag == 1:
-                return None, 0., reading, 'depth_to_be_covered_by_transfer'
             return 'empty_forward2', depth_lo - far, reading, 'far_before_side_travel'
         if depth_hi < near:
             reason = 'near_before_transfer' if tag == 1 else 'near_before_side_travel'
@@ -412,7 +418,7 @@ def Checkpoint_EmptyDepartureConflict(robot, nav, tag, geometry):
             return 'gate_crossing_unresolved'
     else:
         lo, hi = geometry['body_forward_bounds_m']
-        near, far = config['side_departure_depth_m']
+        near, far = _empty_departure_depth(config, tag)
         if 0. < lo <= hi <= lo + .04 and (hi < near or lo > far):
             return 'side_departure_depth_unresolved'
     return None
@@ -440,7 +446,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
     if leg.get('boundary_departure_conflict'):
         report[leg['boundary_departure_conflict']] = True
     tolerance = config['gate_lateral_tolerance_m']
-    near, far = config['side_departure_depth_m']
+    near, far = _empty_departure_depth(config, tag)
     previous_action, previous_gap, previous_strides = None, None, 1
     retried_single = False
     retreated = False
@@ -479,10 +485,13 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                     Checkpoint_AlignEmptyMarker(robot, nav, leg)
                     continue
             return
-        if tag == 5 and goal.get('allow_strafe') is not True:
+        if action.startswith('empty_strafe') and goal.get('allow_strafe') is not True:
             report['status'] = 'lateral_action_disabled_for_checkpoint'
             return
         strides = 1
+        if (tag == 1 and previous_action
+                and previous_action.startswith('empty_strafe') != action.startswith('empty_strafe')):
+            previous_action = None
         if previous_action:
             improvement = previous_gap - gap
             if action != previous_action or improvement < .01:
@@ -508,7 +517,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                 lo, hi = reading['body_lateral_m']
                 stride_bound = 1.5 * improvement / previous_strides + hi - lo
                 strides = min(3, max(1, int(gap / stride_bound)))
-        if ((tag == 1 and len(report['actions']) >= 1)
+        if ((tag == 1 and len(report['actions']) >= 4)
                 or robot.count >= robot.cfg['max_body_macros_per_journey']):
             report['status'] = 'continue_from_latest_pose'
             return
@@ -543,14 +552,14 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
         current = _empty_departure_rescan(robot, nav, leg)
         if not leg['detected'] and unresolved:
             # A missed post-motion window cannot clear a known cross-track error.
-            first_blank = _healthy_empty_departure_blank(nav, current, settled_at)
+            first_blank = Checkpoint_EmptyBlankTime(nav, current, settled_at)
             current = _empty_departure_rescan(robot, nav, leg, reuse_cache=False)
             inverse = {'empty_strafe_right': 'empty_strafe_left', 'empty_strafe_left': 'empty_strafe_right',
                        'empty_forward2': 'empty_backward2'}.get(action)
             if (inverse == 'empty_backward2' and not getattr(robot.backend, 'empty_recovery_ready', lambda: False)()):
                 inverse = None
             if (first_blank and inverse and not retraced and not leg['detected']
-                    and _healthy_empty_departure_blank(nav, current, settled_at)
+                    and Checkpoint_EmptyBlankTime(nav, current, settled_at)
                     and (current['scan']['after_ns'] >= first_blank)
                     and robot.count < robot.cfg['max_body_macros_per_journey']):
                 def verify_retrace():
@@ -590,7 +599,7 @@ def _empty_departure_rescan(robot, nav, leg, *, reuse_cache=True):
     return current
 
 
-def _healthy_empty_departure_blank(nav, current, stance):
+def Checkpoint_EmptyBlankTime(nav, current, stance):
     scan = current.get('scan') or {}
     camera = current.get('camera_info') or {}
     pinned = nav.cfg['visual_micro']['camera_info']

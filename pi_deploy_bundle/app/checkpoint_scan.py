@@ -177,7 +177,7 @@ def Checkpoint_Observe(robot, nav, result, report_wait, *, quick_id=False,
     def record_miss(cause):
         robot.check()
         reason_zh = Checkpoint_RecordMiss(result, expected_id, seen_ids, healthy_windows,
-                                          miss_policy, cause, temporary_camera_gaps)
+                                          miss_policy, cause, temporary_camera_gaps, current_scan_windows=view_windows)
         report_wait()
         return CheckpointScanResult.CHECKPOINT_NOT_SEEN, reason_zh
 

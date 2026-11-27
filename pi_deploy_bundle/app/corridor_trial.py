@@ -444,6 +444,10 @@ def CorridorTrial_CheckLateralHeading(robot, nav, action, before, report, leg, p
     if leg.get('tag3_side_turn_deferred'):
         check['compensation_status'] = 'tag3_recent_turn_would_worsen_residual'
         return CorridorLateralHeadingResult.PROCEED
+    if tag3_probe_handled and (leg.get('from_tag'),leg.get('expected_id')) == (2,3):
+        midpoint = leg['tag3_midpoint_observation']
+        check.update(compensation_status='heading_from_current_midpoint_tag3', residual_deg=midpoint['heading_deg'])
+        return CorridorLateralHeadingResult.PROCEED
     if tag3_probe_handled:
         check['compensation_status'] = ('tag3_visual_checked_before_forward'
             if (leg.get('tag3_straight_heading') or {}).get('checked_before_magnetic_turn')
@@ -902,7 +906,8 @@ def _tag4_monitor_towards_next_window(robot, nav, action, leg, settings, *, prof
     elif robot._tag4_visual_before_magnetic_turn(action, nav, settings):
         decision = 'fresh_tag4'
     else:
-        robot.corridor_recover_heading(4, boundary=action, checked_visual_stance=robot.last_action_completed_ros_ns)
+        options = {'one_turn_before_scan':True} if leg.get('tag3_missing_heading_recovery') else {}
+        robot.corridor_recover_heading(4, boundary=action, checked_visual_stance=robot.last_action_completed_ros_ns, **options)
         feedback = robot.last_heading_report or {}
         if getattr(robot, 'magnetic_route_only', False) or not feedback:
             decision = 'magnetic_unavailable_continue'
@@ -1015,7 +1020,11 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
 def _tag4_confirmed_straight_heading(robot, nav, leg):
     """Check the current completed gait against the Tag 3 straight reference."""
     handoff = leg.get('tag3_straight_heading') or {}
-    if (handoff.get('magnetic_reference') not in ('applied','prior_tag3_reference_retained')
+    tag3_anchor = (handoff.get('magnetic_reference') in ('applied','prior_tag3_reference_retained')
+                   or (leg.get('completed_forward_steps', 0) >= 2 and handoff.get('turn')
+                       and handoff.get('post_turn_pose_confirmed') is False
+                       and (leg.get('departure_heading') or {}).get('magnetic_reference') == 'applied'))
+    if (not tag3_anchor
             or leg.get('tag3_clearance_probe') or leg.get('tag4_forward_disruption')
             or getattr(robot, 'magnetic_route_only', False) or not getattr(nav.io, 'motion_capture_verified', False)):
         return False
@@ -1050,6 +1059,8 @@ def _tag4_longitudinal_observation(robot, nav, observation, settings, *, approac
     scan = observation.get('scan') or {}
     stance = getattr(robot, 'last_action_completed_ros_ns', None)
     camera = observation.get('camera_info') or {}
+    if scan.get('camera_healthy') and scan.get('contract_match') and 2 in (scan.get('observed_ids') or ()):
+        plan['tag2_visible_at_stance_ns'] = stance
     if (approach_steps is not None and type(stance) is int and type(scan.get('after_ns')) is int
             and type(scan.get('now_ns')) is int and stance <= scan['after_ns'] < scan['now_ns']
             and scan.get('camera_healthy') and scan.get('contract_match') and camera.get('ready')
@@ -3002,8 +3013,46 @@ def _tag3_peripheral_heading(robot, nav, leg, hint):
 
 def _tag3_short_first_forward(leg):
     visual = leg.get('tag3_straight_heading') or {}
-    return (visual.get('short_first_forward') is True or bool(leg.get('tag3_side_turn_deferred'))
+    return (bool(leg.get('tag3_missing_heading_recovery')) or visual.get('short_first_forward') is True
+            or bool(leg.get('tag3_side_turn_deferred'))
             and visual.get('magnetic_reference') not in ('applied','prior_tag3_reference_retained'))
+
+
+def _tag2_heading_after_tag3_miss(robot, nav, profile, leg, settings, reserved, *, tag2_seen):
+    """Use the preceding printed marker only for yaw at this new stance."""
+    recovery = {'source':'nominal_course', 'first_forward_steps':2}
+    leg['tag3_missing_heading_recovery'] = recovery
+    if not tag2_seen or not settings or not hasattr(robot,'Route_RebaseTagHeading'):
+        return
+    stance = robot.last_action_completed_ros_ns
+    def current_heading():
+        view = _corridor_boundary_checkpoint(robot,nav,2)
+        if view is None:
+            _, view = _refresh_checkpoint_pose(robot,nav,profile,2,quick_id=True,
+                                              reuse_settled_cache=True,advisory_windows=1)
+        plan = RoutePose_PlanTag2ForwardTrial(view,nav.cfg,settings,candidate_counts=(2,))
+        stamp = plan.get('latest_stamp_ns')
+        bounds = plan.get('distance_bounds_m')
+        if (type(stamp) is int and stamp > robot.last_action_completed_ros_ns
+                and bounds and .02 <= bounds[0] <= bounds[1] <= .48 and bounds[1]-bounds[0] <= .025
+                and plan.get('max_heading_deviation_deg',180.) <= 3. and plan['projection_bounds'][0] > .65
+                and abs(plan['heading_deg']) <= 40. and VisualCamera_IsFresh(nav.io.visual_motion_ready,stamp)):
+            return plan['heading_deg'], stamp
+    heading = current_heading()
+    if heading is None:
+        return
+    yaw, stamp = heading
+    recovery.update(source='current_tag2_yaw',before_error_deg=yaw,stance_ns=stance)
+    if abs(yaw) > nav.cfg['post_action_heading'].get('deadband_deg',8.):
+        turn = robot.Route_TurnFromTagHeading(2,yaw,stamp,reserved_actions=reserved)
+        if turn:
+            recovery['turn'] = turn
+            heading = current_heading()
+            if heading is None or heading[1] <= stamp:
+                recovery['post_turn_pose_confirmed'] = False
+                return
+            yaw, stamp = heading
+    recovery.update(residual_deg=yaw, magnetic_reference=robot.Route_RebaseTagHeading(2,yaw,stamp).value)
 
 
 def _tag3_straight_heading(robot, nav, profile, leg, *, reserved_actions, probe_once=False,
@@ -3966,7 +4015,7 @@ def _tag5_native_groups(steps, pair_ops=None, *, max_group_steps=None):
     return plans[steps] or ()
 
 
-def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None):
+def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None, *, profile=None):
     if getattr(robot, 'boundary_visual_observation', None) is not None:
         observation = _corridor_boundary_checkpoint(robot, nav, 3, action)
         if observation is None:
@@ -3982,6 +4031,23 @@ def _probe_tag3_from_midpoint(robot, nav, leg, strides, action=None):
         'fresh_tag3_frames': scan.get('samples', 0), 'pose_used_for_next_leg': False,
         'raw_pose': _checkpoint_raw_pose(scan, 3, nav.cfg['min_frames']),
         'frame_diagnostics': observation.get('quick_scan_windows', [])}
+    if (profile is None or not observation.get('detected') or not hasattr(robot,'Route_RebaseTagHeading')
+            or robot.cfg.get('route_steps',{}).get('continue_estimated_route') is not True):
+        return False
+    hint = _tag3_route_hint(observation,nav,profile,recovery=True)
+    reading = CorridorTrial_HeadingSnapshot(getattr(robot,'last_heading_report',None) or {},after=True,load=robot.load_kind)
+    deadband = nav.cfg['post_action_heading'].get('deadband_deg',8.)
+    completed = getattr(robot,'last_action_completed_monotonic',None)
+    if (hint is None or abs(hint['heading_deg']) > deadband or reading is None
+            or type(completed) not in (int,float) or reading[1] <= completed
+            or not 0 <= robot.clock()-reading[1] <= nav.cfg['magnetic']['max_age_s']
+            or abs(reading[0]) >= _LATERAL_LARGE_DRIFT_DEG or abs(wrap(reading[0]-hint['heading_deg'])) > 2*deadband
+            or hint['latest_stamp_ns'] <= robot.last_action_completed_ros_ns
+            or not VisualCamera_IsFresh(nav.io.visual_motion_ready,hint['latest_stamp_ns'])):
+        return False
+    applied = robot.Route_RebaseTagHeading(3,hint['heading_deg'],hint['latest_stamp_ns']).value
+    leg['tag3_midpoint_observation'].update(heading_deg=hint['heading_deg'], magnetic_reference=applied)
+    return applied == 'applied'
 
 
 def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=0):
@@ -4522,6 +4588,18 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                 probe_once=not (near_marker or settled_tag3)
                                 and getattr(robot, 'boundary_visual_observation', None) is not None)
                         handoff = leg.get('tag3_straight_heading') or {}
+                        if (estimate and len(result['legs']) >= 2 and result['legs'][-2].get('checkpoint_not_seen') and not near_marker
+                                and tag3_heading is None and not handoff and not leg.get('tag3_missing_heading_recovery')):
+                            cached = getattr(robot,'last_boundary_visual',None) or {}
+                            tag2_seen = (plan.get('tag2_visible_at_stance_ns') == robot.last_action_completed_ros_ns
+                                         or (cached.get('stance_completed_ns') == robot.last_action_completed_ros_ns
+                                             and 2 in ((cached.get('scan') or {}).get('observed_ids') or ())))
+                            _tag2_heading_after_tag3_miss(robot,nav,profile,leg,
+                                robot.cfg.get('route_steps',{}).get('tag2_forward_trial'),pending_actions+after_leg,
+                                tag2_seen=tag2_seen)
+                            if leg['tag3_missing_heading_recovery'].get('turn'):
+                                plan = _tag4_position_plan(robot,nav,profile,tag4_trial,approach_steps=scan_group,boundary_first=True)
+                                leg['tag4_approach'].append(plan)
                         handoff_stable = (settled_tag3 and handoff.get('magnetic_reference') in
                             ('applied','prior_tag3_reference_retained') and handoff.get('observed_ids') == [3]
                             and abs(handoff['before_error_deg']) <= nav.cfg['post_action_heading'].get('deadband_deg',8.))
@@ -4533,6 +4611,8 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             leg['tag3_handoff_scan_policy'] = 'settled_tag3_and_current_tag4_miss'
                         if tag3_heading is not None:
                             leg['straight_heading_source'] = 'current_tag3'
+                        elif (leg.get('tag3_missing_heading_recovery') or {}).get('magnetic_reference') == 'applied':
+                            leg['straight_heading_source'] = 'current_tag2_yaw'
                         elif plan.get('distance_bounds_m') and not RoutePose_Tag4DepthOnly(plan['distance_bounds_m'], tag4_trial):
                             leg['straight_heading_source'] = 'near_tag4'
                         elif handoff.get('magnetic_reference') == 'prior_tag3_reference_retained':
@@ -4668,8 +4748,10 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             remainder = count - advance_steps
                             keep_five = remainder >= 5 and remainder % 2
                             even_part = remainder - 5 if keep_five else remainder
-                            chunks = ([4] * (even_part // 4) + ([2] if even_part % 4 >= 2 else [])
-                                      + ([5] if keep_five else []))
+                            # Keep the untravelled distance together. The next fresh stance
+                            # chooses its own native gait, even after a two-step probe.
+                            even_part -= even_part % 2
+                            chunks = ([even_part] if even_part else []) + ([5] if keep_five else [])
                             if remainder % 2 and not keep_five:
                                 # There is no single-step gait for a last odd stride after a short group.
                                 plan['unavailable_final_stride'] = 1
@@ -4817,10 +4899,11 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     gate_approach = use_tag5_passage and expected_id == 5
                     can_read_boundary = getattr(robot, 'boundary_visual_observation', None) is not None
                     tag3_midpoint = previous_id == 2 and op == 'strafe_right_once' and not is_boundary
+                    midpoint_heading_applied = False
                     if tag3_midpoint and can_read_boundary:
                         sizes = {name: cycles for (operation, cycles), name in SIDE_ACTIONS.items() if operation == op}
                         right_strides = sum(sizes.get(name, name == op) for name in leg['completed_actions'])
-                        _probe_tag3_from_midpoint(robot, nav, leg, right_strides, action)
+                        midpoint_heading_applied = _probe_tag3_from_midpoint(robot,nav,leg,right_strides,action,profile=profile)
                     midpoint = None
                     if gate_approach and not is_boundary:
                         if not can_read_boundary:
@@ -4838,7 +4921,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                                             and not getattr(robot, 'magnetic_route_only', False) and small_ready())
                     probe = leg.get('tag3_clearance_probe') if index == action_index == 0 else None
                     magnetic_report = robot.last_heading_report or {}
-                    visual_checked = False
+                    visual_checked = midpoint_heading_applied
                     if probe is not None and op == 'strafe_right_once':
                         _tag3_straight_heading(robot, nav, profile, leg, reserved_actions=pending_actions + after_leg,
                                                report_key='tag3_probe_heading')

@@ -462,13 +462,16 @@ class Robot:
         self.corridor_recover_heading(expected_tag,tag2_clearance_on_worsening=True)
 
     def corridor_recover_heading(self,expected_tag=None,*,boundary='corridor_side_boundary',
-                                 tag2_clearance_on_worsening=False, checked_visual_stance=None, reuse_side_sample=False):
+                                 tag2_clearance_on_worsening=False, checked_visual_stance=None, reuse_side_sample=False,
+                                 one_turn_before_scan=False):
         """Sample after the last completed motion and correct toward the saved target."""
         self._route_end_expected_tag=expected_tag
         monitored = getattr(self,'last_heading_report',None) or {}
         self.last_heading_report=None
         try:
             options={'tag2_clearance_on_worsening':True} if tag2_clearance_on_worsening else {}
+            if one_turn_before_scan and expected_tag == 4:
+                options['one_turn_before_scan'] = True
             tag4_stance = expected_tag == 4 and type(checked_visual_stance) is int
             if tag4_stance:
                 options['checked_visual_stance'] = checked_visual_stance
@@ -741,7 +744,7 @@ class Robot:
         return self.navigator
 
     def monitor_heading(self,name,allow_correction=True,*,tag2_clearance_on_worsening=False,
-                        reserved_route_actions=0,checked_visual_stance=None,completed_observation=None):
+                        reserved_route_actions=0,checked_visual_stance=None,completed_observation=None,one_turn_before_scan=False):
         name=getattr(self,'heading_turn_phase',None) or name
         cfg=getattr(self,'navigation_bundle',None)
         if (self.magnetic_route_only or not cfg or not cfg.get('post_action_heading',{}).get('enabled')
@@ -790,6 +793,8 @@ class Robot:
                 receipt = (completed_observation.get('reference') or {}).get('received_monotonic')
                 if guard.corridor_motion_sample_ready(self.load_kind,receipt,self.last_action_completed_monotonic):
                     sample_options['initial_observation'] = (completed_observation,guard.last_sample)
+            if one_turn_before_scan:
+                sample_options['one_turn_before_scan']=True
             if tag2_clearance_on_worsening:
                 sample_options['tag2_clearance_on_worsening']=True
             if self.last_action_completed_monotonic is not None:

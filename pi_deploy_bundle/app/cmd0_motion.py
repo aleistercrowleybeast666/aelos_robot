@@ -123,14 +123,21 @@ def Cmd0Motion_LoadRouteSteps(project):
     before_base_turn = steps.get('command2_before_base_turn_extra_steps', 0)
     if 'command2_empty_departure' in steps:
         departure = steps['command2_empty_departure']
-        if not isinstance(departure, dict) or departure.keys() != {'gate_lateral_tolerance_m', 'side_departure_depth_m'}:
+        if not isinstance(departure, dict) or not {'gate_lateral_tolerance_m', 'side_departure_depth_m'} <= departure.keys() <= {
+                'gate_lateral_tolerance_m', 'side_departure_depth_m', 'tag6_side_departure_depth_m', 'handoff_strafe_min_depth_m'}:
             raise ValueError('返程出发位姿需要门口横向容差和侧跨前距离范围')
-        band = departure['side_departure_depth_m']
         tolerance = departure['gate_lateral_tolerance_m']
-        if (not isinstance(band, list) or len(band) != 2
-                or not all(type(value) in (int, float) and isfinite(value) for value in (*band, tolerance))
-                or not .025 <= tolerance <= .10 or not .06 <= band[0] < band[1] <= .35):
-            raise ValueError('返程出发位姿范围无效，距离单位为米')
+        if type(tolerance) not in (int, float) or not .025 <= tolerance <= .10:
+            raise ValueError('返程出发横向容差无效，距离单位为米')
+        for key in ('side_departure_depth_m', 'tag6_side_departure_depth_m'):
+            band = departure.get(key, departure['side_departure_depth_m'])
+            if (not isinstance(band, list) or len(band) != 2
+                    or not all(type(value) in (int, float) and isfinite(value) for value in band)
+                    or not .06 <= band[0] < band[1] <= .35):
+                raise ValueError('返程出发位姿范围无效，距离单位为米')
+        staging = departure.get('handoff_strafe_min_depth_m', .18)
+        if type(staging) not in (float, int) or not isfinite(staging) or not .12 <= staging <= .30:
+            raise ValueError('接驳取物前的侧跨退距无效，单位为米')
     if type(before_base_turn) is not int or before_base_turn not in (0, 2, 4):
         raise ValueError('命令 2 第一次放物前可在大本营内补进 0、2 或 4 步')
     if 'corridor' in steps:
