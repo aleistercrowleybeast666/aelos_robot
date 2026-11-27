@@ -284,6 +284,8 @@ def _return_travel(robot, nav, leg, actions):
             clear_course = _tag7_align_course(robot,nav,leg,leg['completed_actions'][-1])
         residual, uncertain = _prepare_return_group(robot, nav)
         uncertain = uncertain or not clear_course
+        if leg.get('check_first_side_stride') and not leg['completed_actions'] and pending[0].startswith('empty_strafe'):
+            uncertain = True
         if uncertain and pending[:2] == ['free_forward', 'free_forward']:
             # Two five-step macros and five two-step macros cover the same distance.
             # Shorten the feedback interval immediately after unresolved side drift.
@@ -998,7 +1000,8 @@ def ReturnTrial_Run(robot):
         correction = leg['empty_departure_correction']
         axis = '门口横偏或航向' if tag == 5 else '侧跨起点的前后距离'
         return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED,
-                          f'返程 Tag {tag} 的{axis}仍未确认，已尝试 {len(correction["actions"])} 组位置调整。')
+                          f'返程 Tag {tag} 的{axis}仍未确认，已尝试 {len(correction["actions"])} 组位置调整。'
+                          + correction.get('reason_zh', ''))
 
     robot.check()
     if robot.load_kind != 'empty':
@@ -1041,6 +1044,8 @@ def ReturnTrial_Run(robot):
         leg = {'expected_id': tag, 'direction': 'return', 'detected': False,
                'completed_actions': [], 'observation_windows': 0,
                'departure_reobservations': 0, 'scan': None}
+        if result['legs'] and (result['legs'][-1].get('empty_departure_correction') or {}).get('status') == 'nearest_verified_depth':
+            leg['check_first_side_stride'] = True
         result['legs'].append(leg)
         _report_progress(robot, 'cmd2_return_leg', expected_tag=tag, last_passed_tag=previous, return_step='corridor')
         early = _return_travel(robot, nav, leg, route_actions[index])

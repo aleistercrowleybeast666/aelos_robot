@@ -38,6 +38,11 @@ _TAG4_CLEARANCE_YAW_DEG = 22.
 _TAG4_NEAR_LEFT_MARGIN_M = .015
 _TAG4_LEFT_PROBE_DEPTH_M = .15
 _TAG4_LEFT_CLEARANCE_FLOOR_M = .125
+# Outbound diagram, competition rules p. 4. Tag 4 is about 0.4 m
+# downstream and 0.2–0.25 m to the right of Tag 3. Discount the drawn
+# spacing for marker placement; only use it at the end of the four strafes.
+_TAG3_TO_4_MIN_FORWARD_M = .33
+_TAG3_TO_4_LANE_CENTER_M = .235
 _TAG4_PARALLEL_DEPTH_DRIFT_M = .005
 _RECOVERY_STRAFE_UPPER_M = .10  # A field cycle shifted roughly 9 cm.
 _LARGE_STRAFE_TRAVEL_UPPER_M = .075
@@ -984,9 +989,15 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
                               _tag4_confirmed_straight_heading(robot, nav, leg))
                 cautious = True
                 reason = 'uncorroborated_long_range'
-            leg['tag4_range_anchor'] = {'bounds_m':current_range, 'stamp_ns':stamp, 'range_margin_m':range_margin,
-                                        'completed_steps':completed}
             lower = current_range[0] - range_margin
+            if plan['distance_verified'] or 'tag3_mapped_start_min_depth_m' not in leg:
+                leg['tag4_range_anchor'] = {'bounds_m':current_range, 'stamp_ns':stamp, 'range_margin_m':range_margin,
+                                            'completed_steps':completed}
+            else:
+                # Partial rows can tighten the map budget but cannot become
+                # the first full Tag 4 observation or increase its budget.
+                leg['tag3_mapped_start_min_depth_m'] = min(leg['tag3_mapped_start_min_depth_m'],
+                                                            lower + completed * step_upper)
     else:
         reason = 'previous_range_minus_travel' if anchor else 'no_range_yet'
     if reason == 'no_range_yet':
@@ -999,15 +1010,49 @@ def _tag4_approach_stride(robot, nav, settings, leg, plan, requested, *, cautiou
                                   for p in leg.get('tag4_approach', ()))
                       and _tag4_confirmed_straight_heading(robot, nav, leg))
         cap = 4 if (completed == 0 and not cautious) or allow_four else 2
+        hint = plan.get('verified_tag3_start')
+        if (completed == 0 and not cautious and requested == 8 and hint and not anchor
+                and not plan.get('partial_pose') and not plan.get('distance_bounds_m')
+                and not plan.get('camera_contract_fault') and leg.get('departure_tag_confirmed') is True
+                and leg.get('completed_actions') == ['cmd0_strafe_right4']
+                and Cmd0Motion_ContinuousReady(robot.backend)
+                and type(stance) is int and hint['latest_stamp_ns'] > stance
+                and live and live(hint['latest_stamp_ns'])
+                and hint['max_abs_yaw_deg'] <= nav.cfg['post_action_heading'].get('deadband_deg',8.)):
+            travel = 8 * step_upper
+            available = hint['distance_bounds_m'][0] + _TAG3_TO_4_MIN_FORWARD_M
+            lateral = max(abs(v - _TAG3_TO_4_LANE_CENTER_M) for v in hint['lateral_bounds_m'])
+            lateral += travel * sin(radians(hint['max_abs_yaw_deg']))
+            if available - travel >= max(floor, .10) and lateral <= .08:
+                cap = 8
+                lower = available
+                reason = 'current_tag3_mapped_start'
+                leg['tag3_mapped_start_min_depth_m'] = available
     elif reason == 'previous_range_minus_travel' or cautious or not plan['distance_verified']:
         cap = 4 if allow_four else 2
     else:
         cap = 8
+    mapped_start = leg.get('tag3_mapped_start_min_depth_m')
+    if mapped_start is not None and completed:
+        if current_range is not None and plan['distance_verified']:
+            # A real Tag 4 window supersedes the map. The estimate cannot
+            # corroborate a distant measurement or renew its travel allowance.
+            leg.pop('tag3_mapped_start_min_depth_m')
+        else:
+            remaining = mapped_start - completed * step_upper
+            lower = remaining if lower is None else min(lower, remaining)
+            cap = min(cap, 2)
+            if current_range is None:
+                reason = 'tag3_map_minus_travel'
     sizes = (8, 5, 4, 2) if native_five else (8, 4, 2)
     if handoff_limited:
         cap = min(cap, 2)
     step_count = next((n for n in sizes if n <= min(requested, cap)
                        and (lower is None or lower - step_upper * n >= floor)), 0)
+    if completed and not step_count and 'tag3_mapped_start_min_depth_m' in leg:
+        # Escalate to the normal stationary Tag 4 acquisition and guarded
+        # departure check. Exhausted travel is not a confirmed arrival.
+        leg['tag4_guarded_forward'] = True
     leg.setdefault('tag4_forward_limits', []).append({
         'completed_steps':completed, 'requested_steps':requested, 'next_steps':step_count,
         'range_source':reason, 'observed_bounds_m':current_range,
@@ -1843,7 +1888,7 @@ def _trim_tag4_before_left(robot, nav, profile, pose, leg, settings, *, checkpoi
             last_move = (checkpoint.get('completed_actions') or [None])[-1]
             current_heading = CorridorTrial_HeadingSnapshot(getattr(robot,'last_heading_report',None) or {},
                                                             after=True, load=robot.load_kind)
-            if (partial['samples'] >= 2 and partial['latest_fresh'] and last_move in ('carry_forward2','carry_forward4')
+            if (partial['samples'] >= 2 and partial['latest_fresh'] and last_move in ('carry_forward','carry_forward2','carry_forward4')
                     and current_heading is not None and abs(current_heading[0]) <= nav.cfg['post_action_heading']['deadband_deg']
                     and robot.count + reserved_actions + 1 <= robot.cfg['max_body_macros_per_journey']):
                 plan['partial_reframe_action'] = 'cmd0_carry_backward2'
@@ -3151,6 +3196,7 @@ def _tag3_handoff_window(robot, nav, leg):
     if (report.get('target_id') != 4 or report.get('fault_diagnostic') or report.get('stance_completed_ns') != stance
             or not all(report.get(k) is True for k in ('boundary_valid','camera_healthy','camera_info_ready','contract_match'))
             or scan.get('status') != 'no_tag' or scan.get('observed_ids') != [3] or scan.get('samples') != 0
+            or scan.get('ids') or scan.get('observations') or (report.get('row_counts') or {}).get('rejected')
             or (report.get('row_counts') or {}).get('current_rows', 0) < nav.cfg['min_frames']):
         return None
     floor, captured, restart = report.get('after_ns'), report.get('now_ns'), report.get('camera_restart_ns', 0)
@@ -4544,6 +4590,7 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             if op in _SIDE_ACTIONS:
                 omit_tag4_forward = False
                 leg.pop('tag4_range_anchor', None)
+                leg.pop('tag3_mapped_start_min_depth_m', None)
             if use_tag4_trial and expected_id == 4 and op == _FORWARD_GROUP:
                 count = steps[index]['steps']
                 group_reserve = count // 2 - len(actions) if guarded_tag4_leg else 0
@@ -4570,6 +4617,16 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                     else:
                         plan = _tag4_longitudinal_observation(robot, nav, side_window, tag4_trial, approach_steps=scan_group)
                     leg.setdefault('tag4_approach', []).append(plan)
+                    if (group_start and 'tag3_mapped_start_min_depth_m' in leg
+                            and not plan['distance_verified'] and not plan.get('camera_contract_fault')
+                            and not plan.get('partial_pose') and not plan.get('distance_bounds_m')):
+                        # Reacquire at the new stance before spending any more
+                        # of the mapped route. Use the normal Tag 4 recovery
+                        # and trim below if this full fresh window finds it.
+                        plan = _tag4_position_plan(robot, nav, profile, tag4_trial, approach_steps=scan_group,
+                                                   reuse_settled_cache=False, advisory_windows=1)
+                        plan['rescanned_after_mapped_start'] = True
+                        leg['tag4_approach'].append(plan)
                     depth_bounds = plan.get('distance_bounds_m') or (plan.get('partial_pose') or {}).get('distance_bounds_m')
                     distant = RoutePose_Tag4DepthOnly(depth_bounds, tag4_trial)
                     if previous_op in _SIDE_ACTIONS and not plan.get('camera_contract_fault'):
@@ -4609,6 +4666,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
                             leg['tag4_approach'].append(plan)
                         elif side_window:
                             leg['tag3_handoff_scan_policy'] = 'settled_tag3_and_current_tag4_miss'
+                            if handoff_stable and tag3_heading and handoff.get('magnetic_reference') == 'applied':
+                                plan['verified_tag3_start'] = {k:tag3_heading[k] for k in
+                                    ('latest_stamp_ns','distance_bounds_m','lateral_bounds_m','max_abs_yaw_deg')}
                         if tag3_heading is not None:
                             leg['straight_heading_source'] = 'current_tag3'
                         elif (leg.get('tag3_missing_heading_recovery') or {}).get('magnetic_reference') == 'applied':

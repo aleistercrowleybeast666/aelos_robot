@@ -367,10 +367,33 @@ def _empty_departure_depth(config, tag):
     return config['side_departure_depth_m']
 
 
-def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
+def _closest_bracketed_stance(previous, current, near, far):
+    """Compare observed landings of the same two-step macro in opposite directions."""
+    if previous is None:
+        return None
+    excess = []
+    for reading in (previous, current):
+        lo, hi = reading['body_depth_m']
+        if hi - lo > .005 or abs(reading['heading_error_deg']) + reading['heading_spread_deg'] > 8:
+            return None
+        if hi < near:
+            excess.append(lo - near)
+        elif lo > far:
+            excess.append(hi - far)
+        else:
+            return None
+    before, after = excess
+    if (before * after >= 0 or min(abs(before), abs(after)) > .010000001
+            or max(abs(before), abs(after)) > .020000001):
+        return None
+    return 'current' if abs(after) <= abs(before) + 1e-9 else 'previous'
+
+
+def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0., *, after_depth_move=False):
     depth_lo, depth_hi = geometry['body_forward_bounds_m']
     error = wrap(geometry['heading_deg'] - goal_yaw)
-    reading = {'heading_error_deg': error, 'body_depth_m': (depth_lo, depth_hi)}
+    reading = {'heading_error_deg': error, 'heading_spread_deg': geometry['max_heading_deviation_deg'],
+               'body_depth_m': (depth_lo, depth_hi)}
     if tag in (1, 5):
         lo, hi = _empty_gate_offset(geometry, goal_yaw, target_lateral)
         reading['body_lateral_m'] = (lo, hi)
@@ -382,6 +405,14 @@ def _empty_departure_step(tag, geometry, goal_yaw, config, target_lateral=0.):
             or abs(error) + geometry['max_heading_deviation_deg'] > 15.):
         return None, None, reading, 'pose_outside_translation_range'
     near, far = _empty_departure_depth(config, tag)
+    # Two unloaded steps moved about 11 cm in the 22:47 run. A new,
+    # tightly clustered observation within 5 mm of the target band can settle
+    # the just-completed depth correction without another full two-step move.
+    if (after_depth_move and depth_hi - depth_lo <= .01
+            and near - .005 <= depth_lo <= depth_hi <= far + .005
+            and (depth_lo < near or depth_hi > far)):
+        reading['depth_settling_margin_m'] = .005
+        near, far = near - .005, far + .005
     if tag == 1 and depth_hi < near:
         return 'empty_backward2', near - depth_hi, reading, 'near_before_transfer'
     if tag in (1, 5):
@@ -448,6 +479,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
     tolerance = config['gate_lateral_tolerance_m']
     near, far = _empty_departure_depth(config, tag)
     previous_action, previous_gap, previous_strides = None, None, 1
+    previous_reading = None
     retried_single = False
     retreated = False
     retraced = False
@@ -467,15 +499,16 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
             report['status'] = 'no_current_pose'
             return
         action, gap, reading, status = _empty_departure_step(
-            tag, geometry, goal_yaw, config, goal.get('lateral_m', 0.))
+            tag, geometry, goal_yaw, config, goal.get('lateral_m', 0.),
+            after_depth_move=previous_action in ('empty_forward2', 'empty_backward2'))
         report['observations'].append(reading)
         report['status'] = status
         conflict = Checkpoint_EmptyDepartureConflict(robot, nav, tag, geometry)
-        if conflict:
-            report[conflict] = True
-        elif status == 'within_departure_band':
+        if status == 'within_departure_band':
             report.pop('gate_crossing_unresolved', None)
             report.pop('side_departure_depth_unresolved', None)
+        elif conflict:
+            report[conflict] = True
         unresolved = report.get('gate_crossing_unresolved') or report.get('side_departure_depth_unresolved')
         if action is None:
             if unresolved and not refreshed:
@@ -502,7 +535,20 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                 # sign. If the feet remain stuck with the marker close ahead,
                 # recover the view by the supported two-step retreat once.
                 retry_gap = 2 * tolerance if tag == 5 else far - near
-                if not retried_single and gap >= retry_gap:
+                depth_reversal = (action != previous_action
+                                  and {action, previous_action} == {'empty_backward2', 'empty_forward2'})
+                closest = None
+                if tag in (6, 7) and depth_reversal and 'depth_overshoot_recovery' in report:
+                    closest = _closest_bracketed_stance(previous_reading, reading, near, far)
+                if depth_reversal and 'depth_overshoot_recovery' not in report:
+                    report['depth_overshoot_recovery'] = action
+                elif closest == 'current':
+                    report['status'] = 'nearest_verified_depth'
+                    report.pop('side_departure_depth_unresolved', None)
+                    return
+                elif closest == 'previous' and 'return_to_closer_depth' not in report:
+                    report['return_to_closer_depth'] = action
+                elif not depth_reversal and not retried_single and gap >= retry_gap:
                     retried_single = True
                 elif (tag == 5 and not retreated and geometry['body_forward_bounds_m'][1] < config['side_departure_depth_m'][0]
                       and getattr(robot.backend, 'empty_recovery_ready', lambda: False)()):
@@ -510,6 +556,12 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
                     retreated = True
                 else:
                     report['status'] = 'retain_latest_pose_after_limited_progress'
+                    if action in ('empty_forward2', 'empty_backward2'):
+                        lo, hi = reading['body_depth_m']
+                        report['reason_zh'] = (
+                            f'最新距码 {lo*100:.1f}–{hi*100:.1f} cm，目标 {near*100:g}–{far*100:g} cm。'
+                            + ('已反向调整一次，重复两步动作会再次越过目标。' if depth_reversal
+                               else '两步调整后未见足够位置改善，侧跨起点仍有偏差。'))
                     return
             elif tag == 5 and getattr(robot.backend, 'empty_strafe_group_ready', lambda: False)():
                 # Measure the effect on this floor before batching. Reserve
@@ -545,6 +597,7 @@ def Checkpoint_AlignEmptyDeparture(robot, nav, leg):
             return
         robot.nav_count += 1
         report['actions'].append(native)
+        previous_reading = reading
         previous_action = None if tag == 5 and action == 'empty_backward2' else action
         previous_gap, previous_strides = gap, strides
         refreshed = False
