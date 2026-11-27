@@ -24,7 +24,7 @@
     "cmd0_carry_backward2",
     "cmd0_strafe_left4",
     "cmd0_strafe_left4",
-    "cmd0_strafe_left2",
+    "cmd0_strafe_left3",
     "single_small_strafe_left"
   ],
   "command2_continue_return": true,

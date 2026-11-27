@@ -23,7 +23,7 @@
     "app/config/mission_v5.json": "dc37ff1cfbbe86692ed501c570dde95c8e84a852cf28c0d09e8fede4ab16a840",
     "app/config/navigation.json": "f6dc8daa56a4c1f195c8ebddbb6caa9c3ec0dfd0c0f72238bc19094a6823d0a2",
     "app/config/route_pose.json": "6649ff77c10240360d6ae938e14b17aadde146a1be859e7c6166b692f57d53cd",
-    "app/config/route_steps.json": "742ef8c95b44fe2a10e5c93b6a2d85e78dc85a045469ee37165efffd68ec025f",
+    "app/config/route_steps.json": "277a9ea4a026454d374f3c5c9f809cda9d2e42622e25f7f2778dfe4456684d79",
     "app/config/runtime.json": "04b584390354fd4e2b21ad6c19f9e0a57685a8c0330aa8764b2fdeb684311fe0",
     "app/config/tag3_outbound_heading.json": "039066c991fed0e5ed3f9c25373de2676820a64603ccba20190dca4875078628",
     "app/config/tag_alignment.json": "6c53ff60a1f2f4ca511c47263a131f0c79bdb95042e4d5e61d0dfc46a703514d",
