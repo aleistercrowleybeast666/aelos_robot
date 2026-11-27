@@ -406,7 +406,8 @@ def _tag2_can_finish_three(robot, nav, leg):
             or not trim.get('ready_to_strafe') or trim.get('heading_reference') != 'applied'):
         return False
     depth = trim.get('measured_landing_m')
-    lateral = trim.get('lateral_bounds_m')
+    departure_pose = leg.get('tag2_side_hint') or trim
+    lateral = departure_pose.get('lateral_bounds_m')
     settings = robot.cfg['route_steps']['tag2_forward_trial']
     target, tolerance = settings.get('target_distance_m'), settings.get('deadband_m')
     if (target is None or tolerance is None or not depth
@@ -418,7 +419,7 @@ def _tag2_can_finish_three(robot, nav, leg):
     report = robot.last_heading_report or {}
     sample = CorridorTrial_HeadingSnapshot(report, after=True, load=robot.load_kind)
     before = check.get('error_after_strafe_deg')
-    departure = trim.get('heading_deg')
+    departure = departure_pose.get('heading_deg')
     return (sample is not None and before is not None and departure is not None and not check.get('large_drift')
             and abs(wrap(before - departure)) <= 2 * deadband
             and abs(before) <= 2 * deadband and abs(sample[0]) <= deadband
@@ -2022,7 +2023,9 @@ def _tag2_departure_distance_ok(plan, settings):
         return False
     lo, hi = plan['distance_bounds_m']
     near, far = settings['distance_window_m']
-    # Keep the near boundary usable when submillimeter variation straddles it.
+    if 'minimum_strafe_distance_m' in settings:
+        return settings['minimum_strafe_distance_m'] <= lo <= hi <= far and hi - lo <= .006
+    # Keep the legacy near boundary usable when submillimeter variation straddles it.
     return (near <= plan['distance_m'] <= far and lo >= near - .003 and hi <= far
             and hi - lo <= .006)
 
@@ -2136,14 +2139,15 @@ def _tag2_partial_reframe_plan(rows, nav, settings):
             or max(abs(left), abs(right)) > .10 or right-left > .035):
         return plan
     plan['distance_m'] = (low+high)/2
-    if high <= near+.01:
+    departure_floor = settings.get('minimum_strafe_distance_m', near)
+    if high <= near+.01 or high < departure_floor:
         return dict(plan, status='too_close', operation='cmd0_carry_backward2')
     # A singleton needs more margin than multiple consistent observations.
     margin = .04 if geometry['samples'] == 1 else .015
     travel = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])[1]
-    if low >= far+margin and low-travel*most_forward >= near+.03:
+    if low >= far+margin and low-travel*most_forward >= max(near+.03, departure_floor):
         return dict(plan, status='too_far', operation='carry_forward2')
-    if near+.01 <= low <= high <= far:
+    if max(near+.01, departure_floor) <= low <= high <= far:
         plan['status'] = 'within_window_needs_fresh_pose'
     return plan
 
@@ -2320,7 +2324,7 @@ def _recover_tag2_lateral_start(robot, nav, profile, leg, plan, settings, *,
         near, far = settings['distance_window_m']
         # Verify the signed depth swept by the planned right stride, including the starting pose.
         shifts = [0., *(.10 * sin(radians(angle)) for angle in (yaw - spread, yaw + spread))]
-        return (near <= depth[0]+min(shifts) and depth[1]+max(shifts) <= far
+        return (settings.get('minimum_strafe_distance_m', near) <= depth[0]+min(shifts) and depth[1]+max(shifts) <= far
                 and lateral[0] >= -.30 and lateral[1]+.10 <= _TAG2_DEPARTURE_LATERAL_M)
 
     side_action = getattr(robot, 'corridor_side_action', None)
@@ -2403,6 +2407,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
     """Use short straight groups near the wall and promote only current pose evidence."""
     near, far = settings['distance_window_m']
     short, long = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])
+    floor = max(near + _TAG2_APPROACH_NEAR_MARGIN_M, settings.get('minimum_strafe_distance_m', near))
     groups = (initial['planned_steps'] + 1) // 2
     live = VisualCamera_GetFreshnessCheck(nav.io, lambda _: False)
     windows = initial['landing_checks'] = []
@@ -2434,7 +2439,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
             if partial is not None:
                 low, high = partial['distance_bounds_m']
                 if (partial['samples'] >= 2 and partial['consistent'] and partial['latest_fresh']
-                        and near + _TAG2_APPROACH_NEAR_MARGIN_M <= low <= high <= far
+                        and floor <= low <= high <= far
                         and partial['max_abs_heading_deg'] <= 8. and partial['projection_bounds'][0] >= .85
                         and max(map(abs, partial['lateral_bounds_m'])) <= .10):
                     check.update(status='partial_visual_cautious_departure', partial_pose=partial)
@@ -2452,7 +2457,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                     and pinned.get('source_confirmed') is True and camera.get('ready') is True
                     and camera.get('fingerprint') == pinned.get('expected_fingerprint')
                     and compass is not None and abs(compass[0]) <= 8.
-                    and near + _TAG2_APPROACH_NEAR_MARGIN_M <= estimated[0] <= estimated[1] <= far):
+                    and floor <= estimated[0] <= estimated[1] <= far):
                 check.update(status='estimated_cautious_departure', magnetic_error_deg=compass[0])
                 initial.update(protocol_completed=True, ready_to_strafe=True, estimated_landing_m=estimated)
                 return {}, True
@@ -2499,7 +2504,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
         leg['tag2_visual_heading_deg'] = hint['heading_deg']
         landing = current.get('estimated_landing_m')
         if (index + 1 < groups and current['planned_steps'] == 2 and landing is not None
-                and landing[0] >= near + _TAG2_APPROACH_NEAR_MARGIN_M and live(hint['latest_stamp_ns'])):
+                and landing[0] >= floor and live(hint['latest_stamp_ns'])):
             plan = current
             continue
         if _tag2_departure_distance_ok(current, settings):
@@ -2521,12 +2526,12 @@ def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
                                         candidate_counts=candidate_counts, **options)
     landing = initial.get('estimated_landing_m')
     if (not ready or robot.load_kind != 'double' or not initial.get('completed_steps') or not landing
-            or 'landing_checks' in initial or landing[0] <= settings['target_distance_m'] + settings['deadband_m']):
+            or 'landing_checks' in initial or landing[1] <= settings['target_distance_m'] + settings['deadband_m']):
         return pose, ready
     # A double grip can travel less than predicted. Reconsider the complete measured
     # pose once, including yaw and retreat clearance, before starting the right traverse.
     stance = robot.last_action_completed_ros_ns
-    latest_pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True)
+    latest_pose, observation = _refresh_checkpoint_pose(robot, nav, profile, 2, quick_id=True, reuse_settled_cache=True)
     followup = RoutePose_PlanTag2ForwardTrial(observation, nav.cfg, settings, candidate_counts=(2,))
     initial['paired_approach_followup'] = followup
     if 'distance_bounds_m' not in followup:

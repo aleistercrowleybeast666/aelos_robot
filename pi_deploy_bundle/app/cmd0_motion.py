@@ -179,7 +179,8 @@ def Cmd0Motion_LoadRouteSteps(project):
             continue
         trim = steps[key]
         keys = {'enabled', 'target_distance_m', 'deadband_m', 'two_step_distance_m', 'distance_window_m'}
-        optional = {'approach_two_step_distance_m'} if tag == 2 else {'left_departure_reference', 'heading_use_within_m'}
+        optional = ({'approach_two_step_distance_m', 'minimum_strafe_distance_m'} if tag == 2
+                    else {'left_departure_reference', 'heading_use_within_m'})
         if (not isinstance(trim, dict) or not keys <= trim.keys() <= keys | optional
                 or type(trim['enabled']) is not bool):
             raise ValueError(f'Tag {tag} 前后试跑补偿配置无效')
@@ -192,6 +193,11 @@ def Cmd0Motion_LoadRouteSteps(project):
                 or not 0 < window[0] < target < window[1] or deadband <= 0
                 or not 0 < travel[0] < travel[1] or not 0 < approach[0] < approach[1]):
             raise ValueError(f'Tag {tag} 前后试跑补偿需填写有效的目标距离、容差和两步距离范围')
+        if 'minimum_strafe_distance_m' in trim:
+            minimum = trim['minimum_strafe_distance_m']
+            if (type(minimum) not in (int, float) or not window[0] <= minimum <= target
+                    or not isfinite(minimum)):
+                raise ValueError('Tag 2 最小起跨距离须在观测下限和目标距离之间（含边界）')
         if 'heading_use_within_m' in trim:
             cutoff = trim['heading_use_within_m']
             if type(cutoff) not in (int, float) or not isfinite(cutoff) or not target+deadband < cutoff <= window[1]:

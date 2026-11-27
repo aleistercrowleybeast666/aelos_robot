@@ -536,6 +536,8 @@ def _tag2_boundary_replan(checkpoint, nav, settings, remaining, *, continuous=Tr
         return 0,plan,'已提前读到 Tag 2，先修正当前航向。'
     if plan['max_abs_lateral_m'] > .12:
         return 0,plan,'已提前读到 Tag 2，横偏较大，先按当前位置核对侧跨起点。'
+    if plan.get('forward_would_cross_minimum'):
+        return 0,plan,'Tag 2 下一组直行预计会越过最小起跨距离，结束剩余直行并核对当前位置。'
     if plan.get('confirmed_near') or (plan['in_departure_window'] and not plan['planned_steps']):
         return 0,plan,'已按 Tag 2 实测距离收短直行，保留当前扫码位置。'
     if 0 < plan['planned_steps'] < remaining:

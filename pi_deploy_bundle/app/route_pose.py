@@ -626,18 +626,28 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
     projection = evidence['projection_bounds']
     near, far = settings['distance_window_m']
     target, deadband = settings['target_distance_m'], settings['deadband_m']
+    departure_floor = settings.get('minimum_strafe_distance_m', near)
     stable = farthest - nearest <= .025
     reverse_bound = settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])[1]
-    close = stable and .02 <= nearest <= farthest < max(near, target-deadband)
+    close = stable and .02 <= nearest <= farthest < max(departure_floor, target-deadband)
+    # An offset marker is still usable for a straight retreat if both ends of
+    # its measured lateral interval stay inside the corridor during the move.
+    reverse_lane = evidence['max_abs_lateral_m'] <= .10
+    if 'minimum_strafe_distance_m' in settings and not reverse_lane:
+        left, right = evidence['lateral_bounds_m']
+        yaw, spread = evidence['heading_deg'], evidence['max_heading_deviation_deg']
+        shifts = [0., *(-reverse_bound * sin(radians(angle)) for angle in (yaw-spread, yaw+spread))]
+        reverse_lane = (spread <= 3. and right-left <= .025 and left + min(shifts) >= -.16
+                        and right + max(shifts) <= .16)
     result.update(confirmed_far=stable and nearest > far,
                   confirmed_near=close
-                                 and evidence['max_abs_lateral_m'] <= .10
+                                 and reverse_lane
                                  and evidence['max_abs_yaw_deg'] <= 12. and projection[0] > 0.,
-                  in_departure_window=stable and _within((nearest, farthest), (near, far)))
+                  in_departure_window=stable and _within((nearest, farthest), (departure_floor, far)))
     if result['confirmed_near']:
         return dict(result, reason='Tag 2 is inside the near side of its target band',
                     reverse_clearance_available=farthest+reverse_bound <= far)
-    if (close and .04 <= nearest < near and projection[0] >= .75
+    if (close and .04 <= nearest < departure_floor and projection[0] >= .75
             and evidence['max_heading_deviation_deg'] <= 3. and abs(evidence['heading_deg']) > 12.):
         return dict(result, heading_to_correct_deg=evidence['heading_deg'], retreat_before_turn=True,
                     reason='Tag 2 below departure depth; verify a retreat on the approach before turning')
@@ -662,10 +672,15 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
         movement = (steps/2 * short * projection[0], steps/2 * long * projection[1])
         landing = (nearest - movement[1], farthest - movement[0])
         gain, residual = _projected_effect(offset, [-distance for distance in movement])
-        if _within(landing, (near, far)) and gain > 0:
+        if _within(landing, (departure_floor, far)) and gain > 0:
             choices.append((residual, steps, landing))
     if not choices:
-        return dict(result, reason='no Tag 2 forward count predicts a landing within the strafe window')
+        # Even just outside the departure window a full two-step macro can be
+        # too long. Tell the upstream entry route to yield to this measurement.
+        shortest = min(candidate_counts, default=0)
+        crosses_floor = shortest > 0 and nearest - shortest / 2 * long * projection[1] < departure_floor
+        return dict(result, forward_would_cross_minimum=crosses_floor,
+                    reason='no Tag 2 forward count predicts a landing within the strafe window')
     _, steps, landing = min(choices)
     return dict(result, status=RoutePosePlanResult.ADJUSTED.value, planned_steps=steps,
                 estimated_landing_m=landing, reason='Tag 2 forward count fitted to the estimated remaining distance')

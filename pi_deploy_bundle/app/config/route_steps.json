@@ -84,8 +84,9 @@
   "wall_pickup_side_limit": 2,
   "tag2_forward_trial": {
     "enabled": true,
-    "target_distance_m": 0.12,
-    "deadband_m": 0.025,
+    "target_distance_m": 0.18,
+    "deadband_m": 0.035,
+    "minimum_strafe_distance_m": 0.145,
     "two_step_distance_m": [0.04, 0.075],
     "approach_two_step_distance_m": [0.07, 0.125],
     "distance_window_m": [0.08, 0.26]
