@@ -21,6 +21,8 @@ _FRAME_MAGIC = b'R3CF'
 _FIRST_FRAME_TIMEOUT = 15
 _FRAME_GAP_TIMEOUT = 5
 _POLL_SECONDS = 0.05
+_RECONNECT_DELAYS = (1., 2., 4.)
+_RECOVERED_STREAM_SECONDS = 10.
 
 # This subscriber runs on the Pi. Keep frame data on a dedicated stdout
 # descriptor so output from ROS or native libraries cannot corrupt the stream.
@@ -116,6 +118,38 @@ class CameraFrame:
     timestamp: float
 
 
+class PreviewInterrupted(RuntimeError):
+    """An identified preview stream stalled or its subscriber exited normally."""
+
+
+def preview_frames(open_frames, stop_event, on_retry):
+    """Reopen a stalled preview session; only sustained reception clears the retry count."""
+    retries = 0
+    while not stop_event.is_set():
+        since = None
+        try:
+            for frame in open_frames():
+                if stop_event.is_set():
+                    return
+                now = time.monotonic()
+                if since is None:
+                    since = now
+                elif now - since >= _RECOVERED_STREAM_SECONDS:
+                    retries = 0
+                yield frame
+            return
+        except (PreviewInterrupted, SshLinkError):
+            if stop_event.is_set():
+                return
+            if retries >= len(_RECONNECT_DELAYS):
+                raise
+            delay = _RECONNECT_DELAYS[retries]
+            retries += 1
+            on_retry(retries, len(_RECONNECT_DELAYS))
+            if stop_event.wait(delay):
+                return
+
+
 class _FrameDecoder:
     def __init__(self):
         self._pending = bytearray()
@@ -181,15 +215,17 @@ def _read_frames(channel, stop_event):
         if channel.exit_status_ready() and not channel.recv_ready():
             error = stderr.decode('utf-8', 'replace').strip().splitlines()
             exit_code = channel.recv_exit_status()
-            if exit_code < 0 and not error:
+            if exit_code < 0:
                 raise SshLinkError('胸部相机的 SSH 通道已关闭。')
+            if exit_code == 0:
+                raise PreviewInterrupted('胸部相机预览进程已退出。')
             detail = error[-1][:400] if error else f'退出码 {exit_code}'
             raise RuntimeError('胸部相机连接已结束。'+detail)
         now = time.monotonic()
         if last_frame is None and now - started > _FIRST_FRAME_TIMEOUT:
-            raise RuntimeError(f'一直没有收到胸部相机画面，请检查 {_TOPIC} 和 USB 相机连接。')
+            raise PreviewInterrupted(f'未收到胸部相机画面，请检查 {_TOPIC} 和 USB 相机连接。')
         if last_frame is not None and now - last_frame > _FRAME_GAP_TIMEOUT:
-            raise RuntimeError('胸部相机画面中断，请检查相机和无线连接后重新打开预览。')
+            raise PreviewInterrupted('胸部相机仍无新画面，请检查相机和无线连接。')
         stop_event.wait(_POLL_SECONDS)
 
 
@@ -228,7 +264,7 @@ class ChestCamera:
                     yield from _read_frames(channel, stop_event)
                 finally:
                     channel.close()
-        except SshLinkError:
+        except (SshLinkError, PreviewInterrupted):
             if not stop_event.is_set():
                 raise
         except (OSError, EOFError) as exc:

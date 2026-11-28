@@ -14,7 +14,7 @@ from PySide6.QtCore import QBuffer, QIODevice, QPoint, QRect, QSettings
 from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtWidgets import QApplication, QScrollArea, QStyle, QStyleOptionFrame
 
-from r3_deployer import control_window, qt_view, settings, task_report
+from r3_deployer import chest_camera, control_window, qt_view, settings, task_report
 from r3_deployer.qt_theme import ConsoleTheme
 
 
@@ -739,6 +739,18 @@ class ControlWindowTests(unittest.TestCase):
 
         self.assertEqual(self.view.camera_status.text(), "预览已关闭")
         self.assertIsNone(self.window._last_frame_at)
+
+    def test_can_close_preview_while_reconnecting_without_starting_another_session(self):
+        self.view.password.setText("test-credential")
+        with patch.object(chest_camera, "_RECONNECT_DELAYS", (30.,)), \
+                patch.object(control_window, "_chest_frames", side_effect=chest_camera.PreviewInterrupted("gap")) as source:
+            self.view.camera_button.click()
+            self._until(lambda: "重连" in self.view.camera_status.text())
+            self.assertEqual(self.view.camera_button.text(), "关闭预览")
+            self.view.camera_button.click()
+            self._until(lambda: self.window._camera is None)
+            source.assert_called_once()
+            self.assertEqual(self.view.camera_status.text(), "预览已关闭")
 
     def test_connect_auto_opens_camera_once_and_honors_manual_switch(self):
         def frames(_request, stop):

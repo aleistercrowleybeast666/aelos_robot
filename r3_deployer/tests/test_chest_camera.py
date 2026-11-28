@@ -34,6 +34,44 @@ class CameraStreamTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '/usb_cam_chest/image_raw'):
                 next(camera._read_frames(channel, threading.Event()))
 
+    def test_preview_reopens_after_a_gap_or_link_loss_but_not_a_protocol_error(self):
+        stop = threading.Event()
+        retry = Mock()
+        def stalled():
+            yield 1
+            raise camera.PreviewInterrupted('gap')
+        source = Mock(side_effect=[stalled(), camera.SshLinkError('link'), iter([2])])
+        with patch.object(camera, '_RECONNECT_DELAYS', (0.,) * 3):
+            self.assertEqual(list(camera.preview_frames(source,stop,retry)), [1,2])
+        self.assertEqual([call.args for call in retry.call_args_list], [(1,3),(2,3)])
+        source = Mock(side_effect=RuntimeError('wrong identity'))
+        with self.assertRaisesRegex(RuntimeError, 'wrong identity'):
+            list(camera.preview_frames(source,stop,retry))
+        source.assert_called_once()
+
+    def test_flapping_stream_exhausts_retries_and_a_stable_stream_restores_them(self):
+        def short():
+            yield 1
+            raise camera.PreviewInterrupted('gap')
+        def stable():
+            yield 1
+            yield 2
+            raise camera.PreviewInterrupted('gap')
+        for third_stream, clock, recovers in (
+                (short, [0.,1.,2.], False), (stable, [0.,1.,2.,25.,26.], True)):
+            with self.subTest(recovers=recovers), patch.object(camera,'_RECONNECT_DELAYS',(0.,0.)), \
+                    patch.object(camera.time,'monotonic',side_effect=clock):
+                source = Mock(side_effect=[short(), short(), third_stream(), iter([3])])
+                retry = Mock()
+                stream = camera.preview_frames(source, threading.Event(), retry)
+                if recovers:
+                    self.assertEqual(list(stream), [1,1,1,2,3])
+                    self.assertEqual(retry.call_args.args, (1,2))
+                else:
+                    with self.assertRaises(camera.PreviewInterrupted):
+                        list(stream)
+                    self.assertEqual(source.call_count, 3)
+
     def test_explicit_stop_ends_preview_and_closes_independent_channel(self):
         channel = Mock()
         channel.recv_ready.side_effect = [True, False]

@@ -23,6 +23,7 @@ _HEALTHY_WINDOWS_BEFORE_MISS = 4
 _MAX_POLICY_WINDOWS = 2 * _HEALTHY_WINDOWS_BEFORE_MISS
 _PARTIAL_POSE_HISTORY_NS = 6_000_000_000
 _PARTIAL_POSE_HISTORY_FRAMES = 8
+_STREAM_RECOVERY_S = 1.
 
 
 def Checkpoint_LastTravelDrift(robot, nav):
@@ -204,6 +205,7 @@ def Checkpoint_Observe(robot, nav, result, report_wait, *, quick_id=False,
     partial_rows = {}
     partial_scope = None
     expected_seen = False
+    recovery_camera = None
 
     def remember_partial(scan, window):
         nonlocal partial_scope
@@ -289,12 +291,22 @@ def Checkpoint_Observe(robot, nav, result, report_wait, *, quick_id=False,
                         after = settled_at
         if window is None:
             try:
-                window = Checkpoint_ReadWindow(nav.io, expected_id, after, nav.cfg['observe_s'],
+                timeout = _STREAM_RECOVERY_S if recovery_camera else nav.cfg['observe_s']
+                window = Checkpoint_ReadWindow(nav.io, expected_id, after, timeout,
                                                 robot.check, quick_id=quick_id)
             except VisualCameraUnavailable as exc:
                 robot.check()
                 result.update(detected=False, scan=None, camera_info={}, camera_read_error=str(exc))
                 return CheckpointScanResult.CAMERA_UNAVAILABLE, f'Tag {expected_id} 当前扫码窗口读取失败：{exc}'
+        if recovery_camera:
+            camera = window.get('camera_info') or {}
+            resumed = (robot.last_action_completed_ros_ns == stance and camera.get('ready') is True
+                       and camera.get('fingerprint') == recovery_camera and window.get('camera_healthy') is True
+                       and window.get('contract_match') is True)
+            result['stationary_stream_recovery']['streams_recovered'] = resumed
+            if not resumed:
+                window = dict(window, camera_healthy=False)
+            recovery_camera = None
         floor = window['now_ns']
         if type(floor) is not int or floor < after:
             return CheckpointScanResult.CAMERA_UNAVAILABLE, 'ROS clock moved backwards during Tag {} observation'.format(expected_id)
@@ -334,10 +346,27 @@ def Checkpoint_Observe(robot, nav, result, report_wait, *, quick_id=False,
                 temporary_camera_gaps += 1
             else:
                 unknown_camera_gap = True
+            end_of_window = (single_window or (advisory_windows is not None and window_count >= advisory_windows)
+                             or (miss_policy and window_count >= window_limit))
+            status = result['camera_window_status']
+            ages = [status.get(key) for key in ('image_stamp_age_s', 'ar_stamp_age_s','image_receipt_age_s')]
+            camera = result['camera_info'] or {}
+            if (end_of_window and retryable and not source_fault and not getattr(robot, '_checkpoint_stream_waited', False)
+                    and scan['contract_match'] and status.get('ar_source_matches') is True
+                    and camera.get('can_reobserve') is True and camera.get('fingerprint')
+                    and all(type(age) in (int, float) and isfinite(age) and age >= 3. for age in ages)
+                    and robot.deadline - robot.clock() > _STREAM_RECOVERY_S + robot.cfg['request_timeout_s']):
+                # Keep the ROS subscribers and motion owner intact. New messages
+                # from the same chest camera can still recover this stationary scan.
+                robot._checkpoint_stream_waited = True
+                recovery_camera = camera['fingerprint']
+                result['stationary_stream_recovery'] = {'wait_limit_s': _STREAM_RECOVERY_S}
+                continue
             if advisory_windows is None and not retryable and unhealthy_windows >= 2:
                 return CheckpointScanResult.CAMERA_UNAVAILABLE, 'two consecutive unhealthy chest camera or AR windows'
         else:
             unhealthy_windows = 0
+            robot._checkpoint_stream_waited = False
             if scan['ids'] == [expected_id]:
                 result['detected'] = True
                 result.pop('stationary_wait_reason_zh', None)

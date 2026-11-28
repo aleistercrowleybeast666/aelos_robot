@@ -18,7 +18,7 @@ def main(argv=None):
     p.add_argument('--config',type=Path,default=ROOT/'config/runtime.json');p.add_argument('--json',action='store_true',help='scan仅输出JSON');p.add_argument('--entry',action='store_true',help='scan采集入口坐标');p.add_argument('--save-image',type=Path);p.add_argument('--one-step',action='store_true',help='明确测试一次完整离散动作，不是精确微小步')
     from transfer_test import BOUNDARIES
     p.add_argument('--stop-after',choices=BOUNDARIES)
-    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 -90 至 +90 度，按约 30 度一大转就近执行')
+    p.add_argument('--drop-yaw-deg', type=int, help='放物前相对进场朝向的大致转角，负左正右，范围 -90 至 +90 度，按磁航向控制')
     g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--simulate',action='store_true');g.add_argument('--device-check',action='store_true')
     a=p.parse_args(argv);backend=None;lock=None
     if a.drop_yaw_deg is not None:

@@ -11,6 +11,22 @@ PROTOCOL='r3.warm.v1'
 ROOT=Path(__file__).resolve().parent
 SOCKET=Path('/home/lemon/.local/state/r3_simple/control.sock')
 
+def _placement_turn_line(turn):
+    requested = turn['requested_deg']
+    basis = turn.get('basis')
+    applied = turn.get('applied_deg')
+    if basis == 'magnetic_unconfirmed':
+        detail = '转后磁航向未确认' if turn.get('actions') else '进场磁航向未确认，已跳过放物转向'
+        if turn.get('actions') and type(applied) in (float, int):
+            detail += f' · 最近一次确认 {applied:+.1f}°'
+    elif basis == 'no_turn':
+        detail = '未执行放物转向'
+    else:
+        label = {'magnetic':'磁力计实测', 'measured':'磁力计实测',
+                 'estimated_from_completed_actions':'按动作回执估算'}.get(basis, '已记录转角')
+        detail = f'{label} {applied:+.1f}°' if type(applied) in (float, int) else '最终转角未确认'
+    return f'大本营放物转向 · 设定 {requested:+d}° · {detail}'
+
 def main(argv=None,connector=None):
     p=argparse.ArgumentParser(description='R3预热入口：0到障碍区前扫码；stand松手恢复空载站姿；status只读诊断；stop取消余链。')
     p.add_argument('mode',nargs='?',choices=['0','1','2','0-full','stage1','stand','stop','status','scan','test-left','test-right','test-small-left','test-small-right','test-turn-left','test-turn-right','test-micro-left','test-micro-right','test-medium-left','test-medium-right','cooling-check','cooling-confirm','micro-confirm','readiness'],default='0');p.add_argument('legacy_after_home',nargs='?',choices=['0'])
@@ -18,7 +34,7 @@ def main(argv=None,connector=None):
     p.add_argument('--idle-only',action='store_true',help='stand 只在空闲时执行')
     from transfer_test import BOUNDARIES
     p.add_argument('--stop-after',choices=BOUNDARIES)
-    p.add_argument('--drop-yaw-deg', type=int, help='进大本营后放物前的转角，负左正右，范围 -90 至 +90 度，按约 30 度一大转就近执行')
+    p.add_argument('--drop-yaw-deg', type=int, help='放物前相对进场朝向的大致转角，负左正右，范围 -90 至 +90 度，按磁航向控制')
     p.add_argument('--owner-session');p.add_argument('--owner-epoch',type=int);p.add_argument('--operator')
     for flag in ('cooled','mechanism-checked','single-target','guard-reload-checked','guarded-single-trial','stop-limits-understood'):p.add_argument('--'+flag,action='store_true')
     g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--simulate',action='store_true');g.add_argument('--device-check',action='store_true')
@@ -132,6 +148,13 @@ def main(argv=None,connector=None):
                         print('Tag 2 未确认，已按计划步数继续。',flush=True)
                     else:
                         print('Tag 2 试跑待确认。',flush=True)
+                turns = [e['base_placement_turn'] for e in row.get('events', []) if 'base_placement_turn' in e]
+                if not turns:
+                    latest_turn = (row.get('corridor_trial') or {}).get('delivery', {}).get('drop_turn')
+                    if latest_turn:
+                        turns.append(latest_turn)
+                for turn in turns:
+                    print(_placement_turn_line(turn), flush=True)
                 if 'corridor_trial' in row:
                     corridor=row['corridor_trial']
                     for leg in corridor.get('legs', []):
@@ -146,11 +169,6 @@ def main(argv=None,connector=None):
                             print('右跨转直行 · 进入近处 Tag 4 观测范围。', flush=True)
                     if corridor.get('release_protocol_completed'):
                         delivery=corridor.get('delivery',{})
-                        turn=delivery.get('drop_turn')
-                        if turn:
-                            basis={'measured':'实测','no_turn':'未转动'}.get(turn['basis'],'按动作回执估算')
-                            print('大本营放物转向 · 设定 {:+d}° · {} {:+.1f}°'.format(
-                                turn['requested_deg'],basis,turn['applied_deg']),flush=True)
                         steps=delivery.get('approach_steps')
                         advance='持物前进 {} 步'.format(steps) if type(steps) is int else '持物前进'
                         operation=delivery.get('release_operation')

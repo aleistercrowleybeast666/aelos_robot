@@ -221,9 +221,10 @@ def ReturnTrial_TurnAtBase(robot, step, *, scan_follows=False, drop_turn=None):
     if not getattr(robot.backend, 'is_simulation', False):
         robot.check_magnetic_before_motion(configured=True)
     robot.prepare_heading_segment(fresh=True)
-    if drop_turn and drop_turn['applied_deg']:
+    placement = drop_turn.get('return_estimated_deg', drop_turn['applied_deg']) if drop_turn else 0.
+    if placement:
         from base_placement import BasePlacement_ReturnTurn
-        step = BasePlacement_ReturnTurn(step, drop_turn['applied_deg'])
+        step = BasePlacement_ReturnTurn(step, placement)
     if step['repeat']:
         _turn(robot, step, (5, 'return') if scan_follows else None)
     return dict(step)

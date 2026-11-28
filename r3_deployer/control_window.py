@@ -16,7 +16,7 @@ from PySide6.QtGui import QDesktopServices, QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from . import settings, usb_mode
-from .chest_camera import ChestCamera
+from .chest_camera import ChestCamera, preview_frames
 from .control_api import (EMPTY_RESET_REQUIRED_MESSAGE, RobotApi, RobotControlUncertainError,
                           RobotStart_EmptyResetStatus)
 from .deploy import SshLinkError, operate
@@ -1070,8 +1070,14 @@ class _ControlWindow(QMainWindow):
         self.view.camera_button.setText("关闭预览")
         self._clear_camera(f"正在连接 {request.target}")
 
+        def retry(attempt, maximum):
+            with self._frame_lock:
+                if self._frame is not None and self._frame[0] is stop:
+                    self._frame = None
+            self._events.put(("camera_retry", stop, f"胸部预览正在重连（{attempt}/{maximum}）"))
+
         def receive():
-            for frame in _chest_frames(request, stop):
+            for frame in preview_frames(lambda: _chest_frames(request, stop), stop, retry):
                 if stop.is_set():
                     break
                 decoded = QImage.fromData(frame.jpeg)
@@ -1140,6 +1146,10 @@ class _ControlWindow(QMainWindow):
                 break
             if kind == "log":
                 self._log(outcome)
+            elif kind == "camera_retry":
+                if context is self._camera and not context.is_set():
+                    self._clear_camera(outcome)
+                    self._log(outcome)
             elif kind == "connect_phase":
                 if context is self._probe and self._link == "connecting":
                     self.view.robot_status.setText(outcome)
