@@ -1012,6 +1012,10 @@ class Robot:
                 recent_decoded_ids=window.get('recent_decoded_ids',[]),recent_ids_are_diagnostic_only=True,
                 row_counts={k:window.get(k,0) for k in ('buffered_rows','current_rows','stale_rows','pre_boundary_rows','rejected')},
                 fault_diagnostic=fault_diagnostic,correction_actions=0)
+            if (entry_context is not None and not fault_diagnostic and name == 'carry_forward2'
+                    and entry_context[1] == ['carry_forward2']
+                    and 1 in obs['observed_ids'] and 2 not in obs['observed_ids']):
+                report['entry_tag1_scan'] = summarize(window,1,cfg,barrier)
             self.events.append({'boundary_visual_observation':report})
             self.last_boundary_visual=report
             return report

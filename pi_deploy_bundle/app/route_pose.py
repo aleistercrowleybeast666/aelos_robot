@@ -568,7 +568,8 @@ def _trial_lateral_evidence(checkpoint, nav_cfg, tag_id, *, yaw_limit):
     return evidence
 
 
-def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_counts, two_step_distance_m):
+def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_counts, two_step_distance_m, *,
+                                   allow_partial_far=False):
     """Fold a repeatable Tag 1 depth error into the length of the existing straight."""
     result = {'status': RoutePosePlanResult.NOMINAL.value, 'tag_id': 1, 'count': nominal,
               'nominal_count': nominal, 'source': 'tag1_forward_trial'}
@@ -589,13 +590,14 @@ def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_count
     elif nearest > _TAG1_NOMINAL_START_M[1]:
         direction = 1
     else:
-        return dict(result, reason='Tag 1 within the usual start-distance band')
+        return dict(result, start_distance_in_band=True, reason='Tag 1 within the usual start-distance band')
     # For stable far readings, use the longest improving supported group even
     # if it cannot yet recover all the depth. Keep the same near-clearance bound.
     landing_window = (_TAG1_FAR_EFFECTIVE_START_M if nearest > .38 and evidence['max_abs_lateral_m'] <= .10
                       else _TAG1_TRIAL_EFFECTIVE_START_M)
     residual = (nearest - _TAG1_TRIAL_TARGET_M, farthest - _TAG1_TRIAL_TARGET_M)
     candidates = []
+    partial = []
     for count in candidate_counts:
         if type(count) is not int or not 2 <= count <= 80:
             continue
@@ -608,6 +610,12 @@ def RoutePose_PlanTag1ForwardTrial(checkpoint, nav_cfg, nominal, candidate_count
         gain, _ = _projected_effect({'projection': 1.0, 'residual': residual}, shifts)
         if gain >= .01 and _within(landing, landing_window):
             candidates.append((gain, -abs(difference), count, landing))
+        elif (allow_partial_far and direction > 0 and gain >= .01 and landing[0] >= _TAG1_TRIAL_TARGET_M
+              and evidence['max_abs_lateral_m'] <= .10 and evidence['max_heading_deviation_deg'] <= 3.):
+            partial.append((gain, -abs(difference), count, landing))
+    if not candidates and partial:
+        candidates = partial
+        result['partial_depth_compensation'] = True
     if not candidates:
         return dict(result, reason='no supported Tag 1 forward count reliably improves trial geometry')
     gain, _, count, landing = max(candidates)

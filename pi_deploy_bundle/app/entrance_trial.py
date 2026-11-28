@@ -6,7 +6,7 @@ from action_chains_v5 import COMMAND0_OUTBOUND
 from cmd0_motion import (COMMAND0_ENTRY_FORWARD_STEPS, Cmd0Motion_ContinuousReady,
                          Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
                          Cmd0Motion_SmallStrafeProfile, SMALL_SIDE_ACTIONS)
-from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCameraUnavailable
+from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCamera_Read, VisualCameraUnavailable
 from checkpoint_scan import (Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime,
                              Checkpoint_ReadWindow, CheckpointScanResult)
 from nav_observation import summarize, wrap
@@ -258,10 +258,15 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
     if after is None or live is None:
         recovery['reobserve_reason'] = 'Tag 1 的相机时钟或新帧校验暂不可用。'
         return None
+    completed = robot.last_action_completed_ros_ns
+    if nav.cfg.get('reuse_post_completion_observations') is True and type(completed) is int and completed > 0:
+        settle = max(nav.cfg['settle_s'], nav.cfg['post_action_heading'].get('settle_s', 0.))
+        settled = completed + int(settle*1e9)
+        after = settled
     try:
         alignment = VisualMicro_ObserveWithoutMagnetic(nav.cfg, nav.io, 1, goal, after_ns=after,
             deadline=min(robot.deadline, robot.clock()+nav.cfg['settle_s']+2*nav.cfg['observe_s']),
-            check=robot.check, clock=robot.clock, accept_trusted_residual=True)
+            check=robot.check, clock=robot.clock, accept_trusted_residual=True, quick_first_window=True)
     except (VisualMicroStopped, OSError) as exc:
         robot.check()
         recovery['reobserve_reason'] = str(exc)
@@ -269,9 +274,9 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
     alignment = EntranceTrial_RecoverGroundHeading(robot,nav,alignment)
     scan = alignment['scan']
     stamp = scan.get('latest_stamp_ns')
-    completed = robot.last_action_completed_ros_ns
     if (alignment.get('pose_accepted') is not True or scan.get('ids') != [1] or type(stamp) is not int
-            or type(completed) is not int or stamp <= max(after, completed) or not live(stamp)):
+            or type(completed) is not int or robot.last_action_completed_ros_ns != completed
+            or stamp <= max(after, completed) or not live(stamp)):
         recovery['reobserve_reason'] = alignment['reason']
         return None
     alignment['heading_residual_advisory'] = not alignment.get('heading_aligned')
@@ -424,7 +429,8 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
     return alignment
 
 
-def _tag1_forward_plan(nav, profile, load, scan, camera_info, nominal, candidates, trial_stride):
+def _tag1_forward_plan(nav, profile, load, scan, camera_info, nominal, candidates, trial_stride, *,
+                       allow_partial_far=False):
     if scan.get('heading_check') in ('same_stance_magnetic_heading','taught_tag_twist'):
         return ({'status':'heading_only','tag_id':1,'position_usable':False},
                 {'status':'nominal','count':nominal,'reason':'本次恢复仅确认 Tag 1 水平航向，直行先用路线步数。'})
@@ -434,8 +440,113 @@ def _tag1_forward_plan(nav, profile, load, scan, camera_info, nominal, candidate
         if 'ids' not in scan:
             scan = dict(scan, **summarize(scan, 1, nav.cfg, scan.get('after_ns', 0)))
         plan = RoutePose_PlanTag1ForwardTrial({'scan': scan, 'camera_info': camera_info}, nav.cfg,
-                                            nominal, candidates, trial_stride)
+                                            nominal, candidates, trial_stride, allow_partial_far=allow_partial_far)
     return pose, plan
+
+
+def _tag1_boundary_remaining(robot, nav, goal, boundary, result, pending, *, continuous, legacy, stride):
+    """At the first short stance, size the unwalked leg from a reappearing origin marker."""
+    from visual_micro import VisualMicro_IsTrustedHeading
+
+    if not boundary or not boundary.get('entry_tag1_scan') or 2 in boundary['scan'].get('observed_ids', ()):
+        return None
+    checkpoint = Checkpoint_FromBoundary(robot, nav, 1, action='carry_forward2',
+        report=dict(boundary, target_id=1, scan=boundary['entry_tag1_scan']))
+    if checkpoint is None:
+        return None
+    camera = checkpoint['camera_info']
+    visual = nav.cfg['visual_micro']
+    pinned = visual.get('camera_info') or {}
+    if (goal.get('id') != 1 or visual.get('target_id_confirmed') is not True
+            or visual.get('confirmed_target_id') != 1
+            or pinned.get('source_confirmed') is not True or not camera.get('fingerprint')
+            or camera['fingerprint'] != pinned.get('expected_fingerprint')):
+        return None
+    # Checkpoint_FromBoundary may exclude rows that expired since the snapshot.
+    window = checkpoint['scan']
+    scan = dict(window, **summarize(window, 1, nav.cfg, window['after_ns']))
+    review = {'after_steps': result['completed_steps'], 'previous_remaining_steps': Cmd0Motion_ForwardStepCount(pending)}
+    result['tag1_boundary_recovery'] = review
+    if not VisualMicro_IsTrustedHeading(scan, nav.cfg, 1, nav.io.ros_now_ns()):
+        review['reason'] = '短段后读到 Tag 1，当前帧的航向尚不可信。'
+        return None
+    error = wrap(scan['heading_deg'] - goal['tag_heading_deg'])
+    aligned = abs(error) <= visual['deadband_deg']
+    current = dict(expected_id=1, fresh_target_detected=True, pose_accepted=True, scan=scan, camera_info=camera,
+        error_deg=error, heading_aligned=aligned, heading_residual_advisory=not aligned,
+        decision_fusion=dict(source='trusted_tag_heading', target_heading_deg=goal['tag_heading_deg'], error_deg=error))
+    review['heading_before_deg'] = error
+    if not aligned:
+        # Keep the boundary correction separate from the original departure in the report.
+        progress = {key: result[key] for key in ('target_steps','planned_steps','completed_steps','completed_actions')}
+        current = _tag1_recover_departure(robot, nav, goal, current, progress, reserved_actions=len(pending))
+        review.update((key,value) for key,value in progress.items() if key.startswith('tag1_'))
+    if not current or current['camera_info'].get('fingerprint') != camera['fingerprint']:
+        review['reason'] = '短段后已尝试纠偏，转后距离未确认，保留已有路程。'
+        return None
+    scan = current['scan']
+    ready = VisualCamera_GetFreshnessCheck(nav.io)
+    stamp = scan['latest_stamp_ns']
+    if not ready or not ready(stamp) or stamp <= robot.last_action_completed_ros_ns:
+        review['reason'] = '短段复查位姿已过期。'
+        return None
+    stance = robot.last_action_completed_ros_ns
+    # At the taught origin distance the entire nominal leg is still ahead.
+    # The first two steps count toward the trip-wide +5 limit, never twice toward the remainder.
+    nominal = result['nominal_target_steps']
+    completed = result['completed_steps']
+    pairs = getattr(robot.backend, 'mission_pair_ops', None)
+    supported = pairs() if robot.load_kind == 'double' and pairs is not None else None
+    options = {}
+    for total in sorted({nominal + d for d in (*_TAG1_FORWARD_TRIAL_OFFSETS, 0)} | {completed + nominal}):
+        count = total - completed
+        if count < 2 or total > min(80, nominal + max(_TAG1_FORWARD_TRIAL_OFFSETS)):
+            continue
+        actions, exact = EntranceTrial_PlanForward(count, continuous=continuous, legacy=legacy)
+        if continuous and count == 13:
+            actions, exact = ('carry_forward', 'cmd0_carry_forward5'), 13
+        if actions == ('cmd0_carry_forward10',):
+            actions = ('carry_forward', 'carry_forward2')
+        if (exact == count and robot.count + len(actions) <= robot.cfg['max_body_macros_per_journey']
+                and (supported is None or all('double_'+op in supported for op in actions))):
+            options[count] = actions
+    pose, plan = _tag1_forward_plan(nav, RoutePose_Load(robot.project), robot.load_kind, scan, camera,
+                                    nominal, options, stride, allow_partial_far=True)
+    review['remaining_plan'] = plan
+    remaining = plan['count']
+    rebase = getattr(robot, 'Route_RebaseTagHeading', None)
+    if rebase is not None:
+        review['heading_reference'] = rebase(1, current['error_deg'], stamp).value
+    if (remaining not in options or not (plan['status'] == 'adjusted' or plan.get('start_distance_in_band'))
+            or stance != robot.last_action_completed_ros_ns):
+        return None
+    if not ready(stamp):
+        try:
+            fresh = VisualCamera_Read(lambda check: nav.io.boundary_visual_snapshot(scan['after_ns'], check), robot.check)
+        except VisualCameraUnavailable as exc:
+            robot.check()
+            review['reobserve_reason'] = str(exc)
+            return None
+        if (fresh.get('boundary_valid') is not True
+                or not _tag1_same_stance_reference(robot, nav, plan, scan, fresh, camera, stance)):
+            review['reobserve_reason'] = '磁航向采样期间站姿或相机观测未能延续。'
+            return None
+        newer = [row for row in fresh.get('observations', ()) if type(row.get('stamp_ns')) is int
+                 and row['stamp_ns'] > stamp]
+        if newer:
+            geometry = RoutePose_PartialCheckpointGeometry(newer, nav.cfg, 1)
+            if (not geometry or max(abs(depth-plan['distance_m']) for depth in geometry['distance_bounds_m']) > .025
+                    or abs(wrap(geometry['heading_deg']-plan['heading_deg'])) + geometry['max_heading_deviation_deg'] > 3.):
+                review['reobserve_reason'] = '当前 Tag 1 深度或航向与磁采样前的观测不一致。'
+                return None
+        plan['reused_same_stance_reference'] = True
+    total = completed + remaining
+    result.update(entry_pose=pose, forward_plan=dict(plan, count=total, nominal_count=nominal,
+                  measured_after_steps=completed, remaining_steps=remaining), target_steps=total, planned_steps=total)
+    review['remaining_steps'] = remaining
+    _report_progress(robot, 'cmd0_next_leg', dict(result, stationary_wait_reason_zh=
+        f'Tag 1 短段复测后，已走 {completed} 步，剩余计划 {review["previous_remaining_steps"]} → {remaining} 步。'))
+    return options[remaining]
 
 
 def _tag1_paired_heading(robot, nav, goal, alignment):
@@ -506,9 +617,11 @@ def _tag1_same_stance_reference(robot, nav, plan, scan, fresh, camera_info, comp
     after, observed = scan.get('after_ns'), scan.get('now_ns')
     current = fresh.get('camera_info') or {}
     now = Checkpoint_OptionalScanTime(nav.io, robot.check)
+    restart = fresh.get('camera_restart_ns', 0)
     return (plan.get('source') == 'tag1_forward_trial'
             and all(type(stamp) is int for stamp in (completed_ns, after, latest, observed))
             and 0 < completed_ns == robot.last_action_completed_ros_ns <= after < latest <= observed
+            and type(restart) is int and 0 <= restart < latest
             and now is not None and 0 <= now - latest <= _TAG1_STANCE_REFERENCE_MAX_NS
             and fresh.get('camera_healthy') is True and fresh.get('contract_match') is True
             and current.get('ready') is True and current.get('fingerprint') == camera_info['fingerprint']
@@ -747,6 +860,10 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         nav.mag.anchor = None
         result['entry_heading_source'] = 'relative_straight_only'
         robot.prepare_heading_segment(fresh=True)
+    if entry_alignment is None and 'forward_plan' not in result:
+        result['forward_plan'] = {'status': 'nominal', 'count': target_steps,
+            'reason': (result.get('entry_heading_reobserve') or {}).get('reobserve_reason')
+                      or 'Tag 1 当前站姿的距离未确认。'}
     if (nav.cfg['post_action_heading'].get('enabled') and nav.mag.anchor is None
             and not getattr(robot,'magnetic_route_only',False) and not estimate):
         return set_status(CheckpointScanResult.MOTION_NOT_STARTED, 'fresh straight-segment heading reference unavailable')
@@ -822,13 +939,16 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
             operations = grouped
             result['entry_forward_grouping'] = list(grouped)
     lost_after_strafe = (result.get('tag1_lateral_recovery') or {}).get('stance_unconfirmed')
-    if lost_after_strafe or _tag1_unresolved_entry_heading(original_alignment, entry_alignment,
+    lost_after_turn = (use_boundary_plan and entry_alignment is None
+                       and (result.get('tag1_heading_recovery') or {}).get('visual_turn'))
+    short_start = lost_after_strafe or lost_after_turn or _tag1_unresolved_entry_heading(original_alignment, entry_alignment,
             result.get('tag1_heading_recovery') or {}, nav.cfg.get('visual_micro', {}).get('deadband_deg', 8.),
-            robot.last_action_completed_ros_ns):
+            robot.last_action_completed_ros_ns)
+    if short_start:
         operations = _tag1_short_start_actions(operations, continuous, robot.cfg['max_body_macros_per_journey']-robot.count)
         result['entry_forward_grouping'] = list(operations)
         result['entry_heading_grouping_reason_zh'] = ('Tag 1 侧跨后失去位姿，先走短段并复查。' if lost_after_strafe
-            else 'Tag 1 大偏航尚未确认转正，先走短段并在动作回执处检查当前航向。')
+            else 'Tag 1 转后位姿待确认，先走两步，用该站姿看到的码更新剩余路程。')
     result['initial_estimated_steps'] = result['planned_steps']
     set_status(CheckpointScanResult.MOVING_TO_CHECKPOINT, 'executing estimated Tag 1 to Tag 2 segment')
     _report_progress(robot, 'cmd0_next_leg', result)
@@ -858,6 +978,12 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         if decision is None:
             hint = _tag2_partial_near_boundary(robot,nav,tag2_settings,operation,boundary)
             if hint is None:
+                if (short_start and result['completed_steps'] == 2 and operation == 'carry_forward2'
+                        and (result.get('forward_plan') or {}).get('status') != 'adjusted'):
+                    revised = _tag1_boundary_remaining(robot, nav, points[0], boundary, result, pending,
+                        continuous=continuous, legacy=legacy, stride=tag2_settings.get('two_step_distance_m'))
+                    if revised is not None:
+                        pending = list(revised)
                 continue
             decision = (0,hint,'动作边界已看到近处 Tag 2，留在当前站姿补帧，核对后再横移。')
         proposed, plan, reason = decision

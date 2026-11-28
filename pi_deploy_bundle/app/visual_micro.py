@@ -60,8 +60,18 @@ def validate(cfg):
         raise ValueError('dedicated signed nominal five-degree Tag deltas required')
 
 
+def VisualMicro_IsTrustedHeading(obs, cfg, tag_id, now_ns):
+    contract = cfg['pose_contract']
+    return (obs['ids'] == [tag_id] and obs.get('pose_usable')
+            and (obs.get('position_usable') or obs.get('heading_only'))
+            and contract.get('capture_time_confirmed') is True
+            and all(row.get('source_publisher') == contract['publisher'] for row in obs['observations'])
+            and obs.get('heading_mad_deg', float('inf')) <= cfg['visual_micro']['max_heading_mad_deg']
+            and 0 <= now_ns - obs['latest_stamp_ns'] <= cfg['max_age_s']*1e9)
+
+
 def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadline, check, clock,
-                                     accept_trusted_residual=False):
+                                     accept_trusted_residual=False, quick_first_window=False):
     """Use only fresh calibrated camera heading at an explicit route checkpoint."""
     validate(cfg)
     v=cfg['visual_micro']
@@ -80,7 +90,6 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
     default_deadline=clock()+cfg['checkpoint_timeout_s']
     deadline=default_deadline if deadline is None else min(default_deadline,deadline)
     camera_contract=v['camera_info']
-    capture_contract=cfg['pose_contract']
     expected=camera_contract.get('expected_fingerprint')
     if camera_contract.get('source_confirmed') is not True or not expected:
         raise VisualCameraUnavailable('actual CameraInfo calibration/source unavailable')
@@ -99,7 +108,8 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
         check()
         remaining=deadline-clock()
         if remaining<=0:break
-        window=Checkpoint_ReadWindow(io,tag_id,after_ns,min(cfg['observe_s'],remaining),check)
+        window=Checkpoint_ReadWindow(io,tag_id,after_ns,min(cfg['observe_s'],remaining),check,
+                                     quick_id=quick_first_window and result['observation_windows']==0)
         check()
         camera=VisualCamera_Read(lambda _:current(),check) if current is not None else window.get('camera_info',{})
         result.update(camera_info=camera,scan_attempted=True,
@@ -126,12 +136,7 @@ def VisualMicro_ObserveWithoutMagnetic(cfg, io, tag_id, goal, *, after_ns, deadl
                    decoded_expected_frames=window.get('detector_observed_expected_frames',
                                                       window.get('detector_expected_frames')),
                    camera_healthy=True,contract_match=True)
-        trusted=(obs['ids']==[tag_id] and obs.get('pose_usable')
-                 and (obs.get('position_usable') or obs.get('heading_only'))
-                 and capture_contract.get('capture_time_confirmed') is True
-                 and all(row.get('source_publisher')==capture_contract['publisher'] for row in obs['observations'])
-                 and obs.get('heading_mad_deg',float('inf'))<=v['max_heading_mad_deg']
-                 and 0<=now_ros-obs['latest_stamp_ns']<=cfg['max_age_s']*1e9)
+        trusted=VisualMicro_IsTrustedHeading(obs,cfg,tag_id,now_ros)
         result.update(scan=obs,fresh_target_detected=tag_id in obs['observed_ids'],pose_accepted=bool(trusted))
         if trusted:
             error=wrap(obs['heading_deg']-goal['tag_heading_deg'])
