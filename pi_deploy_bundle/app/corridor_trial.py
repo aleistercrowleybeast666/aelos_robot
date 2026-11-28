@@ -3900,6 +3900,34 @@ def _tag5_wall_retreat(plan, settings):
             and left - _TAG5_RETREAT_TRAVEL_UPPER_M * sin(radians(high)) > _RECOVERY_STRAFE_UPPER_M)
 
 
+def _tag5_lost_gate_retreat(robot, leg):
+    """At the end of the surveyed left traverse, a healthy blank view calls for one step group back."""
+    miss = leg.get('checkpoint_not_seen') or {}
+    scan = leg.get('scan') or {}
+    stance = robot.last_action_completed_ros_ns
+    checks = leg.get('lateral_heading_checks') or []
+    if (leg.get('from_tag') != 4 or not leg.get('departure_tag_confirmed') or leg.get('tag5_abrupt_drift')
+            or miss.get('tag_id') != 5 or miss.get('cause') != 'tag_not_visible'
+            or miss.get('healthy_windows', 0) < 2 or miss.get('seen_tags') != []
+            or scan.get('status') != 'no_tag' or not scan.get('camera_healthy') or not scan.get('contract_match')
+            or type(stance) is not int or (scan.get('after_ns') or 0) < stance
+            or not (leg.get('camera_info') or {}).get('ready') or not checks):
+        return False
+    final_heading = checks[-1].get('residual_deg')
+    if final_heading is None or abs(final_heading) > _TAG4_CLEARANCE_YAW_DEG:
+        return False
+    if robot.load_kind == 'double' and 'double_cmd0_carry_backward2' not in robot.backend.mission_pair_ops():
+        return False
+    planned = leg.get('configured_steps') or []
+    if not planned or any(step['op'] != 'strafe_left_once' for step in planned):
+        return False
+    strides = {op: n for (direction, n), op in SIDE_ACTIONS.items() if direction == 'strafe_left_once'}
+    strides['strafe_left_once'] = 1
+    actions = leg.get('completed_actions') or []
+    return (bool(actions) and actions[-1] in strides
+            and sum(strides.get(op, 0) for op in actions) == sum(step['repeat'] for step in planned))
+
+
 def _tag5_heading_clearance(robot, nav, plan, settings):
     """Find a one-step move toward the gate center with clearance for a later turn."""
     bounds = plan.get('lateral_bounds_m')
@@ -4064,9 +4092,12 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                     continue
             alignment.update(status='aligned', ready_for_forward=True)
             return plan
-        wall_retreat = ('entry_retreat' not in alignment and alignment.get('entry_retreat_available', True)
-                        and robot.count + reserve + 1 + extra_retreat_macros <= robot.cfg['max_body_macros_per_journey']
-                        and _tag5_wall_retreat(plan, settings))
+        retreat_available = ('entry_retreat' not in alignment and alignment.get('entry_retreat_available', True)
+                            and robot.count + reserve + 1 + extra_retreat_macros <= robot.cfg['max_body_macros_per_journey'])
+        lost_gate_retreat = (retreat_available and not plan['geometry_valid'] and not plan.get('partial_pose')
+                             and not alignment['completed_actions'] and not turns
+                             and _tag5_lost_gate_retreat(robot, checkpoint))
+        wall_retreat = lost_gate_retreat or (retreat_available and _tag5_wall_retreat(plan, settings))
         clearance = None
         if 'heading_clearance' not in alignment and robot.count + reserve + 2 <= robot.cfg['max_body_macros_per_journey']:
             clearance = _tag5_heading_clearance(robot, nav, plan, settings)
@@ -4132,14 +4163,15 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 plan.update(side_recovery_from=recovery_from, side_recovery_operation=operation)
             last_side = operation, error, plan
             idle_windows = 0
-        elif wall_retreat or ('entry_retreat' not in alignment and alignment.get('entry_retreat_available', True)
+        elif wall_retreat or (retreat_available
               and _tag5_retreat_clearance(plan,settings,stalled_small_step=stalled_small_step,
-                    competition=robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True)
-              and robot.count + reserve + 1 + extra_retreat_macros <= robot.cfg['max_body_macros_per_journey']):
+                    competition=robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True)):
             retreat = {'operation':'cmd0_carry_backward2','completed_steps':0,
                        'corrects_entry_depth': bool(plan.get('near_entry_depth_confirmed')),
                        'reason_zh':'Tag 5 门前纠偏余量不足，先退两步拉开距离，再用新位姿对门。'}
-            if wall_retreat:
+            if lost_gate_retreat:
+                retreat['reason_zh'] = '已走完门前左跨，相机正常但连续没有看到码，按近处失码后退两步重扫 Tag 5。'
+            elif wall_retreat:
                 retreat['reason_zh'] = '左跨接近墙边，先后退两步，再按新位姿对门。'
             alignment['entry_retreat'] = retreat
             _report_progress(robot,'cmd0_tag5_entry_wait',alignment.get('last_confirmed_tag'),5,reason_zh=retreat['reason_zh'])
@@ -5737,8 +5769,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
         expired_at_entry = bool(aligned and 'stance_completed_ns' in aligned
             and (aligned['stance_completed_ns'] != robot.last_action_completed_ros_ns
                  or not VisualCamera_IsFresh(nav.io.visual_motion_ready, aligned['latest_stamp_ns'])))
-        disturbed = (expired_at_entry or unresolved_depth or aligned is None and (blocked_lateral or type(unresolved_heading) in (float, int)
-                     and abs(unresolved_heading) > tag5_alignment.get('max_heading_deg', 12.)))
+        last_window = (alignment.get('observations') or [{}])[-1] if use_tag5_passage else {}
+        unconfirmed_gate = use_tag5_passage and aligned is None and not last_window.get('geometry_valid')
+        disturbed = expired_at_entry or (use_tag5_passage and aligned is None)
         if disturbed:
             remaining = Cmd0Motion_ForwardStepCount(base_actions)
             slots = robot.cfg['max_body_macros_per_journey'] - robot.count - 1
@@ -5752,8 +5785,9 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             base_actions = short
             cautious = delivery['tag5_cautious_entry'] = {'last_visual_error_deg': unresolved_heading,
                 'heading_checks': [], 'lateral_unresolved': blocked_lateral, 'expired_at_entry': expired_at_entry,
-                'depth_unresolved': unresolved_depth,
-                'reason_zh': ('Tag 5 进场前位姿已过期，短段后读取当前站姿的新帧。' if expired_at_entry else
+                'depth_unresolved': unresolved_depth, 'gate_pose_unconfirmed': unconfirmed_gate,
+                'reason_zh': ('Tag 5 门口位姿未确认，改用短步进场，动作结束时看码并检查航向。' if unconfirmed_gate else
+                              'Tag 5 进场前位姿已过期，短段后读取当前站姿的新帧。' if expired_at_entry else
                               'Tag 5 仍在门前近距范围，短段后检查当前站姿。' if unresolved_depth else
                               'Tag 5 预计横偏仍越过门边，短段后优先按当前站姿的码纠偏。' if blocked_lateral
                               else 'Tag 5 入口仍有已观测的偏航，按短段进场并在段间校向。')}
@@ -5781,28 +5815,31 @@ def CorridorTrial_Run(robot, next_segment, *, entry_alignment, extra_home_steps=
             drive(action)
             delivery['completed_actions'].append(action)
             if disturbed and index + 1 < len(base_actions):
-                if blocked_lateral or expired_at_entry or unresolved_depth:
+                if unconfirmed_gate or blocked_lateral or expired_at_entry or unresolved_depth:
                     current = _corridor_boundary_checkpoint(robot, nav, 5, action)
                     if current is not None:
                         remaining = Cmd0Motion_ForwardStepCount(base_actions[index+1:])
-                        # Only the approach to the mouth needs a clear optical
-                        # projection. The marker goes underfoot once inside.
-                        distance = min(4, remaining) * _TAG5_STEP_UPPER_M
+                        joined = _tag5_native_groups(remaining, pair_ops)
+                        distance = Cmd0Motion_ForwardStepCount(joined[:1]) * _TAG5_STEP_UPPER_M
                         now_pose = _tag5_passage_plan(robot, nav, tag5_alignment, current,
                                                       approach_distance_m=distance)
                         if (not now_pose['ready_for_forward'] and now_pose['geometry_valid']
-                                and now_pose.get('depth_bounds_m', (0.,))[0] >= _TAG5_OUTSIDE_SIDE_DEPTH_M):
+                                and not now_pose.get('entering')):
                             correction = {'observations': [], 'visual_turns': [], 'completed_actions': [],
                                           'entry_retreat_available': False}
                             cautious.setdefault('lateral_rechecks', []).append(correction)
                             now_pose = _align_tag5_entry(robot, nav, profile, tag5_alignment, current, correction,
                                 reserved_actions=len(base_actions)-index, approach_distance_m=distance)
                         if now_pose and now_pose['ready_for_forward']:
-                            joined = _tag5_native_groups(remaining, pair_ops)
                             if joined:
+                                result.update(checkpoint=5, detected=True)
+                                if checkpoint.get('checkpoint_not_seen'):
+                                    checkpoint['checkpoint_not_seen']['recovered_before_delivery'] = True
                                 base_actions[index+1:] = joined
                                 delivery['entry_plan']['actions'] = list(base_actions)
                                 cautious['aligned_after_steps'] = delivery['entry_plan']['steps'] - remaining
+                                cautious['aligned_pose'] = {key:now_pose[key] for key in
+                                    ('distance_m','heading_deg','lateral_error_m','latest_stamp_ns') if key in now_pose}
                                 disturbed = False
                                 continue
                 check_entry_heading(len(base_actions) - index - 1, True)

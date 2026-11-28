@@ -190,7 +190,7 @@ def Cmd0Motion_LoadRouteSteps(project):
             continue
         trim = steps[key]
         keys = {'enabled', 'target_distance_m', 'deadband_m', 'two_step_distance_m', 'distance_window_m'}
-        optional = ({'approach_two_step_distance_m', 'minimum_strafe_distance_m'} if tag == 2
+        optional = {'approach_two_step_distance_m'} | ({'minimum_strafe_distance_m'} if tag == 2
                     else {'left_departure_reference', 'left_departure_target_m', 'heading_use_within_m'})
         if (not isinstance(trim, dict) or not keys <= trim.keys() <= keys | optional
                 or type(trim['enabled']) is not bool):

@@ -739,7 +739,7 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
         long_clear = evidence['max_abs_lateral_m'] <= .10 and evidence['max_abs_yaw_deg'] <= 8.
         groups = ((8, 4, 2) if approach_steps == 8 and long_clear else
                   (4, 2) if approach_steps in (4, 8) else (2,))
-        two_step_max = max(.10, settings['two_step_distance_m'][1])
+        two_step_max = max(.10, settings.get('approach_two_step_distance_m', settings['two_step_distance_m'])[1])
         steps = next((group for group in groups if near-group/2*two_step_max >= target-band), 0)
         return dict(plan, distance_verified=True, steps=steps, confirmed_far=True,
                     depth_confirmed=approach_steps is None,
@@ -775,6 +775,8 @@ def RoutePose_PlanTag4Longitudinal(checkpoint, nav_cfg, settings, *, approach_st
         return dict(plan, reason='Tag 4 longitudinal position within trial tolerance')
     for stride in candidates:
         travel_bounds = settings['two_step_distance_m']
+        if stride > 0:
+            travel_bounds = settings.get('approach_two_step_distance_m', travel_bounds)
         if (approach_steps is None or check_after_short_move or stride == 8) and stride > 0:
             # A field run traveled 19.5 cm in four steps; reserve for ~10 cm in two.
             travel_bounds = (travel_bounds[0], max(travel_bounds[1], .10))
