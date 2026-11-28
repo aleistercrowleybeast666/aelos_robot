@@ -33,6 +33,7 @@ class RoutePoseDepartureResult(Enum):
 _SCHEMA = 'r3.route-pose.v1'
 _SIDE_SIGNS = {'strafe_left_once': -1, 'strafe_right_once': 1}
 TAG2_FAR_APPROACH_LIMIT_M = 0.40
+TAG2_DEPARTURE_LATERAL_M = .16
 TAG2_APPROACH_COUNTS = (2, 4, 5, 6, 8)
 _TAG1_NOMINAL_START_M = (0.14, 0.22)
 _TAG1_TRIAL_TARGET_M = 0.18
@@ -637,8 +638,8 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
         left, right = evidence['lateral_bounds_m']
         yaw, spread = evidence['heading_deg'], evidence['max_heading_deviation_deg']
         shifts = [0., *(-reverse_bound * sin(radians(angle)) for angle in (yaw-spread, yaw+spread))]
-        reverse_lane = (spread <= 3. and right-left <= .025 and left + min(shifts) >= -.16
-                        and right + max(shifts) <= .16)
+        reverse_lane = (spread <= 3. and right-left <= .025 and left + min(shifts) >= -TAG2_DEPARTURE_LATERAL_M
+                        and right + max(shifts) <= TAG2_DEPARTURE_LATERAL_M)
     result.update(confirmed_far=stable and nearest > far,
                   confirmed_near=close
                                  and reverse_lane
@@ -675,6 +676,18 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
         if _within(landing, (departure_floor, far)) and gain > 0:
             choices.append((residual, steps, landing))
     if not choices:
+        # A short approach can help even when its longest and shortest
+        # possible landings do not both fit the departure band. Its receipt
+        # alone cannot authorize a side step; request a new observation.
+        if result['confirmed_far'] and 2 in candidate_counts and projection[0] >= .85:
+            landing = (nearest-long*projection[1], farthest-short*projection[0])
+            spread = evidence['max_heading_deviation_deg']
+            swept = long * sin(radians(abs(evidence['heading_deg']) + spread))
+            if (spread <= 3. and evidence['max_abs_lateral_m'] + swept <= TAG2_DEPARTURE_LATERAL_M
+                    and landing[0] >= departure_floor and landing[1] > far
+                    and farthest-landing[1] >= .01):
+                return dict(result, guarded_forward_steps=2, estimated_landing_m=landing,
+                            reason='Tag 2 two-step approach has clearance; remeasure before strafing')
         # Even just outside the departure window a full two-step macro can be
         # too long. Tell the upstream entry route to yield to this measurement.
         shortest = min(candidate_counts, default=0)
@@ -867,6 +880,12 @@ def RoutePose_PlanTag5Passage(checkpoint, nav_cfg, settings, *, small_ready, ent
             or any(abs(wrap(yaw-heading)) > 5 for yaw in headings)):
         return dict(result, reason='Tag 5 ground poses disagree across the fresh frames')
     if not _within(depth_bounds, depth_window):
+        # On the approach side of the marker, a close and consistent observation
+        # can still guide a retreat. It does not authorize the entry gait.
+        if (not entering and 0 < depth_bounds[0] <= depth_bounds[1] < depth_window[0]
+                and max_abs_heading <= max_heading
+                and all(pose['body_forward_in_tag_forward'] > 0 for pose in poses)):
+            result['near_entry_depth_confirmed'] = True
         return dict(result, reason='Tag 5 outside the passage depth window')
 
     result['geometry_valid'] = True

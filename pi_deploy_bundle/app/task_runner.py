@@ -131,7 +131,7 @@ def prepare(mode,cfg,project,capabilities=(),simulation=False):
     missing=[f.__name__+': '+f.pending_reason for f in routes.required_sections(mode) if getattr(f,'pending_reason',None)] if routes is not None else []
     if chain is not None:
         transfer_steps=tuning['transfer_forward_steps']
-        body=1+(1 if transfer_steps==9 else len(segments(transfer_steps,'single')))
+        body=1+(2 if transfer_steps in (9, 11) else len(segments(transfer_steps,'single')))
         body+=sum(len(segments(step['steps'],'empty')) for step in chain if step['op']=='free_forward')
         body+=sum(step['repeat'] for step in chain if step['op'] in ('left_turn','right_turn'))
         if body>cfg['max_body_macros_per_journey']:
@@ -848,10 +848,16 @@ class Robot:
     def forward(self,steps):
         """按当前负载选择已有有限段；步数为名义推进相位，不是实测距离。"""
         self.prepare_heading_segment()
-        if getattr(self,'_managed_transfer_forward',False) and self.load_kind=='single' and steps==9:
-            if not getattr(self.backend,'is_simulation',False) and not Cmd0Motion_LegacyReady(self.backend):
-                raise NotReady('中转区连续 9 步需要当前会话的 MCU 能力回执')
-            plan=[TRANSFER_FORWARD9_ACTION]
+        transfer_checkpoint = (getattr(self,'_managed_transfer_forward',False)
+                               and self.load_kind=='single' and steps in (9, 11))
+        if transfer_checkpoint:
+            # Check heading while there is still space, then hand the last stance to the 90° turn.
+            if steps==9 and Cmd0Motion_ContinuousReady(self.backend):
+                plan=['carry_forward4', CMD0_FORWARD_ACTIONS[5]]
+            elif getattr(self.backend,'is_simulation',False) or Cmd0Motion_LegacyReady(self.backend):
+                plan=['carry_forward4', 'carry_forward7'] if steps==11 else ['carry_forward7', 'carry_forward2']
+            else:
+                raise NotReady(f'中转区抱物前进 {steps} 步需要当前会话的 MCU 能力回执')
         elif (getattr(self,'command0_scan_after_turn',False) and self.load_kind=='single' and steps==10
                 and Cmd0Motion_ContinuousReady(self.backend)):
             plan=list(Cmd0Motion_ForwardActions(steps,continuous=True))
@@ -864,7 +870,10 @@ class Robot:
         for index,name in enumerate(plan):
             self.short_transfer_segment_pending=short_transfer and index==0
             self._transfer_turn_pending=getattr(self,'_managed_transfer_forward',False) and index==len(plan)-1
-            try:self.action(name)
+            try:
+                if transfer_checkpoint and index==0:
+                    self.action(name,reserved_route_actions=1)
+                else:self.action(name)
             finally:
                 self.short_transfer_segment_pending=False
                 self._transfer_turn_pending=False
@@ -2121,14 +2130,14 @@ def execute(plan,backend,robot_factory=Robot):
         from micro_trial import active
         micro_active=active(plan.get('navigation',{}))
         check_sensors=(mode in ('0','stage1') and cfg.get('transfer_test',{}).get('preflight_sensor_streams'))
-        transfer_nine=(robot.command0_scan_after_turn
-                       and cfg.get('route_steps',{}).get('transfer_forward_steps')==9)
-        if (micro_active or transfer_nine) and not getattr(backend,'is_simulation',False):
+        transfer_mission=(robot.command0_scan_after_turn
+                          and cfg.get('route_steps',{}).get('transfer_forward_steps') in (9, 11))
+        if (micro_active or transfer_mission) and not getattr(backend,'is_simulation',False):
             import micro_trial
             if micro_active and not micro_trial.enabled(h):raise RuntimeError('real correction requires dedicated micro trial contract; route macros are not small turns')
-            verifier=getattr(backend,'verify_mission_v5' if transfer_nine else 'verify_micro',None)
+            verifier=getattr(backend,'verify_mission_v5' if transfer_mission else 'verify_micro',None)
             if verifier is None:
-                if transfer_nine:raise NotReady('启动前无法核验中转区连续 9 步的 MCU 能力')
+                if transfer_mission:raise NotReady('启动前无法核验中转区抱物分组前进的 MCU 能力')
                 raise RuntimeError('fresh micro capability backend unavailable BEFORE motion')
             def verify_startup(timeout):
                 started=robot.clock()

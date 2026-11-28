@@ -108,8 +108,8 @@ def Cmd0Motion_LoadRouteSteps(project):
         raise ValueError('路线步数配置需要 transfer_forward_steps 和 tag1_to_tag2_forward_steps 两项')
     if any(type(steps[key]) is not int or not 2 <= steps[key] <= 80 for key in defaults):
         raise ValueError('路线步数须为 2 至 80 的整数')
-    if steps['transfer_forward_steps'] % 2 and steps['transfer_forward_steps'] != 9:
-        raise ValueError('中转区抱物前进使用偶数步数，或原生连续 9 步')
+    if steps['transfer_forward_steps'] % 2 and steps['transfer_forward_steps'] not in (9, 11):
+        raise ValueError('中转区抱物前进使用偶数步数，或可分两组的 9 步、11 步')
     if 'command0_transfer' in steps:
         steps['command0_transfer'] = _validate_transfer_chain(steps['command0_transfer'])
     for field in ('pickup_exit', 'command1_pickup_exit'):

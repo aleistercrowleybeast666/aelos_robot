@@ -1,6 +1,6 @@
 {
   "continue_estimated_route": true,
-  "transfer_forward_steps": 9,
+  "transfer_forward_steps": 11,
   "tag1_to_tag2_forward_steps": 10,
   "micro_turn_filter": {"initial_deg": 10, "alpha": 0.15},
   "command0_transfer": [

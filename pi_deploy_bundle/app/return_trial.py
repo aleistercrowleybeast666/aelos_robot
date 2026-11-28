@@ -409,7 +409,8 @@ def _align_return_departure(robot, nav, leg):
             robot.ineffective_empty_return_turn = None
             leg['correction_confirmed'] = {'after_ns':current['latest_stamp_ns'],
                                            'heading_deg':wrap(current['heading_deg'] - target)}
-    return not (translation.get('gate_crossing_unresolved') or translation.get('side_departure_depth_unresolved'))
+    return not (translation.get('gate_crossing_unresolved') or translation.get('side_departure_depth_unresolved')
+                or translation.get('transfer_departure_unresolved'))
 
 
 def _return_recovery_decision(robot, nav, leg, miss, boundary, *, forward_reserved):
@@ -463,15 +464,15 @@ class _ReturnStanceExpired(Exception):
     """A planned translation lost its heading or camera evidence before dispatch."""
 
 
-def _tag7_course_error(robot, nav):
-    """Signed body yaw against the visually anchored 180-degree return course."""
+def _empty_course_error(robot, nav, course, anchor_tags):
+    """Read the signed error on a known route heading from this empty stance."""
     guard = getattr(robot,'heading_guard',None)
     anchor = nav.mag.anchor or {}
     target, offset = anchor.get('route_heading_deg'), anchor.get('offset_deg')
     if (not guard or robot.load_kind != 'empty' or getattr(robot,'magnetic_route_only',False)
-            or not anchor.get('absolute_route_heading_known') or anchor.get('tag_id') not in (5,6,7)
+            or not anchor.get('absolute_route_heading_known') or anchor.get('tag_id') not in anchor_tags
             or not all(type(value) in (int,float) and math.isfinite(value) for value in (target,offset))
-            or abs(wrap(target-180.)) > .01):
+            or abs(wrap(target-course)) > .01):
         return None
     sample = guard.last_sample
     if not Checkpoint_EmptyMotionSampleReady(robot,nav,anchor,sample):
@@ -482,7 +483,11 @@ def _tag7_course_error(robot, nav):
             return None
     if not Checkpoint_EmptyMotionSampleReady(robot,nav,anchor,sample):
         return None
-    return wrap(nav.cfg['magnetic']['heading_sign']*sample['raw_heading_deg'] + offset-180.)
+    return wrap(nav.cfg['magnetic']['heading_sign']*sample['raw_heading_deg'] + offset-course)
+
+
+def _tag7_course_error(robot, nav):
+    return _empty_course_error(robot, nav, 180., (5, 6, 7))
 
 
 def _tag7_align_course(robot, nav, leg, action):
@@ -911,6 +916,44 @@ def _reach_handoff(robot, nav, actions, result, reference, initial=None):
         view = None
 
 
+def _handoff_turn_on_route_heading(robot, nav, leg, transfer_stamp, first_error, reserved):
+    """Resolve an extreme reverse Tag view using an independent pre-transfer route anchor."""
+    goal = next((g for g in nav.cfg['legs']['outbound'] if g['id'] == 1), {})
+    anchor = nav.mag.anchor or {}
+    anchor_stamp = (anchor.get('tag_departure') or {}).get('observed_at_ns')
+    if (goal.get('allow_turn') is not True or goal.get('route_heading_deg') != 0.
+            or getattr(robot, 'route_command', None) != '2' or robot.load_kind != 'empty'
+            or anchor.get('planned_group_target') is not True or type(anchor_stamp) is not int
+            or type(transfer_stamp) is not int or not 0 < anchor_stamp <= transfer_stamp
+            or robot.count + 1 + reserved > robot.cfg['max_body_macros_per_journey']):
+        return False
+    geometry = _empty_marker_geometry(robot, nav, leg)
+    if geometry is None:
+        return False
+    error = wrap(geometry['heading_deg'] - goal['tag_heading_deg'])
+    if abs(error) < 45. or first_error * error <= 0 or abs(first_error-error) > 15.:
+        return False
+    report = leg['magnetic_handoff_recovery'] = {'visual_deg':error, 'target_route_deg':0.}
+    stamp = geometry['latest_stamp_ns']
+    def verify():
+        robot.check()
+        measured = _empty_course_error(robot, nav, 0., _RETURN_TAGS)
+        if (nav.mag.anchor is not anchor or measured is None or measured * error <= 0
+                or abs(measured-error) + geometry['max_heading_deviation_deg'] > 15.
+                or not _empty_marker_current(robot, nav, 1, stamp)):
+            raise _ReturnStanceExpired()
+        report['magnetic_deg'] = measured
+    action = 'empty_left_turn' if error > 0 else 'empty_right_turn'
+    try:
+        verify()
+        robot.finite(action, configured=True, checkpoint_follows=True, before_dispatch=verify)
+    except _ReturnStanceExpired:
+        return False
+    robot.nav_count += 1
+    report['action'] = action
+    return True
+
+
 def ReturnTrial_ReachPickupStation(robot, chain, result):
     """Finish the configured transfer, face outbound, observe Tag 1 again, then enter the pickup bay."""
     estimate = robot.cfg.get('route_steps', {}).get('continue_estimated_route') is True
@@ -952,8 +995,11 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
         ReturnTrial_AlignEmptyMarker(robot, nav, leg, direction='outbound')
     heading = leg.get('empty_heading') or {}
-    if observed is CheckpointScanResult.CHECKPOINT_DETECTED and heading.get('status') not in (
-            'within_empty_turn_resolution', 'retain_measured_residual', 'orientation_inconsistent'):
+    readings = heading.get('observations') or []
+    previous_error = readings[-1]['error_deg'] if readings else None
+    wrong_course = previous_error is not None and abs(previous_error) >= 45.
+    if observed is CheckpointScanResult.CHECKPOINT_DETECTED and (wrong_course or heading.get('status') not in (
+            'within_empty_turn_resolution', 'retain_measured_residual', 'orientation_inconsistent')):
         retry = {'expected_id':1, 'detected':False, 'observation_windows':0}
         observed, detail = Checkpoint_Observe(robot, nav, retry, waiting, single_window=True)
         retry.update(status=observed.value, reason=detail)
@@ -964,11 +1010,23 @@ def ReturnTrial_ReachPickupStation(robot, chain, result):
     else:
         retry = leg
     readings = heading.get('observations') or []
-    if (heading.get('status') in ('retain_measured_residual', 'orientation_inconsistent')
-            and readings and abs(readings[-1]['error_deg']) >= 45):
-        leg['reason_zh'] = f"空载掉头后的 Tag 1 实测仍偏 {readings[-1]['error_deg']:+.1f}°，接驳侧跨方向待确认。"
-        if not estimate:
-            return leg
+    if (wrong_course and readings and abs(readings[-1]['error_deg']) >= 45.
+            and retry.get('detected') and not heading.get('actions')
+            and not (leg.get('empty_heading') or {}).get('actions')
+            and _handoff_turn_on_route_heading(robot, nav, retry, turn_completed_ns, previous_error, len(side))):
+        retry = {'expected_id':1, 'detected':False, 'observation_windows':0}
+        observed, detail = Checkpoint_Observe(robot, nav, retry, waiting, quick_id=True, advisory_windows=1)
+        retry.update(status=observed.value, reason=detail)
+        leg['after_magnetic_turn'] = retry
+        if observed is CheckpointScanResult.CHECKPOINT_DETECTED:
+            ReturnTrial_AlignEmptyMarker(robot, nav, retry, direction='outbound')
+        heading = retry.get('empty_heading') or {}
+        readings = heading.get('observations') or []
+    if (readings and abs(readings[-1]['error_deg']) >= 45.
+            or wrong_course and (not retry.get('detected') or not readings)):
+        last_error = readings[-1]['error_deg'] if readings else previous_error
+        leg['reason_zh'] = f"空载掉头后最近一次 Tag 1 航向偏差为 {last_error:+.1f}°，纠偏复扫后仍未确认接驳侧跨方向。"
+        return leg
     if not (observed is CheckpointScanResult.CHECKPOINT_DETECTED and readings
             and heading.get('status') in ('within_empty_turn_resolution', 'retain_measured_residual')):
         from corridor_trial import CorridorTrial_HeadingSnapshot
@@ -1030,7 +1088,7 @@ def ReturnTrial_Run(robot, *, drop_turn=None):
         result['checkpoint'] = tag
         leg['departure_resolution'] = 'cross_track_unresolved_after_recovery'
         correction = leg['empty_departure_correction']
-        axis = '门口横偏或航向' if tag == 5 else '侧跨起点的前后距离'
+        axis = {5: '门口横偏或航向', 1: '接驳进近的位置或航向'}.get(tag, '侧跨起点的前后距离或航向')
         return set_status(ReturnTrialResult.CHECKPOINT_UNCONFIRMED,
                           f'返程 Tag {tag} 的{axis}仍未确认，已尝试 {len(correction["actions"])} 组位置调整。'
                           + correction.get('reason_zh', ''))

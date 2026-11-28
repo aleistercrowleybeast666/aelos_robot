@@ -4,7 +4,8 @@ from math import isfinite, radians, sin
 
 from action_chains_v5 import COMMAND0_OUTBOUND
 from cmd0_motion import (COMMAND0_ENTRY_FORWARD_STEPS, Cmd0Motion_ContinuousReady,
-                         Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady)
+                         Cmd0Motion_ForwardActions, Cmd0Motion_ForwardStepCount, Cmd0Motion_LegacyReady,
+                         Cmd0Motion_SmallStrafeProfile, SMALL_SIDE_ACTIONS)
 from checkpoint_errors import VisualCamera_GetFreshnessCheck, VisualCameraUnavailable
 from checkpoint_scan import (Checkpoint_FromBoundary, Checkpoint_Observe, Checkpoint_OptionalScanTime,
                              Checkpoint_ReadWindow, CheckpointScanResult)
@@ -169,16 +170,17 @@ def EntranceTrial_PlanForward(target_steps, *, continuous, legacy):
 def _tag1_unresolved_entry_heading(original, current, recovery, deadband, completed_ns):
     initial = (original or {}).get('decision_fusion') or {}
     initial_error = initial.get('error_deg') if EntranceTrial_IsEntryAccepted(original) else None
+    current_error = ((current.get('decision_fusion') or {}).get('error_deg')
+                     if EntranceTrial_IsEntryAccepted(current) else None)
     large = any(type(yaw) in (int, float) and isfinite(yaw) and abs(yaw) >= TAG1_CLEARANCE_YAW_DEG
-                for yaw in (initial_error, recovery.get('initial_heading_deg')))
+                for yaw in (initial_error, recovery.get('initial_heading_deg'), current_error))
     if not large:
         return False
     if not EntranceTrial_IsEntryAccepted(current):
         return True
     stamp = current['scan'].get('latest_stamp_ns')
-    yaw = (current.get('decision_fusion') or {}).get('error_deg')
     return not (type(stamp) is int and type(completed_ns) is int and stamp > completed_ns
-                and type(yaw) in (int, float) and isfinite(yaw) and abs(yaw) <= deadband)
+                and type(current_error) in (int, float) and isfinite(current_error) and abs(current_error) <= deadband)
 
 
 def _tag1_short_start_actions(operations, continuous, available):
@@ -223,15 +225,16 @@ def _tag1_recovery_geometry(robot, nav, scan):
     return geometry
 
 
-def _tag1_clearance_strafe(geometry):
+def _tag1_clearance_strafe(geometry, *, lateral_limit=_TAG1_CLEARANCE_SIDE_M,
+                           stride_upper=_TAG1_CLEARANCE_STRIDE_UPPER_M):
     left, right = geometry['lateral_bounds_m']
     near, far = geometry['distance_bounds_m']
-    direction = -1 if left > _TAG1_CLEARANCE_SIDE_M else 1 if right < -_TAG1_CLEARANCE_SIDE_M else 0
+    direction = -1 if left > lateral_limit else 1 if right < -lateral_limit else 0
     if direction == 0:
         return None
     yaw = geometry['heading_deg']
     spread = geometry['max_heading_deviation_deg']
-    shifts = tuple(direction * _TAG1_CLEARANCE_STRIDE_UPPER_M * sin(radians(angle))
+    shifts = tuple(direction * stride_upper * sin(radians(angle))
                    for angle in (yaw-spread, yaw+spread))
     depth_min, depth_max = _TAG1_CLEARANCE_DEPTH_M
     inside = near + min(0., *shifts) >= depth_min and far + max(0., *shifts) <= depth_max
@@ -276,12 +279,48 @@ def _tag1_observe_after_recovery(robot, nav, goal, recovery):
     return alignment
 
 
+def _tag1_center_departure(robot, nav, goal, alignment, result, reserved_actions):
+    side = getattr(robot, 'corridor_side_action', None)
+    fingerprint = (alignment.get('camera_info') or {}).get('fingerprint')
+    if (side is None or goal.get('allow_strafe') is not True or not fingerprint
+            or 'tag1_lateral_recovery' in result):
+        return alignment
+    geometry = _tag1_recovery_geometry(robot, nav, alignment['scan'])
+    if geometry is None or geometry['max_abs_heading_deg'] >= TAG1_CLEARANCE_YAW_DEG:
+        return alignment
+    operation = _tag1_clearance_strafe(geometry)
+    if operation is None and getattr(robot.backend, 'small_strafe_ready', lambda: False)():
+        _, stride = Cmd0Motion_SmallStrafeProfile(robot.backend)
+        small = _tag1_clearance_strafe(geometry, lateral_limit=.08, stride_upper=stride)
+        if small:
+            operation = SMALL_SIDE_ACTIONS[small]
+    if not operation or robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']:
+        return alignment
+    stamp = alignment['scan'].get('latest_stamp_ns')
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if live is None or not live(stamp):
+        return alignment
+    recovery = {'initial_heading_deg': alignment['decision_fusion']['error_deg'],
+                'before_lateral_bounds_m': geometry['lateral_bounds_m'],
+                'operation': operation, 'reobservations': []}
+    result['tag1_lateral_recovery'] = recovery
+    side(operation)
+    current = _tag1_observe_after_recovery(robot, nav, goal, recovery)
+    if current is None or (current.get('camera_info') or {}).get('fingerprint') != fingerprint:
+        recovery['stance_unconfirmed'] = True
+        return None
+    updated = _tag1_recovery_geometry(robot, nav, current['scan'])
+    if updated is not None:
+        recovery['after_lateral_bounds_m'] = updated['lateral_bounds_m']
+    return current
+
+
 def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_actions):
-    """Handle trusted Tag 1 heading left over from initial acquisition."""
+    """Correct departure position and yaw using the current loaded Tag 1 stance."""
     turn = getattr(robot, 'Route_TurnFromTagHeading', None)
     visual = nav.cfg.get('visual_micro', {})
-    if (turn is None or not alignment or alignment.get('heading_residual_advisory') is not True
-            or not EntranceTrial_IsEntryAccepted(alignment)
+    if (turn is None or not alignment or not EntranceTrial_IsEntryAccepted(alignment)
+            or alignment.get('tag1_nominal_entry') is True
             or visual.get('execute') is not True):
         return alignment
     error = alignment['decision_fusion'].get('error_deg')
@@ -289,12 +328,26 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
     live = VisualCamera_GetFreshnessCheck(nav.io)
     deadband = visual['deadband_deg']
     completed = robot.last_action_completed_ros_ns
-    if (type(error) not in (int, float) or not isfinite(error) or abs(error) <= deadband
+    if (type(error) not in (int, float) or not isfinite(error)
             or type(stamp) is not int or type(completed) is not int or stamp <= completed
-            or live is None or not live(stamp)):
+            or live is None):
+        return alignment
+    if abs(error) <= deadband:
+        current = _tag1_center_departure(robot, nav, goal, alignment, result, reserved_actions)
+        if current is None or current is alignment:
+            return current
+        alignment = current
+        error = alignment['error_deg']
+        stamp = alignment['scan']['latest_stamp_ns']
+        if abs(error) <= deadband:
+            return alignment
+    if not live(stamp):
         return alignment
     already_turned = alignment.get('correction_executed') is True
-    if already_turned and abs(error) < TAG1_CLEARANCE_YAW_DEG:
+    advisory = alignment.get('heading_residual_advisory') is True
+    if abs(error) < TAG1_CLEARANCE_YAW_DEG and (already_turned or not advisory):
+        return _tag1_center_departure(robot, nav, goal, alignment, result, reserved_actions)
+    if not advisory:
         return alignment
     recovery = {'initial_heading_deg': error, 'reobservations': []}
     result['tag1_heading_recovery'] = recovery
@@ -356,11 +409,18 @@ def _tag1_recover_departure(robot, nav, goal, alignment, result, *, reserved_act
         correction = turn(1, error, stamp, reserved_actions=reserved_actions)
         if correction is not None:
             recovery['visual_turn'] = correction
+            camera = (alignment.get('camera_info') or {}).get('fingerprint')
             alignment = _tag1_observe_after_recovery(robot, nav, goal, recovery)
             if alignment is not None:
+                if camera and (alignment.get('camera_info') or {}).get('fingerprint') != camera:
+                    return None
                 correction['after_error_deg'] = alignment['error_deg']
+                if abs(alignment['error_deg']) <= deadband and 'clearance_action' not in recovery:
+                    alignment = _tag1_center_departure(robot, nav, goal, alignment, result, reserved_actions)
         elif centered:
             recovery['reason_zh'] = 'Tag 1 可原地转向，但本次未发出微转，保留实测余差并先走短段。'
+        elif not needs_clearance_check:
+            return _tag1_center_departure(robot, nav, goal, alignment, result, reserved_actions)
     return alignment
 
 
@@ -534,6 +594,8 @@ def _tag2_boundary_replan(checkpoint, nav, settings, remaining, *, continuous=Tr
         return None
     if plan.get('heading_to_correct_deg') is not None or plan.get('heading_reobserve_required'):
         return 0,plan,'已提前读到 Tag 2，先修正当前航向。'
+    if plan.get('guarded_forward_steps') == 2:
+        return 0,plan,'已提前读到偏远的 Tag 2，先按当前位姿短进两步，再确认右跨起点。'
     if plan['max_abs_lateral_m'] > .12:
         return 0,plan,'已提前读到 Tag 2，横偏较大，先按当前位置核对侧跨起点。'
     if plan.get('forward_would_cross_minimum'):
@@ -759,11 +821,14 @@ def EntranceTrial_Run(robot, *, camera_info=None, entry_alignment=None):
         if grouped and robot.count+len(grouped) <= robot.cfg['max_body_macros_per_journey']:
             operations = grouped
             result['entry_forward_grouping'] = list(grouped)
-    if _tag1_unresolved_entry_heading(original_alignment, entry_alignment, result.get('tag1_heading_recovery') or {},
-                                      nav.cfg.get('visual_micro', {}).get('deadband_deg', 8.), robot.last_action_completed_ros_ns):
+    lost_after_strafe = (result.get('tag1_lateral_recovery') or {}).get('stance_unconfirmed')
+    if lost_after_strafe or _tag1_unresolved_entry_heading(original_alignment, entry_alignment,
+            result.get('tag1_heading_recovery') or {}, nav.cfg.get('visual_micro', {}).get('deadband_deg', 8.),
+            robot.last_action_completed_ros_ns):
         operations = _tag1_short_start_actions(operations, continuous, robot.cfg['max_body_macros_per_journey']-robot.count)
         result['entry_forward_grouping'] = list(operations)
-        result['entry_heading_grouping_reason_zh'] = 'Tag 1 大偏航尚未确认转正，先走短段并在动作回执处检查当前航向。'
+        result['entry_heading_grouping_reason_zh'] = ('Tag 1 侧跨后失去位姿，先走短段并复查。' if lost_after_strafe
+            else 'Tag 1 大偏航尚未确认转正，先走短段并在动作回执处检查当前航向。')
     result['initial_estimated_steps'] = result['planned_steps']
     set_status(CheckpointScanResult.MOVING_TO_CHECKPOINT, 'executing estimated Tag 1 to Tag 2 segment')
     _report_progress(robot, 'cmd0_next_leg', result)
