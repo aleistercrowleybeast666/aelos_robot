@@ -3741,12 +3741,31 @@ def _tag5_group_centering(robot, settings, plan, side):
     # The Nov 26 gate run moved 9.3 cm in one stride. Even after the first
     # stride the whole body/path estimate must still need a second one.
     stride = _RECOVERY_STRAFE_UPPER_M
-    if (inner - stride <= settings.get('lateral_clearance_m', .075)
-            or inner - 2 * stride < -min(.025, settings.get('deadband_m', .05))):
-        return side
+    limit = settings.get('lateral_clearance_m', .075)
+    margin = min(.025, settings.get('deadband_m', .05))
+    headings = plan['heading_bounds_deg']
+    check_current_lateral = inner - stride <= limit or inner - 2 * stride < -margin
+    if check_current_lateral:
+        # At the right jamb an inward-facing load can still be entirely outside
+        # after one full left stride, even if its projected straight crosses the
+        # centre later. Only combine two if their landing leaves room on the left.
+        if (robot.load_kind != 'double' or side != 'strafe_left_once'
+                or plan.get('samples', 0) < 3 or not -8. <= headings[0] <= headings[1] < 0.
+                or lateral[0] - stride <= limit or lateral[0] - 2 * stride < -margin
+                or inner - 2 * stride < -limit + margin):
+            return side
+        stamp = plan.get('latest_stamp_ns')
+        stance = getattr(robot, 'last_action_completed_ros_ns', None)
+        if type(stance) is not int or type(stamp) is not int or plan.get('stance_completed_ns') != stance or stamp <= stance:
+            return side
+        fresh = VisualCamera_GetFreshnessCheck(robot.nav.io)
+        if not fresh or not fresh(stamp):
+            return side
+        drift = robot.nav.cfg['post_action_heading']['deadband_deg']
+        headings = (headings[0] - drift, headings[1] + drift)
     window = settings.get('passage_depth_window_m', (.075, .45))
-    near, far, floor = _side_step_depth_sweep(plan['depth_bounds_m'], plan['heading_bounds_deg'],
-                                            -direction * 2 * stride, window, _TAG5_OUTSIDE_SIDE_DEPTH_M)
+    near, far, floor = _side_step_depth_sweep(plan['depth_bounds_m'], headings,
+        -direction * 2 * stride, window, _TAG5_OUTSIDE_SIDE_DEPTH_M, signed_observation=not check_current_lateral)
     return grouped if near >= floor and far <= window[1] else side
 
 
@@ -3971,6 +3990,9 @@ def _tag5_unseen_left_step(robot, settings, alignment, plan):
     route = alignment.get('remaining_left_actions')
     if not route or plan['geometry_valid'] or plan.get('near_entry_depth_confirmed'):
         return None
+    if ('group_may_have_reached_center_ns' in alignment
+            and alignment['group_may_have_reached_center_ns'] == robot.last_action_completed_ros_ns):
+        return None
     if (any(op in SMALL_SIDE_ACTIONS.values() for op in alignment['completed_actions'])
             and Cmd0Motion_SmallStrafeProfile(robot.backend)[0] != 'legacy_v1'):
         # An uncalibrated small gait may slip or move most of a full stride. A
@@ -4158,6 +4180,11 @@ def _align_tag5_entry(robot, nav, profile, settings, checkpoint, alignment, *,
                 plan['grouped_centering_action'] = dispatched
             robot.corridor_side_action(dispatched)
             alignment['completed_actions'].append(dispatched)
+            if (dispatched == SIDE_ACTIONS['strafe_left_once', 2] and dispatched != operation
+                    and plan['lateral_bounds_m'][0] - 2 * _RECOVERY_STRAFE_UPPER_M <= settings.get('large_move_error_m', .10)):
+                # The two acknowledged strides can already have reached the
+                # centre. Only a new gate pose can justify moving farther left.
+                alignment['group_may_have_reached_center_ns'] = robot.last_action_completed_ros_ns
             pending_small = record_small(dispatched, plan)
             if recovery_from is not None:
                 plan.update(side_recovery_from=recovery_from, side_recovery_operation=operation)
