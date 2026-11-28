@@ -191,7 +191,7 @@ def Cmd0Motion_LoadRouteSteps(project):
         trim = steps[key]
         keys = {'enabled', 'target_distance_m', 'deadband_m', 'two_step_distance_m', 'distance_window_m'}
         optional = ({'approach_two_step_distance_m', 'minimum_strafe_distance_m'} if tag == 2
-                    else {'left_departure_reference', 'heading_use_within_m'})
+                    else {'left_departure_reference', 'left_departure_target_m', 'heading_use_within_m'})
         if (not isinstance(trim, dict) or not keys <= trim.keys() <= keys | optional
                 or type(trim['enabled']) is not bool):
             raise ValueError(f'Tag {tag} 前后试跑补偿配置无效')
@@ -213,6 +213,8 @@ def Cmd0Motion_LoadRouteSteps(project):
             cutoff = trim['heading_use_within_m']
             if type(cutoff) not in (int, float) or not isfinite(cutoff) or not target+deadband < cutoff <= window[1]:
                 raise ValueError('Tag 4 航向使用距离须大于进近目标范围，并位于观测范围内')
+        if 'left_departure_target_m' in trim and 'left_departure_reference' not in trim:
+            raise ValueError('Tag 4 左跨目标需要对应的站位参考与距离容差')
         if 'left_departure_reference' in trim:
             reference = trim['left_departure_reference']
             fields = {'distance_m', 'distance_deadband_m', 'lateral_m', 'heading_deg'}
@@ -223,6 +225,10 @@ def Cmd0Motion_LoadRouteSteps(project):
             if (tolerance <= 0 or not window[0] <= distance - tolerance < distance + tolerance <= window[1]
                     or abs(reference['lateral_m']) > .16 or abs(reference['heading_deg']) > 15.):
                 raise ValueError('Tag 4 左跨参考距离及容差需落在观测范围内，横偏不大于 0.16 米，航向不大于 15 度')
+            departure = trim.get('left_departure_target_m', distance)
+            if (type(departure) not in (int, float) or not isfinite(departure)
+                    or not window[0] <= departure - tolerance < departure + tolerance <= window[1]):
+                raise ValueError('Tag 4 左跨目标和容差须落在可观测的距离范围内')
     return steps
 
 

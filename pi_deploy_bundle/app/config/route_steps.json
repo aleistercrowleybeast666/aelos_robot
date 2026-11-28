@@ -96,6 +96,7 @@
   "tag4_forward_trial": {
     "enabled": true,
     "heading_use_within_m": 0.35,
+    "left_departure_target_m": 0.20,
     "target_distance_m": 0.175,
     "deadband_m": 0.035,
     "two_step_distance_m": [0.04, 0.075],
