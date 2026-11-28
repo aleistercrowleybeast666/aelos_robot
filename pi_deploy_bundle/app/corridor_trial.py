@@ -16,7 +16,7 @@ from checkpoint_scan import (Checkpoint_CorrectMissedTravel, Checkpoint_FromBoun
 from entrance_trial import EntranceTrial_PlanForward
 from nav_observation import wrap
 from route_pose import (TAG2_APPROACH_COUNTS, TAG2_DEPARTURE_LATERAL_M as _TAG2_DEPARTURE_LATERAL_M,
-                        TAG2_FAR_APPROACH_LIMIT_M, RoutePose_AdviseDeparture,
+                        TAG2_EDGE_PROBE_MARGIN_M, TAG2_FAR_APPROACH_LIMIT_M, RoutePose_AdviseDeparture,
                         RoutePose_Load, RoutePose_Measure, RoutePose_PartialCheckpointGeometry,
                         RoutePose_PlanSideCount, RoutePose_PlanSmallSide, RoutePose_PlanTag2ForwardTrim,
                         RoutePose_PlanTag2ForwardTrial, RoutePose_PlanTag4Longitudinal, RoutePose_PlanTag5EntryLateral,
@@ -57,7 +57,6 @@ _TAG2_CARRIED_MAX_YAW_DEG = 12.
 _TAG2_CAUTION_LATERAL_M = .05
 _TAG2_EDGE_PROBE_LATERAL_M = .10
 _TAG2_APPROACH_NEAR_MARGIN_M = .025
-_TAG2_FAR_EDGE_PROBE_MARGIN_M = .01
 _TAG2_CLEARANCE_YAW_DEG = 22.
 _TAG3_CLEARANCE_YAW_DEG = 20.
 _TAG3_PERIPHERAL_BODY_BEARING_DEG = 50.
@@ -2162,17 +2161,20 @@ def _tag2_departure_distance_ok(plan, settings):
             and hi - lo <= .006)
 
 
+def _tag2_current_stance(robot, cutoff, stamp, live):
+    stance = robot.last_action_completed_ros_ns
+    return (type(stance) is int and type(cutoff) is int and type(stamp) is int
+            and 0 < stance <= cutoff < stamp and live is not None and live(stamp))
+
+
 def _tag2_allow_far_edge_probe(robot, nav, leg, trim, plan, scan, settings):
     """Use the first scheduled right stride when even two forward steps may pass the near limit."""
     if (not plan.get('confirmed_far') or not plan.get('forward_would_cross_minimum')
             or 'minimum_strafe_distance_m' not in settings or trim.get('heading_reference') != 'applied'
             or not callable(getattr(robot, 'corridor_side_action', None))):
         return False
-    stance = robot.last_action_completed_ros_ns
-    after, stamp = scan.get('after_ns'), plan['latest_stamp_ns']
     live = VisualCamera_GetFreshnessCheck(nav.io)
-    if (type(stance) is not int or type(after) is not int or not 0 < stance <= after < stamp
-            or live is None or not live(stamp)):
+    if not _tag2_current_stance(robot, scan.get('after_ns'), plan['latest_stamp_ns'], live):
         return False
     low, high = plan['distance_bounds_m']
     far = settings['distance_window_m'][1]
@@ -2182,11 +2184,11 @@ def _tag2_allow_far_edge_probe(robot, nav, leg, trim, plan, scan, settings):
             or plan['max_heading_deviation_deg'] > 3. or plan['projection_bounds'][0] < .85
             or plan['max_abs_lateral_m'] > _TAG2_CAUTION_LATERAL_M
             or low - drift < settings['minimum_strafe_distance_m']
-            or high + drift > far + _TAG2_FAR_EDGE_PROBE_MARGIN_M):
+            or high + drift > far + TAG2_EDGE_PROBE_MARGIN_M):
         return False
     leg['tag2_narrow_departure'] = True
     leg['tag2_backward_clearance_allowed'] = False
-    detail = 'Tag 2 略超远侧边界，再前进两步可能过近，先右跨一步再查航向。'
+    detail = 'Tag 2 复测仍在远侧边界，按当前余量先右跨一步再查航向。'
     trim.update(ready_to_strafe=True, measured_landing_m=(low, high), last_approach_reason=detail,
                 far_edge_probe_depth_bounds_m=(low - drift, high + drift))
     _report_progress(robot, 'cmd0_corridor_leg', 2, 3, leg=leg, reason_zh=detail)
@@ -2596,11 +2598,15 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
         robot.check()
         if robot.count + reserved_actions + 1 > robot.cfg['max_body_macros_per_journey']:
             break
+        edge_forward = plan.get('far_edge_forward') is True
+        if edge_forward and not _tag2_current_stance(robot, plan['observation_after_ns'], plan['latest_stamp_ns'], live):
+            break
         distance = plan['distance_bounds_m']
         projection = plan.get('projection_bounds', (1., 1.))
         estimated = (distance[0] - long * projection[1], distance[1] - short * projection[0])
         if incremental:
             initial['planned_steps'] = initial['completed_steps'] + 2
+            initial['estimated_landing_m'] = estimated
         _report_progress(robot, 'cmd0_departure_reobserve', 2, 2, leg=leg,
                          reason_zh='Tag 2 进近余量较小，先前进两步，再用新画面复核。')
         robot.last_heading_report = None
@@ -2613,6 +2619,10 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                  'observed': current}
         windows.append(check)
         scan = checkpoint.get('scan') or {}
+        if (edge_forward and 'distance_bounds_m' in current
+                and not _tag2_current_stance(robot, scan.get('after_ns'), current['latest_stamp_ns'], live)):
+            check['status'] = 'post_advance_pose_unconfirmed'
+            break
         if 'distance_bounds_m' not in current:
             partial = _corridor_partial_geometry(robot, nav, checkpoint, 2, fresh_only=True)
             if partial is not None:
@@ -2664,8 +2674,15 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                 pose, checkpoint, current = _tag2_landing_observation(robot, nav, profile, leg, settings)
                 correction['after_error_deg'] = current.get('heading_deg')
                 check['after_turn'] = current
-        if (current.get('confirmed_near') and current.get('reverse_clearance_available', True)
+        # If the short approach reached the near edge, its just-traversed lane
+        # also supports a short retreat, provided no turn changed the stance.
+        reverse_on_approach = (edge_forward and current.get('confirmed_near') and 'after_turn' not in check
+            and 'after_heading_clearance' not in check and current['max_abs_yaw_deg'] <= 4.
+            and current['max_abs_lateral_m'] <= _TAG2_CAUTION_LATERAL_M
+            and current['distance_bounds_m'][1] + long <= far + TAG2_EDGE_PROBE_MARGIN_M)
+        if (current.get('confirmed_near') and (current.get('reverse_clearance_available', True) or reverse_on_approach)
                 and live(current['latest_stamp_ns'])):
+            before_retreat = robot.last_action_completed_ros_ns
             recovered = _tag2_reframe_for_view(robot, nav, profile, leg,
                 operation='cmd0_carry_backward2', distance_m=current['distance_m'],
                 reserved_actions=reserved_actions, monitor_only=True)
@@ -2674,6 +2691,14 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                 pose = _measure(robot, nav, profile, checkpoint)
                 current = RoutePose_PlanTag2ForwardTrial(checkpoint, nav.cfg, settings, candidate_counts=(2,))
                 check['after_retreat'] = current
+            elif robot.last_action_completed_ros_ns != before_retreat:
+                check['status'] = 'post_retreat_pose_unconfirmed'
+                break
+        if edge_forward and (current.get('max_abs_yaw_deg', 180.) > _TAG2_CARRIED_MAX_YAW_DEG
+                or not _tag2_current_stance(robot, (checkpoint.get('scan') or {}).get('after_ns'),
+                                            current.get('latest_stamp_ns'), live)):
+            check['status'] = 'departure_pose_unconfirmed'
+            break
         hint = RoutePose_TrialLateralHint(checkpoint, nav.cfg, 2)
         if (hint is None or not live(hint['latest_stamp_ns'])
                 or _tag2_lateral_clearance_issue(current, live) is not None):
@@ -2683,8 +2708,9 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
         leg['tag2_visual_heading_deg'] = hint['heading_deg']
         landing = current.get('estimated_landing_m')
         continue_approach = (current['planned_steps'] == 2 or current.get('guarded_forward_steps') == 2)
-        if (index + 1 < groups and continue_approach and landing is not None
-                and landing[0] >= floor and live(hint['latest_stamp_ns'])
+        if (index + 1 < groups and not edge_forward and 'after_retreat' not in check
+                and continue_approach and landing is not None
+                and (landing[0] >= floor or current.get('far_edge_forward')) and live(hint['latest_stamp_ns'])
                 and (not incremental or (current.get('confirmed_far')
                      and current['distance_bounds_m'][1] < distance[0] - .01))):
             plan = current
@@ -2700,7 +2726,7 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
             # if the whole measured heading error projects toward either wall.
             yaw = abs(hint['heading_deg']) + current.get('max_heading_deviation_deg', 180.)
             lateral = hint['lateral_bounds_m']
-            if (initial.get('heading_reference') == 'applied'
+            if (not edge_forward and initial.get('heading_reference') == 'applied'
                     and yaw <= nav.cfg['post_action_heading'].get('deadband_deg', 8.)
                     and -_TAG2_EDGE_PROBE_LATERAL_M <= lateral[0] <= lateral[1] <= _TAG2_CAUTION_LATERAL_M
                     and current.get('projection_bounds', (0.,))[0] >= .85):
@@ -2757,7 +2783,7 @@ def _run_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
     if ready:
         if followup['completed_steps']:
             initial['estimated_landing_m'] = followup['estimated_landing_m']
-        elif 'measured_landing_m' in followup:
+        if 'measured_landing_m' in followup:
             initial['measured_landing_m'] = followup['measured_landing_m']
     return pose, ready
 

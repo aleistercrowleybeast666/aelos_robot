@@ -33,6 +33,7 @@ class RoutePoseDepartureResult(Enum):
 _SCHEMA = 'r3.route-pose.v1'
 _SIDE_SIGNS = {'strafe_left_once': -1, 'strafe_right_once': 1}
 TAG2_FAR_APPROACH_LIMIT_M = 0.40
+TAG2_EDGE_PROBE_MARGIN_M = .01
 TAG2_DEPARTURE_LATERAL_M = .16
 TAG2_APPROACH_COUNTS = (2, 4, 5, 6, 8)
 _TAG1_NOMINAL_START_M = (0.14, 0.22)
@@ -683,6 +684,17 @@ def RoutePose_PlanTag2ForwardTrial(checkpoint, nav_cfg, settings, *, candidate_c
             landing = (nearest-long*projection[1], farthest-short*projection[0])
             spread = evidence['max_heading_deviation_deg']
             swept = long * sin(radians(abs(evidence['heading_deg']) + spread))
+            # The minimum is for starting the lateral traverse. A straight, centered
+            # approach may land up to 1 cm short of it if the endpoint is remeasured.
+            if ('minimum_strafe_distance_m' in settings and farthest <= far + TAG2_EDGE_PROBE_MARGIN_M
+                    and farthest-nearest <= .006 and evidence['max_abs_yaw_deg'] <= 4.
+                    and spread <= 3. and evidence['max_abs_lateral_m'] + swept <= .05
+                    and max(near, departure_floor - TAG2_EDGE_PROBE_MARGIN_M) <= landing[0] < departure_floor
+                    and landing[1] <= far):
+                return dict(result, guarded_forward_steps=2, estimated_landing_m=landing,
+                            far_edge_forward=True, forward_would_cross_minimum=True,
+                            observation_after_ns=checkpoint['scan']['after_ns'],
+                            reason='Tag 2 略偏远，前进两步后按实测距离决定是否右跨。')
             if (spread <= 3. and evidence['max_abs_lateral_m'] + swept <= TAG2_DEPARTURE_LATERAL_M
                     and landing[0] >= departure_floor and landing[1] > far
                     and farthest-landing[1] >= .01):
