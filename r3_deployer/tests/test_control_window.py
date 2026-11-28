@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QBuffer, QIODevice, QSettings
+from PySide6.QtCore import QBuffer, QIODevice, QPoint, QRect, QSettings
 from PySide6.QtGui import QColor, QImage, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea, QStyle, QStyleOptionFrame
 
 from r3_deployer import control_window, qt_view, settings, task_report
 from r3_deployer.qt_theme import ConsoleTheme
@@ -92,6 +92,57 @@ class ControlWindowTests(unittest.TestCase):
         self.window._log("test log")
         self.view.clear_log_button.click()
         self.assertEqual(self.view.log.toPlainText(), "")
+
+    def test_angle_editor_shows_the_entire_signed_value_with_the_caret_at_either_end(self):
+        combo = self.view.drop_yaw
+        editor = combo.lineEdit()
+        for theme in ConsoleTheme:
+            self.view.theme = theme
+            self.view._apply_theme()
+            combo.setFocus()
+            for angle in ("-90", "+90"):
+                with self.subTest(theme=theme, angle=angle):
+                    combo.setCurrentText(angle)
+                    self.application.processEvents()
+                    option = QStyleOptionFrame()
+                    editor.initStyleOption(option)
+                    contents = editor.style().subElementRect(QStyle.SE_LineEditContents, option, editor)
+                    width = contents.marginsRemoved(editor.textMargins()).width()
+                    text_width = editor.fontMetrics().horizontalAdvance(angle)
+                    # QLineEdit reserves two pixels on either side of its text.
+                    self.assertGreaterEqual(width, text_width + 4)
+                    editor.setCursorPosition(0)
+                    left = editor.cursorRect().x()
+                    editor.setCursorPosition(len(angle))
+                    self.assertAlmostEqual(editor.cursorRect().x() - left, text_width, delta=1)
+
+    def test_task_controls_fit_and_remain_reachable_at_scaled_window_sizes(self):
+        # Logical client sizes from normal windows and maximized 1080p at 125% / 150%.
+        for width, height in ((1170, 740), (1536, 788), (1280, 656)):
+            with self.subTest(width=width, height=height):
+                self.window.resize(width, height)
+                self.application.processEvents()
+                self.assertLessEqual(self.window.width(), width)
+                self.assertLessEqual(self.window.height(), height)
+                view = self.view
+                task_controls = (view.drop_yaw, *view.task_buttons.values(), view.task_hint,
+                                 view.reset_empty_button, view.progress_bar, view.progress_label)
+                rectangles = [QRect(widget.mapTo(view, QPoint()), widget.size()) for widget in task_controls]
+                for upper, lower in zip(rectangles, rectangles[1:]):
+                    self.assertLess(upper.bottom(), lower.top(), "Task controls must not overlap")
+                for widget in (view.scan_button, view.robot_status, *task_controls):
+                    self.assertTrue(widget.isVisible())
+                    ancestor = widget.parentWidget()
+                    while ancestor is not None:
+                        if isinstance(ancestor, QScrollArea):
+                            ancestor.ensureWidgetVisible(widget, 0, 0)
+                            self.application.processEvents()
+                            viewport = ancestor.viewport()
+                            visible = QRect(widget.mapTo(viewport, QPoint()), widget.size())
+                            self.assertTrue(viewport.rect().contains(visible),
+                                            f"{widget!r} occupies {visible} within {viewport.rect()}")
+                        ancestor = ancestor.parentWidget()
+                    self.assertTrue(view.rect().contains(QRect(widget.mapTo(view, QPoint()), widget.size())))
 
     def test_open_action_chain_edits_workspace_source(self):
         with TemporaryDirectory() as directory:

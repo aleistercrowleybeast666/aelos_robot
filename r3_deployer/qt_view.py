@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QPlainTextEdit,
     QProgressBar,
@@ -160,8 +161,8 @@ class ControlView(QWidget):
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self._build_control(), "控制")
         self.tabs.addTab(self._build_pi(), "SSH配置与程序部署")
-        layout.addWidget(self.tabs, 1)
-        layout.addWidget(self._build_log())
+        layout.addWidget(self.tabs, 5)
+        layout.addWidget(self._build_log(), 1)
         self.status_label = _Label_Create("就绪", role="muted")
         self.status_label.setMinimumHeight(19)
         layout.addWidget(self.status_label)
@@ -226,21 +227,28 @@ class ControlView(QWidget):
 
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(10)
-        state, state_layout = _Panel_Create("机器人状态")
+        right.setSpacing(8)
+        right.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        state, state_layout = _Panel_Create(margin=12)
+        state_header = QHBoxLayout()
+        state_header.addWidget(_Label_Create("机器人状态", role="cardHeading"))
+        state_header.addStretch(1)
+        self.scan_button = _Button_Create("读取 Tag")
+        state_header.addWidget(self.scan_button)
+        state_layout.addLayout(state_header)
         self.robot_status = _Label_Create("连接后读取运行状态", wrap=True)
         self.robot_status.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.robot_status.setMinimumHeight(42)
         state_layout.addWidget(self.robot_status)
-        self.scan_button = _Button_Create("读取 Tag")
-        state_layout.addWidget(self.scan_button, 0, Qt.AlignmentFlag.AlignLeft)
         right.addWidget(state)
 
-        tasks, task_layout = _Panel_Create("自动任务")
+        tasks, task_layout = _Panel_Create("自动任务", margin=12)
+        task_layout.setSpacing(6)
         angle_row = QHBoxLayout()
-        angle_label = _Label_Create("放物转角（度，负左正右）")
+        angle_label = _Label_Create("放物转角（度）")
         self.drop_yaw = _ConsoleComboBox()
         self.drop_yaw.setEditable(True)
+        self.drop_yaw.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.drop_yaw.setMinimumContentsLength(5)
         self.drop_yaw.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.drop_yaw.setCompleter(None)
         self.drop_yaw.addItems(["-90", "-45", "0", "+45", "+90"])
@@ -250,14 +258,14 @@ class ControlView(QWidget):
         number_locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
         validator.setLocale(number_locale)
         self.drop_yaw.setValidator(validator)
-        self.drop_yaw.lineEdit().setPlaceholderText("-90 至 +90")
+        self.drop_yaw.lineEdit().setPlaceholderText("填角度")
         self.drop_yaw.setAccessibleName(angle_label.text())
         angle_label.setBuddy(self.drop_yaw)
         angle_row.addWidget(angle_label)
         angle_row.addStretch(1)
         angle_row.addWidget(self.drop_yaw)
         task_layout.addLayout(angle_row)
-        task_layout.addWidget(_Label_Create("连续搬运第二趟向相反方向放物", role="muted"))
+        task_layout.addWidget(_Label_Create("负左正右，连续搬运第二趟反向放物", role="muted", wrap=True))
         self.task_buttons = {}
         for number, title in _TASKS.items():
             button = _Button_Create(title, "task")
@@ -285,10 +293,16 @@ class ControlView(QWidget):
         right.addWidget(tasks)
         right.addStretch(1)
         column = QWidget()
-        column.setMinimumWidth(281)
-        column.setMaximumWidth(345)
+        column.setObjectName("scrollBody")
         column.setLayout(right)
-        layout.addWidget(column)
+        sidebar = QScrollArea()
+        sidebar.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar.setWidgetResizable(True)
+        sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar.setWidget(column)
+        sidebar.setMinimumWidth(356)
+        sidebar.setMaximumWidth(400)
+        layout.addWidget(sidebar)
         return page
 
     @staticmethod
@@ -362,6 +376,7 @@ class ControlView(QWidget):
 
     def _build_log(self):
         panel, layout = _Panel_Create(margin=10)
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         log_header = QHBoxLayout()
         log_header.addWidget(_Label_Create("运行日志", role="cardHeading"))
         log_header.addStretch(1)

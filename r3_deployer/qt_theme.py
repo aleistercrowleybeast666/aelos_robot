@@ -181,6 +181,12 @@ QWidget#controlView QComboBox::down-arrow {
     width: 0;
     height: 0;
 }
+QWidget#controlView QComboBox QLineEdit {
+    padding: 0;
+    border: none;
+    min-height: 0;
+    background: transparent;
+}
 QWidget#controlView QComboBox QAbstractItemView {
     background: ${surface};
     color: ${text};
