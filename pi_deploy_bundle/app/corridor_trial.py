@@ -57,6 +57,7 @@ _TAG2_CARRIED_MAX_YAW_DEG = 12.
 _TAG2_CAUTION_LATERAL_M = .05
 _TAG2_EDGE_PROBE_LATERAL_M = .10
 _TAG2_APPROACH_NEAR_MARGIN_M = .025
+_TAG2_FAR_EDGE_PROBE_MARGIN_M = .01
 _TAG2_CLEARANCE_YAW_DEG = 22.
 _TAG3_CLEARANCE_YAW_DEG = 20.
 _TAG3_PERIPHERAL_BODY_BEARING_DEG = 50.
@@ -2161,6 +2162,37 @@ def _tag2_departure_distance_ok(plan, settings):
             and hi - lo <= .006)
 
 
+def _tag2_allow_far_edge_probe(robot, nav, leg, trim, plan, scan, settings):
+    """Use the first scheduled right stride when even two forward steps may pass the near limit."""
+    if (not plan.get('confirmed_far') or not plan.get('forward_would_cross_minimum')
+            or 'minimum_strafe_distance_m' not in settings or trim.get('heading_reference') != 'applied'
+            or not callable(getattr(robot, 'corridor_side_action', None))):
+        return False
+    stance = robot.last_action_completed_ros_ns
+    after, stamp = scan.get('after_ns'), plan['latest_stamp_ns']
+    live = VisualCamera_GetFreshnessCheck(nav.io)
+    if (type(stance) is not int or type(after) is not int or not 0 < stance <= after < stamp
+            or live is None or not live(stamp)):
+        return False
+    low, high = plan['distance_bounds_m']
+    far = settings['distance_window_m'][1]
+    yaw = plan['max_abs_yaw_deg']
+    drift = _RECOVERY_STRAFE_UPPER_M * sin(radians(yaw))
+    if (not far < low <= high or high - low > .006 or yaw > 4.
+            or plan['max_heading_deviation_deg'] > 3. or plan['projection_bounds'][0] < .85
+            or plan['max_abs_lateral_m'] > _TAG2_CAUTION_LATERAL_M
+            or low - drift < settings['minimum_strafe_distance_m']
+            or high + drift > far + _TAG2_FAR_EDGE_PROBE_MARGIN_M):
+        return False
+    leg['tag2_narrow_departure'] = True
+    leg['tag2_backward_clearance_allowed'] = False
+    detail = 'Tag 2 略超远侧边界，再前进两步可能过近，先右跨一步再查航向。'
+    trim.update(ready_to_strafe=True, measured_landing_m=(low, high), last_approach_reason=detail,
+                far_edge_probe_depth_bounds_m=(low - drift, high + drift))
+    _report_progress(robot, 'cmd0_corridor_leg', 2, 3, leg=leg, reason_zh=detail)
+    return True
+
+
 def _tag2_reframe_for_view(robot, nav, profile, leg, *, operation, distance_m, reserved_actions,
                            fresh_turn_pose=None, monitor_only=False, heading_clearance=False):
     if (leg.get('tag2_close_reframe') or leg.get('tag2_far_reframe') or leg.get('tag2_heading_clearance')
@@ -2676,6 +2708,11 @@ def _tag2_guarded_approach(robot, nav, profile, leg, initial, settings, plan, *,
                 if floor <= depth[0] - drift and depth[1] + drift <= far:
                     initial['three_stride_landing_stamp_ns'] = hint['latest_stamp_ns']
             return pose, True
+        if _tag2_allow_far_edge_probe(robot, nav, leg, initial, current, checkpoint.get('scan') or {}, settings):
+            check['status'] = 'visual_far_edge_probe'
+            leg['tag2_side_hint'] = hint
+            initial['protocol_completed'] = True
+            return pose, True
         break
     initial['last_approach_reason_zh'] = 'Tag 2 分组进近后，右跨起点或航向仍未确认。'
     return {}, False
@@ -2837,6 +2874,9 @@ def _execute_tag2_approach(robot, nav, profile, pose, leg, initial, settings, *,
     if not step_count:
         ready = lateral_clearance_recovered or (_tag2_departure_distance_ok(latest, settings)
                                                 and not _tag2_departure_conflict(latest, settings))
+        if not ready and refreshed and _tag2_allow_far_edge_probe(
+                robot, nav, leg, initial, latest, initial.get('after_scan') or {}, settings):
+            return pose, True
         initial['ready_to_strafe'] = ready
         if ready:
             initial['measured_landing_m'] = latest['distance_bounds_m']
