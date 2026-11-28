@@ -1,0 +1,342 @@
+{
+  "after_update": false,
+  "command": 0,
+  "received_at": "2026-11-28T15:30:30.153+08:00",
+  "result": {
+    "accepted": true,
+    "client_startup_timing": {
+      "device_check_s": 0.5777243000047747,
+      "dispatch_to_accept_s": 0.4357641000242438,
+      "ssh_connect_s": 0.40958090001367964
+    },
+    "diagnostic": {
+      "current_operation": {
+        "cancelled": true,
+        "complete": false,
+        "dispatched": true,
+        "drained": false,
+        "op": "grab_single",
+        "request_nonce": "e661821b045f43da8f0c51198c708195",
+        "started": true
+      },
+      "empty_stand_receipt": null,
+      "epoch": 1,
+      "expected_wire_abi": 42,
+      "in_flight": true,
+      "last_key": 0,
+      "last_rejection": null,
+      "last_result": {
+        "cancelled": true,
+        "complete": false,
+        "dispatched": true,
+        "drained": false,
+        "ignored_predispatch_complete": 0,
+        "ignored_predispatch_start": 0,
+        "native": "leju_42bfb22386af1ab3075928f91440cd01",
+        "op": "grab_single",
+        "operation_seq": 7,
+        "protocol_completed": false,
+        "reason": "local trigger/client cancelled",
+        "request_nonce": "e661821b045f43da8f0c51198c708195",
+        "started": true
+      },
+      "mcu_last_contact_age_s": 0.5875542029999963,
+      "mcu_last_contact_source": "request",
+      "mcu_ready": true,
+      "micro_trial": {
+        "angle_evidence": "source_nominal",
+        "boot_id": "bc388ac4-fe30-433d-aa4a-fede07879f90",
+        "capability": null,
+        "capability_verified": false,
+        "cmd0_right5_capability_verified": false,
+        "cmd0_right5_deployment_readback_ready": false,
+        "cmd0_right5_ready": false,
+        "cmd0_route_capability_verified": false,
+        "cmd0_route_deployment_readback_ready": true,
+        "cmd0_route_ready": false,
+        "contract": "r3.single_micro_turn.v1",
+        "correction_profile_probe_supported": true,
+        "current_boot_file_readback_claimed": false,
+        "deployment_evidence_scope": "persistent_mcu_files_until_next_deployment",
+        "deployment_readback_ready": true,
+        "empty_forward4_ready": false,
+        "empty_recovery_deployment_readback_ready": false,
+        "empty_recovery_ready": false,
+        "empty_strafe_group_ready": false,
+        "guarded_trial_confirmed": false,
+        "initial_reload_boot_id": "9e2267bf-51af-4e2a-9879-867d224fe3f5",
+        "measured_degrees": null,
+        "medium_turn_capability_verified": false,
+        "medium_turn_deployment_readback_ready": true,
+        "medium_turn_ready": false,
+        "native_immediate_stop": false,
+        "nominal_degrees": 5,
+        "pair_deployment_readback_ready": false,
+        "pair_live_capability_verified": false,
+        "physical_health_verified": false,
+        "pickup_backward4_deployment_readback_ready": false,
+        "pickup_backward4_ready": false,
+        "pickup_backward6_deployment_readback_ready": false,
+        "pickup_backward6_ready": false,
+        "pickup_backward8_deployment_readback_ready": false,
+        "pickup_backward8_ready": false,
+        "pickup_level_backward8_ready": false,
+        "placement_profile_probe_supported": true,
+        "ready": false,
+        "small_strafe_capability_verified": false,
+        "small_strafe_deployment_readback_ready": true,
+        "small_strafe_profile": null,
+        "small_strafe_ready": false,
+        "standing_start_deployment_readback_ready": false
+      },
+      "mission_v5_pair_ops": [],
+      "mission_v5_pair_ready": false,
+      "mission_v5_ready": false,
+      "mode": "manual",
+      "native_immediate_cancel": false,
+      "operation_seq": 7,
+      "owner_version": "r3-visual-pickup-20261109-v5",
+      "published_at_s": 1794234404.2002532,
+      "reason": "local trigger/client cancelled",
+      "recovery_gate": {
+        "body_commands": 0,
+        "epoch": 1,
+        "mcu_guard_online_status_available": false,
+        "operator": null,
+        "physical_load_sensor_confirmation": false,
+        "ready": false,
+        "reason": "cancel/takeover invalidated recovery acknowledgment",
+        "remaining_s": 0.0,
+        "session": "4c8aea56524346d5991e6cc1c4b58ebc",
+        "temperature_sensor_available": false
+      },
+      "restart_requires_empty_reset": true,
+      "robot_id": 3,
+      "schema": "r3.simple.v1",
+      "session": "4c8aea56524346d5991e6cc1c4b58ebc",
+      "standing_start_supported": false
+    },
+    "elapsed_s": 6.045433052000007,
+    "event": "done",
+    "events": [
+      {
+        "stage_timing": {
+          "elapsed_s": 0.1154434259999988,
+          "stage": "micro_capability"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.8621956670000088,
+          "magnetic_attempts": [
+            {
+              "configured": true,
+              "fault": null,
+              "fresh_rows": 5,
+              "last_verified_receipt_age_s": 0.0038169809999999416,
+              "recoverable_interruption": false,
+              "required_rows": 3,
+              "verified": true
+            }
+          ],
+          "parallel_read_only": true,
+          "readers_s": {
+            "camera": 0.23825616700000296,
+            "magnetic": 0.792443739999996
+          },
+          "stage": "sensor_preflight",
+          "unjoined_readers": [],
+          "wall_elapsed_s": 0.8621940919999957
+        }
+      },
+      {
+        "body_commands": 0,
+        "magnetic_capture_ready": true,
+        "mcu_guard_online_status_available": false,
+        "parallel_read_only": true,
+        "pre_stand_sample_not_route_baseline": true,
+        "sensor_preflight": "fresh camera and AR stream"
+      },
+      {
+        "stage_timing": {
+          "action": "stand",
+          "completed_monotonic": 123.478520147,
+          "completed_ros_ns": 1794234399706372022,
+          "elapsed_s": 0.5891187400000035,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 122.889401407
+        }
+      },
+      {
+        "initial_stand": "protocol_completed",
+        "may_release_object": true,
+        "physical_posture_confirmed": false
+      },
+      {
+        "segment_heading_reference": {
+          "claim": "straight-segment drift only; planned turn error and absolute route heading unknown",
+          "correction_actions": 0,
+          "reference": {
+            "absolute_route_heading_known": false,
+            "action_completed_monotonic": 123.478520147,
+            "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+            "capture_session": "e95c02d14e0e4a6981dd9df574a04d68",
+            "capture_verified": true,
+            "decision_after_monotonic": 123.628520147,
+            "decision_capture_times": [
+              123.71546668399999,
+              123.81722435,
+              123.92101866499999
+            ],
+            "decision_receipt_times": [
+              124.019812832,
+              124.123855924,
+              124.22139211
+            ],
+            "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+            "load": "empty",
+            "load_epoch": 2,
+            "norm": 1453.937719843406,
+            "norm_basis": "calibrated_horizontal",
+            "offset_deg": 178.0,
+            "owner_observation_scope": [
+              "4c8aea56524346d5991e6cc1c4b58ebc",
+              0
+            ],
+            "planned_turn_error_measured": false,
+            "raw_heading_deg": 181.99999999999997,
+            "raw_norm": 1229.442963296793,
+            "received_monotonic": 124.242683165,
+            "route_heading_deg": 0.0,
+            "source": "relative_stationary_segment_start",
+            "stable_samples": 3,
+            "tag_id": null,
+            "usable_for_heading": true
+          },
+          "status": "relative_reference_established"
+        }
+      },
+      {
+        "stage_timing": {
+          "elapsed_s": 0.3247924069999897,
+          "stage": "heading_reference"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "free_forward",
+          "completed_monotonic": 126.496633293,
+          "completed_ros_ns": 1794234402724525928,
+          "elapsed_s": 2.221629313000008,
+          "physical_success": "unobserved",
+          "protocol_completed": true,
+          "stage": "protocol_action",
+          "started_monotonic": 124.27500398
+        }
+      },
+      {
+        "action": "free_forward",
+        "physical_success": "unobserved"
+      },
+      {
+        "stage_timing": {
+          "action": "free_forward",
+          "elapsed_s": 0.7686681849999957,
+          "stage": "post_action_heading"
+        }
+      },
+      {
+        "post_action_heading": {
+          "action": "free_forward",
+          "correction_actions": 0,
+          "error_deg": -4.0,
+          "reason": "within deadband/hysteresis",
+          "sample": {
+            "reference": {
+              "calibration_id": "91d9254924d1c94d1c6650f6acacec9b03e91b31aaf53b02f16ead495935c9b9",
+              "capture_session": "e95c02d14e0e4a6981dd9df574a04d68",
+              "capture_verified": true,
+              "freshness": "DRDY-verified atomic acquisition; conservative software time lower bound, not a hardware timestamp",
+              "load": "empty",
+              "load_epoch": 2,
+              "norm": 1553.335896235097,
+              "norm_basis": "calibrated_horizontal",
+              "offset_deg": -178.0,
+              "raw_heading_deg": 178.0,
+              "raw_norm": 1312.3456099671305,
+              "received_monotonic": 127.26253183,
+              "route_heading_deg": 0.0,
+              "source": "sampling_probe",
+              "tag_id": null,
+              "usable_for_heading": true
+            },
+            "status": "updated"
+          },
+          "status": "monitor_only"
+        }
+      },
+      {
+        "stage_timing": {
+          "action": "grab_single",
+          "elapsed_s": 0.5823828520000092,
+          "protocol_completed": false,
+          "stage": "protocol_action",
+          "started_monotonic": 127.345764385
+        }
+      },
+      {
+        "fall_diagnostic": {
+          "action": "grab_single",
+          "diagnostic_only": true,
+          "front_back": null,
+          "magnetic_samples": 36,
+          "posture_verified": false,
+          "recovery_dispatched": false,
+          "status": "no_persistent_magnetic_change"
+        }
+      }
+    ],
+    "exit_code": 1,
+    "native_immediate_stop": false,
+    "ok": false,
+    "reason": "operation grab_single failed; reason=local trigger/client cancelled; last_result={'op': 'grab_single', 'native': 'leju_42bfb22386af1ab3075928f91440cd01', 'request_nonce': 'e661821b045f43da8f0c51198c708195', 'operation_seq': 7, 'protocol_completed': False, 'reason': 'local trigger/client cancelled', 'dispatched': True, 'started': True, 'complete': False, 'cancelled': True, 'drained': False, 'ignored_predispatch_start': 0, 'ignored_predispatch_complete': 0}; last_rejection=None; in_flight=True",
+    "startup_timing": {
+      "first_body": {
+        "action": "stand",
+        "protocol_completed_s": 1.5534306290000046,
+        "submitted_s": 1.0126936289999975
+      },
+      "first_route_action": {
+        "action": "free_forward",
+        "protocol_completed_s": 4.571524644999997,
+        "submitted_s": 2.3731501099999974
+      },
+      "owner_prepare_s": 0.13254177800000377,
+      "preflight": {
+        "elapsed_s": 0.8919885550000117,
+        "overlap_s": 0.12794325900000558,
+        "probe_s": 0.1281172040000058,
+        "sensor_s": 0.8630150919999977
+      },
+      "preparation_calls": [
+        {
+          "action": "begin",
+          "returned_s": 1.9767190540000001,
+          "submitted_s": 1.5975836470000075
+        }
+      ],
+      "reused_mcu_route_probe": "medium_turn_capability"
+    },
+    "status": "stopped_no_further_auto_macros"
+  },
+  "schema": "r3.console.task-report.v1",
+  "summary_zh": {
+    "diagnostics": [
+      "上位机启动耗时 · SSH 连接 0.41 秒 · 启动前状态核对 0.58 秒 · 发令至树莓派接收 0.44 秒",
+      "最近航向诊断 · free_forward · 纠偏前 -4.00° · within deadband/hysteresis"
+    ],
+    "reason": "动作 grab_single 执行失败 · local trigger/client cancelled"
+  }
+}
