@@ -34,6 +34,7 @@ _CAMERA_STALE_S = 2.0
 _CAMERA_OFFLINE = "机器人离线，预览已关闭"
 _CONNECT_RETRY_DELAY_S = 1.0
 _BOOT_CONNECT_WINDOW_S = 90.0
+_EMPTY_STATUS_RETRIES = 2
 _MCU_RECONNECT_TIMEOUT_S = 60.0
 _TASK_NAMES = (
     "单程搬运原始物资",
@@ -580,6 +581,7 @@ class _ControlWindow(QMainWindow):
             started = time.monotonic()
             deadline = started + _BOOT_CONNECT_WINDOW_S
             phase = None
+            empty_replies = 0
             while not wait.is_set():
                 try:
                     status = api.status()
@@ -591,11 +593,17 @@ class _ControlWindow(QMainWindow):
                     legacy_socket_error = (status.get("status") == "not_started_or_stopped"
                                            and status.get("reason") in ("[Errno 2] No such file or directory",
                                                                         "[Errno 111] Connection refused"))
-                    if status.get("status") != "owner_socket_starting" and not legacy_socket_error:
+                    if status.get("status") == "empty_status_response":
+                        empty_replies += 1
+                        if empty_replies > _EMPTY_STATUS_RETRIES or time.monotonic() >= deadline:
+                            return dict(status, reason=f"SSH 已连通，状态程序 {empty_replies} 次退出码为 0 但没有返回状态。请检查树莓派程序。")
+                        current = "SSH 已连通，本次没有收到状态，正在重读…"
+                    elif status.get("status") == "owner_socket_starting" or legacy_socket_error:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("SSH 已连通，等待 R3 控制服务上线超时。")
+                        current = "SSH 已连通，正在等待 R3 控制服务上线…"
+                    else:
                         return dict(status, connect_wait_s=time.monotonic() - started)
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("SSH 已连通，等待 R3 控制服务上线超时。")
-                    current = "SSH 已连通，正在等待 R3 控制服务上线…"
                 if current != phase:
                     self._events.put(("connect_phase", context, current))
                     phase = current

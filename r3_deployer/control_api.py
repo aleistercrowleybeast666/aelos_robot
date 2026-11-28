@@ -136,13 +136,16 @@ class _Reply:
         else:
             self.log(line)
 
-    def finish(self, exit_code):
+    def finish(self, exit_code, action):
         for stderr, remaining in enumerate(self.pending):
             self._line(remaining, bool(stderr))
         preferred = self.stderr_result if exit_code else self.stdout_result
         result = preferred or self.stdout_result or self.stderr_result
+        if result is None and action == 'status' and exit_code == 0 and self.bytes_read == 0:
+            return {'ok': False, 'status': 'empty_status_response', 'accepted': False, 'exit_code': 0,
+                    'reason': 'SSH 已连通，状态程序退出码为 0，但没有返回状态。'}
         if result is None or exit_code < 0:
-            raise RuntimeError('树莓派未返回可确认的 R3 结果。')
+            raise RuntimeError(f'树莓派程序退出码为 {exit_code}，没有返回可识别的 R3 回执。')
         return dict(result, ok=exit_code == 0, exit_code=exit_code,
                     accepted=self.accepted or result.get('accepted') is True)
 
@@ -180,6 +183,15 @@ class RobotApi:
         # An alternate upload path does not move the already-installed ROS owner.
         entry = PurePosixPath(settings.DEFAULT_PI_PATH) / 'warm_client.py'
         command = shlex.join(['python3', '-B', '-u', str(entry), *arguments])
+        if arguments[0] == 'status':
+            # Python successfully exits without output when the entry script is zero bytes.
+            guards = []
+            for flag, status, problem in (('-f', 'control_client_missing', '缺少文件'),
+                                          ('-s', 'control_client_empty', '文件为 0 字节')):
+                reason = f'SSH 已连通，树莓派控制程序 {entry} {problem}。请在「SSH配置与程序部署」中重新部署树莓派程序。'
+                diagnostic = shlex.quote(json.dumps({'status': status, 'reason': reason}))
+                guards.append(f"test {flag} {shlex.quote(str(entry))} || {{ printf '%s\\n' {diagnostic} >&2; exit 1; }}")
+            command = '; '.join([*guards, 'exec ' + command])
         reply = _Reply(log)
         timeout = {'scan': _SCAN_TIMEOUT_S, 'status': _STATUS_TIMEOUT_S}.get(arguments[0], _RESPONSE_TIMEOUT_S)
         try:
@@ -212,7 +224,7 @@ class RobotApi:
                             and not channel.recv_ready() and not channel.recv_stderr_ready()):
                         if exit_code < 0:
                             raise deploy.SshLinkError('SSH 通道已关闭，未收到结束回执。')
-                        result = reply.finish(exit_code)
+                        result = reply.finish(exit_code, arguments[0])
                         if motion and result.get('event') != 'done':
                             observed = result.get('observed_status')
                             if (result.get('status') != 'not_started_or_stopped'

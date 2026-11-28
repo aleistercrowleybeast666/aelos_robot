@@ -79,9 +79,11 @@ def _manifest_files(manifest):
             or document.get('owner_directory') != remote.OWNER_DIR.as_posix()):
         raise ValueError('部署来源缺少适用的 R3 树莓派部署包清单。')
     files = document.get('files')
-    mandatory = {'app/run_auto.py', 'app/task_runner.py', 'owner/'+remote.OWNER_NAME}
-    if not isinstance(files, dict) or not mandatory <= files.keys() or len(files) > _MAX_BUNDLE_FILES:
-        raise ValueError('部署清单的文件数量无效或缺少必需的程序。')
+    if not isinstance(files, dict) or len(files) > _MAX_BUNDLE_FILES:
+        raise ValueError('部署清单的文件数量无效。')
+    missing = remote.REQUIRED_PROGRAMS - files.keys()
+    if missing:
+        raise ValueError('部署清单缺少必需程序：'+', '.join(sorted(missing)))
     parents = set()
     for name, digest in files.items():
         path = PurePosixPath(name)
@@ -98,6 +100,8 @@ def _manifest_files(manifest):
 
 
 def _verify_bundle_file(data, name, digest):
+    if name in remote.REQUIRED_PROGRAMS and not data:
+        raise ValueError('部署包中的必需程序为空：'+name)
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError('部署包文件哈希不匹配：'+name)
     return data
@@ -357,8 +361,11 @@ def operate(action, values, entered_password, log, *, mcu_readback=None):
         with paramiko.SSHClient() as ssh:
             log('连接 {}:{}…'.format(values['host'], values['port']))
             _connect(ssh, values, secret)
-            report = _remote(ssh, values, 'inspect')
+            report = (_remote(ssh, values, 'inspect', for_deploy=True)
+                      if action == 'deploy' else _remote(ssh, values, 'inspect'))
             log('已校验 R3 机体身份与目标目录。')
+            if report.get('recovery_session'):
+                log('控制入口损坏，已通过 ROS 独立状态确认空闲，准备恢复部署。')
             if action == 'check':
                 log(json.dumps(report, ensure_ascii=False, indent=2))
                 return report
@@ -372,6 +379,8 @@ def operate(action, values, entered_password, log, *, mcu_readback=None):
                 log('校验并交换整目录。默认路径会重载 ROS 运动控制节点…')
                 try:
                     commit = {'id': stage['id']}
+                    if 'recovery_session' in report:
+                        commit['recovery_session'] = report['recovery_session']
                     if receipt is not None:
                         commit['mcu_readback'] = receipt
                     result = _remote(ssh, values, 'commit', **commit)

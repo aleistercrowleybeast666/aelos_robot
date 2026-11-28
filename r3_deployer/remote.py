@@ -1,6 +1,7 @@
 """Standard-library transaction helper executed on the verified R3 Pi."""
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import uuid
 DEFAULT_PATH = Path('/home/lemon/aelos_auto_r3_python')
 OWNER_DIR = Path('/home/lemon/catkin_ws/src/aelos_smart_ros/scripts/CMDcontrol_node')
 OWNER_NAME = 'r3_auto_warm.py'
+REQUIRED_PROGRAMS = frozenset(('app/warm_client.py', 'app/run_auto.py', 'app/task_runner.py', 'owner/'+OWNER_NAME))
 _SERIAL_ORIGINAL_SHA = 'c2d0a64de4e28a3b8e914d623f4a8ba56f30533963cf50f6c5c394ee4f4981e2'
 _SERIAL_TIMED_SHA = '8f396415968782628aaff3276af2a604e0ae9e34c7fc73556101be6ed1e6b09d'
 OWNER_SUPPORT = ('r3_micro_gate.py', 'r3_auto_gate.py')
@@ -187,12 +189,90 @@ def _status(require_idle=False):
     return row
 
 
-def _ros(*args):
+def _Ros_Run(*args):
     script = ('for setup in /opt/ros/noetic/setup.bash "$HOME/ros_catkin_ws/install_isolated/setup.bash" '
               '"$HOME/catkin_ws/devel/setup.bash"; do '
-              'if test -r "$setup"; then . "$setup" >/dev/null; fi; done; exec rosnode "$@"')
+              'if test -r "$setup"; then . "$setup" >/dev/null; fi; done; exec "$@"')
     return subprocess.run(['bash', '-c', script, 'r3-deploy', *args],
                           text=True, capture_output=True, timeout=10, check=True).stdout
+
+
+def _ros(*args):
+    return _Ros_Run('rosnode', *args)
+
+
+def _Gate_CheckWarmLock(pid):
+    # The ROS gate lacks warm-task activity. A vanished socket may still have an
+    # owner with an accepted task. The unprivileged SSH user can read /proc/locks.
+    lock = _regular(Path.home()/'.local/state/r3_simple/warm.lock', optional=True)
+    info = lock.stat() if lock.is_file() else None
+    mount = next(parent for parent in lock.parents if parent.exists()).stat()
+    device = (os.major(mount.st_dev), os.minor(mount.st_dev))
+    for line in Path('/proc/locks').read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 6 or fields[1:4] != ['FLOCK', 'ADVISORY', 'WRITE']:
+            continue
+        major, minor, inode = fields[5].split(':')
+        if (int(major, 16), int(minor, 16)) != device:
+            continue
+        # A matching owner with a different inode may hold an unlinked warm.lock.
+        if int(fields[4]) == pid or (info is not None and int(inode) == info.st_ino):
+            raise RuntimeError('R3 控制进程仍持有任务服务锁，无法通过备用状态确认空闲。')
+
+
+def _Gate_ReadIdleOwner():
+    pid = _node_pid()
+    _Gate_CheckWarmLock(pid)
+    probe = """import json, rospy
+from std_msgs.msg import String
+rospy.init_node('r3_deploy_status', anonymous=True, disable_signals=True)
+message = rospy.wait_for_message('/r3_auto/status', String, timeout=3)
+print(json.dumps([message._connection_header.get('callerid'), json.loads(message.data)]))
+"""
+    try:
+        raw = _Ros_Run('python3', '-c', probe)
+        publisher, owner = json.loads(raw.strip().splitlines()[-1])
+    except (subprocess.SubprocessError, ValueError, IndexError, TypeError) as exc:
+        raise RuntimeError('读取 ROS 独立状态 /r3_auto/status 失败，无法确认可恢复部署。') from exc
+    if (publisher != NODE or not isinstance(owner, dict) or owner.get('schema') != 'r3.simple.v1'
+            or owner.get('robot_id') != 3 or owner.get('expected_wire_abi') != 42
+            or owner.get('owner_version') != OWNER_VERSION
+            or not re.fullmatch(r'[0-9a-f]{32}', str(owner.get('session', '')))):
+        raise RuntimeError('ROS 独立状态未确认 R3 的发布节点、身份、ABI 或会话。')
+    published = owner.get('published_at_s')
+    if type(published) not in (int, float) or not 0 <= time.time() - published <= 2:
+        raise RuntimeError('ROS 独立状态的采样时间异常或已过期。')
+    if (owner.get('mode') != 'manual' or owner.get('in_flight') is not False
+            or 'current_operation' not in owner or owner['current_operation'] is not None
+            or owner.get('task_active', False) is not False):
+        raise RuntimeError('ROS 独立状态未确认手动空闲，不能进行恢复部署。')
+    _Gate_CheckWarmLock(pid)
+    return owner
+
+
+def _Deployment_Status(root, require_idle):
+    try:
+        return _status(require_idle=require_idle)
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ECONNREFUSED) or root != DEFAULT_PATH:
+            raise
+        marker = _regular(root/MARKER, optional=True)
+        if not marker.is_file():
+            raise
+        record = _json(marker)
+        if (not isinstance(record, dict) or record.get('path') != str(root)
+                or not re.fullmatch(r'[0-9a-f]{32}', str(record.get('id', '')))
+                or not re.fullmatch(r'[0-9a-f]{64}', str(record.get('bundle_sha256', '')))):
+            raise RuntimeError('当前 R3 部署记录未确认，不能使用 ROS 独立状态恢复。') from exc
+        for name in sorted(REQUIRED_PROGRAMS):
+            folder, filename = name.split('/')
+            path = _regular((root if folder == 'app' else OWNER_DIR)/filename, optional=True)
+            if not path.exists() or path.stat().st_size == 0:
+                break
+        else:
+            raise
+    owner = _Gate_ReadIdleOwner()
+    return {'owner': owner, 'task_active': False, 'recovery_session': owner['session']}
 
 
 def _node_pid():
@@ -255,6 +335,29 @@ def _exchange(left, right):
         raise OSError(code, os.strerror(code), str(right))
 
 
+def _Path_Sync(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _Stage_Sync(slot):
+    # SFTP close and checksum readback can both finish while data is still in the Pi's page cache.
+    for directory, _, files in os.walk(slot, topdown=False):
+        parent = Path(directory)
+        for name in files:
+            _Path_Sync(_regular(parent/name))
+        _Path_Sync(parent)
+    _Path_Sync(slot.parent)
+
+
+def _Exchange_SyncParents(left, right):
+    _Path_Sync(left.parent)
+    _Path_Sync(right.parent)
+
+
 def _atomic_bytes(path, data, *, owner_stat=None):
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     fd, name = tempfile.mkstemp(prefix='.r3-deploy-', dir=path.parent)
@@ -265,9 +368,10 @@ def _atomic_bytes(path, data, *, owner_stat=None):
             out.flush()
             if owner_stat is not None and os.fstat(out.fileno()).st_gid != owner_stat.st_gid:
                 os.fchown(out.fileno(), -1, owner_stat.st_gid)
+            temp.chmod(mode)
             os.fsync(out.fileno())
-        temp.chmod(mode)
         os.replace(temp, path)
+        _Path_Sync(path.parent)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -345,14 +449,18 @@ def _bundle(slot):
     if manifest.get('schema') != 'r3.pi-deploy.v1' or manifest.get('owner_directory') != str(OWNER_DIR):
         raise RuntimeError('Unexpected R3 bundle schema or owner directory.')
     files = manifest['files']
-    if not {'app/run_auto.py', 'app/task_runner.py', 'owner/'+OWNER_NAME} <= files.keys():
-        raise RuntimeError('Application bundle is incomplete.')
+    missing = REQUIRED_PROGRAMS - files.keys()
+    if missing:
+        raise RuntimeError('部署包缺少必需程序：'+', '.join(sorted(missing)))
     found = {path.relative_to(slot).as_posix() for part in ('app', 'owner')
              for path in (slot/part).rglob('*') if path.is_file() or path.is_symlink()}
     if found != files.keys():
         raise RuntimeError('Uploaded files do not match the bundle manifest.')
     for name, sha in files.items():
-        if _digest(_regular(slot/_relative(name))) != sha:
+        path = _regular(slot/_relative(name))
+        if name in REQUIRED_PROGRAMS and not path.stat().st_size:
+            raise RuntimeError('部署包中的必需程序为空：'+name)
+        if _digest(path) != sha:
             raise RuntimeError('Upload checksum mismatch: '+name)
     return manifest
 
@@ -420,10 +528,12 @@ def _apply_settings(root, app, manifest):
                     _copy_live(root, app, absolute.relative_to(root).as_posix())
 
 
-def _inspect(root):
+def _inspect(root, for_deploy=False):
     report = {'robot_id': 3, 'path': str(root), 'activation': 'ros_owner_reload' if root == DEFAULT_PATH else 'files_only'}
     if root == DEFAULT_PATH:
-        row = _status()
+        row = _Deployment_Status(root, require_idle=False) if for_deploy else _status()
+        if 'recovery_session' in row:
+            report['recovery_session'] = row['recovery_session']
         report.update(task_active=row.get('task_active'), owner_mode=row['owner'].get('mode'),
                       mcu_ready=row['owner'].get('mcu_ready'))
     if (root/MARKER).is_file():
@@ -478,7 +588,7 @@ def SerialReceiver_PrepareShutdown(root, slot, session):
         _atomic_bytes(backup, source)
     if _digest(backup) != digest:
         raise RuntimeError(f'串口原件备份校验失败 {backup}')
-    if _status(require_idle=True)['owner']['session'] != session or _digest(service) != digest:
+    if _Deployment_Status(root, require_idle=True)['owner']['session'] != session or _digest(service) != digest:
         raise RuntimeError('部署期间控制会话或串口程序发生变化，请重新连接后部署。')
     _regular(note, optional=True)
     _write_json(note, {'session':session, 'backup':str(backup)})
@@ -490,7 +600,24 @@ def SerialReceiver_PrepareShutdown(root, slot, session):
     raise RuntimeError(f'已修复并核验 ROS 串口退出机制，旧控制进程仍在运行。{restart} 原件备份 {backup}')
 
 
-def _commit(root, ticket, mcu_readback=None):
+def _Client_CheckStatus(root, session):
+    reply = subprocess.run([sys.executable, '-B', 'warm_client.py', 'status'], cwd=root,
+                           capture_output=True, timeout=10)
+    if reply.returncode:
+        detail = reply.stderr.decode('utf-8', errors='replace').strip()[-600:]
+        raise RuntimeError(f'warm_client.py status 退出码 {reply.returncode}：{detail}')
+    try:
+        row = json.loads(reply.stdout)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError('warm_client.py status 没有返回有效的 JSON 状态。') from exc
+    owner = row.get('owner') if isinstance(row, dict) else None
+    if (not isinstance(owner, dict) or owner.get('robot_id') != 3
+            or row.get('protocol') != 'r3.warm.v1' or row.get('event') != 'status'
+            or not session or owner.get('session') != session):
+        raise RuntimeError('warm_client.py status 未确认当前 R3 控制会话。')
+
+
+def _commit(root, ticket, mcu_readback=None, recovery_session=None):
     slot = _transaction(root, ticket)
     if slot.resolve() != slot or (slot/'receipt.json').exists():
         raise RuntimeError('Invalid or previously used deployment staging directory.')
@@ -502,6 +629,8 @@ def _commit(root, ticket, mcu_readback=None):
         mcu_readback = validate_mcu_readback(mcu_readback, _json(_regular(slot/MCU_MANIFEST_PATH)))
     app = slot/'app'
     _apply_settings(root, app, manifest)
+    if _digest(_regular(app/'warm_client.py')) != manifest['files']['app/warm_client.py']:
+        raise RuntimeError('合并现场配置后 warm_client.py 与部署清单不符。')
     subprocess.run([sys.executable, '-B', 'run_auto.py', '0', '--check'],
                    cwd=app, capture_output=True, timeout=15, check=True)
     owners = []
@@ -515,8 +644,10 @@ def _commit(root, ticket, mcu_readback=None):
         if any(owner.resolve() != owner or owner.stat().st_uid != os.getuid() for owner in owners):
             raise RuntimeError('Unexpected local ROS owner file.')
         _node_pid()
-        owner_status = _status(require_idle=True)['owner']
+        owner_status = _Deployment_Status(root, require_idle=True)['owner']
         session = owner_status['session']
+        if recovery_session is not None and session != recovery_session:
+            raise RuntimeError('从恢复检查到提交期间 R3 控制会话已更换，请重新部署。')
         SerialReceiver_PrepareShutdown(root, slot, session)
         if mcu_readback is not None:
             verified_boot = _write_mcu_readback(app, owner_status, mcu_readback)
@@ -526,14 +657,16 @@ def _commit(root, ticket, mcu_readback=None):
     _write_json(app/MARKER, receipt)
     installed = {file.relative_to(app): _digest(file) for file in app.rglob('*') if file.is_file()}
     _write_json(slot/'receipt.json', receipt)
+    _Stage_Sync(slot)
     swapped = False
     owners_changed = []
     try:
         if owners:
-            if _status(require_idle=True)['owner']['session'] != session:
+            if _Deployment_Status(root, require_idle=True)['owner']['session'] != session:
                 raise RuntimeError('Owner changed during staging.')
         _exchange(root, app)
         swapped = True
+        _Exchange_SyncParents(root, app)
         for relative, digest in installed.items():
             if _digest(_regular(root/relative)) != digest:
                 raise RuntimeError('Application readback mismatch: '+str(relative))
@@ -545,6 +678,7 @@ def _commit(root, ticket, mcu_readback=None):
                 raise RuntimeError('Owner file readback mismatch: '+owner.name)
         if owners:
             activated = _reload(session, require_new_helper=True)
+            _Client_CheckStatus(root, activated.get('owner', {}).get('session'))
             if verified_boot:
                 micro = activated.get('owner', {}).get('micro_trial', {})
                 if micro.get('cmd0_route_deployment_readback_ready') is not True:
@@ -611,6 +745,7 @@ def _commit(root, ticket, mcu_readback=None):
             _atomic_bytes(owner, _owner_backup(slot, owner.name).read_bytes())
         if swapped:
             _exchange(root, app)
+            _Exchange_SyncParents(root, app)
         if owners_changed:
             try:
                 _reload_restored(session, require_new_helper=False)
@@ -646,12 +781,17 @@ def _rollback(root):
             raise RuntimeError('Owner changed before rollback.')
     _exchange(root, backup)
     try:
+        _Exchange_SyncParents(root, backup)
         for owner, (_, old) in owners.items():
             _atomic_bytes(owner, old)
         if owners:
-            _reload(session, require_new_helper=False)
+            restored = _reload(session, require_new_helper=False)
+            # A factory installation may predate the SSH client. Managed generations must have one.
+            if (root/MARKER).is_file() or (root/'warm_client.py').exists():
+                _Client_CheckStatus(root, restored.get('owner', {}).get('session'))
     except Exception as exc:
         _exchange(root, backup)
+        _Exchange_SyncParents(root, backup)
         for owner, (current, _) in owners.items():
             _atomic_bytes(owner, current)
         try:
@@ -668,7 +808,7 @@ def execute(request):
     root = _target(request['path'])
     action = request['action']
     if action == 'inspect':
-        return _inspect(root)
+        return _inspect(root, for_deploy=request.get('for_deploy') is True)
     if action == 'stage':
         ticket = uuid.uuid4().hex
         slot = _transaction(root, ticket)
@@ -682,7 +822,7 @@ def execute(request):
     with os.fdopen(os.open(lock, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600), 'wb') as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if action == 'commit':
-            return _commit(root, request['id'], request.get('mcu_readback'))
+            return _commit(root, request['id'], request.get('mcu_readback'), request.get('recovery_session'))
         return _rollback(root)
 
 

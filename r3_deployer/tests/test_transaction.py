@@ -19,6 +19,65 @@ def _exchange(left, right):
 
 
 class OwnerRestartDiagnosticsTests(unittest.TestCase):
+    def test_ros_recovery_requires_verified_fresh_idle_gate_and_idle_endpoint(self):
+        owner = dict(schema='r3.simple.v1', robot_id=3, owner_version=remote.OWNER_VERSION,
+                     expected_wire_abi=42, session='a'*32, published_at_s=99.5,
+                     mode='manual', in_flight=False, current_operation=None)
+        with patch.object(remote, '_node_pid', return_value=42), patch.object(remote, '_Gate_CheckWarmLock') as lock, \
+                patch.object(remote.time, 'time', return_value=100), patch.object(remote, '_Ros_Run') as ros:
+            ros.return_value = json.dumps([remote.NODE, owner])
+            self.assertEqual(remote._Gate_ReadIdleOwner(), owner)
+            self.assertEqual([check.args for check in lock.call_args_list], [(42,), (42,)])
+            for changes in (dict(robot_id=4), dict(expected_wire_abi=43), dict(session=''),
+                            dict(published_at_s=97), dict(published_at_s=101), dict(mode='auto'),
+                            dict(in_flight=True), dict(task_active=True), dict(current_operation={})):
+                with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                    ros.return_value = json.dumps([remote.NODE, dict(owner, **changes)])
+                    remote._Gate_ReadIdleOwner()
+            ros.return_value = json.dumps(['/different_node', owner])
+            with self.assertRaisesRegex(RuntimeError, '发布节点'):
+                remote._Gate_ReadIdleOwner()
+            lock.side_effect = RuntimeError('warm lock held')
+            ros.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'warm lock held'):
+                remote._Gate_ReadIdleOwner()
+            ros.assert_not_called()
+
+    def test_ros_fallback_blocks_a_live_or_unlinked_warm_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            lock = home/'.local/state/r3_simple/warm.lock'
+            lock.parent.mkdir(parents=True)
+            lock.touch()
+            inode = lock.stat().st_ino
+            with patch.object(remote.Path, 'home', return_value=home), \
+                    patch.object(remote.os, 'major', return_value=179, create=True), \
+                    patch.object(remote.os, 'minor', return_value=2, create=True), \
+                    patch.object(remote.Path, 'read_text') as locks:
+                locks.return_value = '2: FLOCK ADVISORY WRITE 123 b3:02:55 0 EOF'
+                remote._Gate_CheckWarmLock(42)
+                for pid, number in ((42, inode), (123, inode), (42, inode+1)):
+                    locks.return_value = f'2: FLOCK ADVISORY WRITE {pid} b3:02:{number} 0 EOF'
+                    with self.subTest(pid=pid, number=number), self.assertRaisesRegex(RuntimeError, '服务锁'):
+                        remote._Gate_CheckWarmLock(42)
+
+    def test_connection_entry_must_report_the_activated_robot_session(self):
+        status = {'event': 'status', 'protocol': 'r3.warm.v1', 'owner': {'robot_id': 3, 'session': 'new'}}
+        bad = (b'', b'{}', b'null', b'[1]', json.dumps(dict(status, event='done')).encode(),
+               json.dumps(dict(status, owner={'robot_id': 4, 'session': 'new'})).encode(),
+               json.dumps(dict(status, owner={'robot_id': 3, 'session': 'old'})).encode())
+        with patch.object(remote.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            run.return_value.stderr = b''
+            for raw in bad:
+                with self.subTest(raw=raw), self.assertRaisesRegex(RuntimeError, 'warm_client.py status'):
+                    run.return_value.stdout = raw
+                    remote._Client_CheckStatus(Path('app'), 'new')
+            run.return_value.stdout = json.dumps(status).encode()
+            remote._Client_CheckStatus(Path('app'), 'new')
+            self.assertEqual(run.call_args.args[0][-2:], ['warm_client.py', 'status'])
+            self.assertEqual(run.call_args.kwargs['cwd'], Path('app'))
+
     def test_absent_status_socket_reports_remote_path(self):
         with patch.object(remote.socket, 'AF_UNIX', 1, create=True), patch.object(remote.socket, 'socket') as socket_factory:
             connection = socket_factory.return_value.__enter__.return_value
@@ -87,6 +146,8 @@ class DeploymentTransactionTests(unittest.TestCase):
             '_node_pid': patch.object(remote, '_node_pid', return_value=1),
             '_exchange': patch.object(remote, '_exchange', side_effect=_exchange),
             '_reload': patch.object(remote, '_reload', return_value={}),
+            '_Client_CheckStatus': patch.object(remote, '_Client_CheckStatus'),
+            '_Path_Sync': patch.object(remote, '_Path_Sync'),
         }
         self.mocks = {}
         for key, change in patches.items():
@@ -118,6 +179,87 @@ class DeploymentTransactionTests(unittest.TestCase):
         for name in remote.OWNER_SUPPORT:
             self.assertEqual((self.owner_dir/name).read_text(), 'old '+name)
         self.assertTrue((self.slot/'app/run_auto.py').exists())
+
+    def test_recovery_deploy_checks_ros_on_inspect_and_twice_before_swap(self):
+        marker = dict(id='b'*32, path=str(self.target), bundle_sha256='1'*64)
+        (self.target/remote.MARKER).write_text(json.dumps(marker))
+        self.mocks['_status'].side_effect = FileNotFoundError(errno.ENOENT, 'control.sock')
+        session = 'd'*32
+        self.mocks['_reload'].return_value = {'owner': {'session': 'e'*32}}
+        owner = dict(session=session, mode='manual', in_flight=False, current_operation=None)
+        with patch.object(remote, '_Gate_ReadIdleOwner', return_value=owner) as probe:
+            with self.assertRaises(FileNotFoundError):
+                remote._inspect(self.target)
+            report = remote._inspect(self.target, for_deploy=True)
+            outcome = remote._commit(self.target, self.ticket, recovery_session=report['recovery_session'])
+            self.assertEqual(probe.call_count, 3)
+        self.assertTrue(outcome['owner_reloaded'])
+        self.mocks['_Client_CheckStatus'].assert_called_once_with(self.target, 'e'*32)
+
+    def test_recovery_refuses_intervening_session_change(self):
+        marker = dict(id='b'*32, path=str(self.target), bundle_sha256='1'*64)
+        (self.target/remote.MARKER).write_text(json.dumps(marker))
+        self.mocks['_status'].side_effect = ConnectionRefusedError(errno.ECONNREFUSED, 'control.sock')
+        with patch.object(remote, '_Gate_ReadIdleOwner', side_effect=[{'session':'d'*32},{'session':'e'*32}]):
+            with self.assertRaisesRegex(RuntimeError, 'Owner changed'):
+                remote._commit(self.target, self.ticket, recovery_session='d'*32)
+        self.mocks['_exchange'].assert_not_called()
+
+    def test_recovery_refuses_unmarked_intact_or_unrelated_socket_errors(self):
+        marker = self.target/remote.MARKER
+        with patch.object(remote, '_Gate_ReadIdleOwner') as probe:
+            self.mocks['_status'].side_effect = FileNotFoundError(errno.ENOENT, 'control.sock')
+            with self.assertRaises(FileNotFoundError):
+                remote._Deployment_Status(self.target, require_idle=True)
+            marker.write_text(json.dumps(dict(id='b'*32, path=str(self.target), bundle_sha256='1'*64)))
+            for error in (PermissionError(errno.EACCES, 'permission'), OSError(errno.ENETDOWN, 'network down'),
+                          TimeoutError('socket'), RuntimeError('R3 identity mismatch')):
+                self.mocks['_status'].side_effect = error
+                with self.subTest(error=error), self.assertRaises(type(error)):
+                    remote._Deployment_Status(self.target, require_idle=True)
+            self.mocks['_status'].side_effect = ConnectionRefusedError(errno.ECONNREFUSED, 'control.sock')
+            for name in ('warm_client.py','run_auto.py','task_runner.py'):
+                (self.target/name).write_bytes(b'# installed')
+            with self.assertRaises(ConnectionRefusedError):
+                remote._Deployment_Status(self.target, require_idle=True)
+            probe.assert_not_called()
+
+    def test_unanswered_installed_client_restores_original_generation(self):
+        self.mocks['_reload'].return_value = {'owner': {'session': 'new'}}
+        self.mocks['_Client_CheckStatus'].side_effect = RuntimeError('warm_client.py status 无回执')
+        with self.assertRaisesRegex(RuntimeError, 'warm_client.py status'):
+            remote._commit(self.target, self.ticket)
+        self.mocks['_Client_CheckStatus'].assert_called_once_with(self.target, 'new')
+        self.assertTrue((self.target/'old.py').is_file())
+        self.assertEqual(self.owner.read_text(), 'old owner')
+
+    def test_sync_failure_before_exchange_preserves_current_files(self):
+        def sync(path):
+            if path == self.slot/'app/warm_client.py':
+                raise OSError('fsync failed')
+        self.mocks['_Path_Sync'].side_effect = sync
+        with self.assertRaisesRegex(OSError, 'fsync failed'):
+            remote._commit(self.target, self.ticket)
+        self.mocks['_exchange'].assert_not_called()
+        self.assertTrue((self.target/'old.py').is_file())
+
+    def test_sync_failure_after_exchange_restores_directories(self):
+        with patch.object(remote, '_Exchange_SyncParents', side_effect=[OSError('fsync failed'), None]) as sync:
+            with self.assertRaisesRegex(RuntimeError, 'fsync failed'):
+                remote._commit(self.target, self.ticket)
+        self.assertEqual(sync.call_count, 2)
+        self.assertTrue((self.target/'old.py').is_file())
+        self.assertEqual(self.owner.read_text(), 'old owner')
+
+    def test_stage_with_accurate_hash_of_empty_client_is_refused(self):
+        (self.slot/'app/warm_client.py').write_bytes(b'')
+        manifest = self.slot/'manifest.json'
+        document = json.loads(manifest.read_bytes())
+        document['files']['app/warm_client.py'] = hashlib.sha256(b'').hexdigest()
+        manifest.write_text(json.dumps(document), encoding='utf8')
+        with self.assertRaisesRegex(RuntimeError, '为空.*warm_client.py'):
+            remote._commit(self.target, self.ticket)
+        self.mocks['_exchange'].assert_not_called()
 
     def test_serial_maintenance_precedes_exchange_and_a_new_session_deploys(self):
         original = b"serial.Serial('/dev/serial0', 9600)"
@@ -159,10 +301,12 @@ class DeploymentTransactionTests(unittest.TestCase):
         doc = json.loads(manifest.read_bytes())
         doc['owner_directory'] = str(self.owner_dir)
         manifest.write_text(json.dumps(doc),encoding='utf8')
+        self.mocks['_Client_CheckStatus'].reset_mock()
         with patch.object(remote, 'DEFAULT_PATH', self.target/'unrelated'), \
                 patch.object(remote, 'SerialReceiver_PrepareShutdown') as maintenance:
             self.assertFalse(remote._commit(self.target, 'e'*32)['owner_reloaded'])
             maintenance.assert_not_called()
+            self.mocks['_Client_CheckStatus'].assert_not_called()
 
     def test_serial_maintenance_refuses_nonregular_source_and_bad_backup(self):
         self.service.unlink()
@@ -200,6 +344,15 @@ class DeploymentTransactionTests(unittest.TestCase):
         for text in ('rollback error', 'newer reload error', str(self.slot)):
             self.assertIn(text, str(failure.exception))
         self.assertTrue((self.target/'run_auto.py').is_file())
+
+    def test_failed_rollback_client_probe_restores_working_generation(self):
+        (self.target/'warm_client.py').write_bytes(b'')
+        remote._commit(self.target, self.ticket)
+        self.mocks['_Client_CheckStatus'].side_effect = RuntimeError('warm_client.py status 无回执')
+        with self.assertRaisesRegex(RuntimeError, 'warm_client.py status'):
+            remote._rollback(self.target)
+        self.assertGreater((self.target/'warm_client.py').stat().st_size, 0)
+        self.assertEqual((self.slot/'app/warm_client.py').stat().st_size, 0)
 
     def _stage_route_upgrade(self, *, customized=False):
         updated = (self.slot/'app/routes.py').read_bytes()

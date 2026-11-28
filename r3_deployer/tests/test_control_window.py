@@ -6,7 +6,7 @@ from threading import Event
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -236,6 +236,25 @@ class ControlWindowTests(unittest.TestCase):
         self.assertFalse(self.view.task_buttons[0].isEnabled())
         self.assertIsNone(self.window._session)
         self.assertEqual(self.window._link, "disconnected")
+
+    def test_initial_connect_retries_only_empty_status_and_stops_after_two_retries(self):
+        empty = {"ok": False, "status": "empty_status_response"}
+        broken = {"ok": False, "status": "control_client_empty", "reason": "warm_client.py 文件为 0 字节"}
+        for replies, label, detail in (([empty, _status()], "已连接", "正在重读"),
+                                       ([empty] * 3, "连接失败", "3 次退出码为 0"),
+                                       ([broken], "连接失败", "0 字节")):
+            with self.subTest(detail=detail):
+                self.view.password.setText("test-credential")
+                status = Mock(side_effect=replies)
+                with patch.object(control_window, "_robot_api", return_value=SimpleNamespace(status=status)), \
+                        patch.object(control_window, "_CONNECT_RETRY_DELAY_S", 0):
+                    self.view.connection_button.click()
+                    self._until(lambda: self.view.connection_label.text() == label)
+                self.assertEqual(status.call_count, len(replies))
+                self.assertIn(detail, self.view.log.toPlainText())
+                self.assertEqual(self.view.task_buttons[0].isEnabled(), label == "已连接")
+                if label == "已连接":
+                    self.view.connection_button.click()
 
     def test_cold_boot_deadline_and_nontransient_errors(self):
         for result, label in ((control_window.SshLinkError("unreachable"), "机器人离线"),

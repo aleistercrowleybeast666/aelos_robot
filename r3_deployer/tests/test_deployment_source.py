@@ -41,6 +41,7 @@ class _HttpsSource:
 class DeploymentSourceTests(unittest.TestCase):
     def setUp(self):
         self.files = {'app/run_auto.py':b'print("main")\n','app/task_runner.py':b'pass\n',
+                      'app/warm_client.py':b'# control entry\n',
                       'owner/'+remote.OWNER_NAME:b'# owner payload\n'}
         self.manifest = _bundle_manifest(self.files)
         self.values = dict(settings.DEFAULTS,remote_url='https://packages.example/bundle/manifest.json')
@@ -100,7 +101,15 @@ class DeploymentSourceTests(unittest.TestCase):
         self.assertEqual(json.loads(manifest),self.manifest)
         self.assertEqual(files,self.files)
         self.assertCountEqual(opener.requests,[(name,None) for name in ('manifest.json',*self.files)])
-        self.assertIn('远程包下载并校验完成，共 3 个文件。',logs)
+        self.assertIn('远程包下载并校验完成，共 4 个文件。',logs)
+
+    def test_status_entry_is_required_even_with_a_consistent_manifest(self):
+        missing = dict(self.files)
+        del missing['app/warm_client.py']
+        with self.assertRaisesRegex(ValueError, 'warm_client.py'):
+            deploy._manifest_files(json.dumps(_bundle_manifest(missing)))
+        with self.assertRaisesRegex(ValueError, '为空.*warm_client.py'):
+            deploy._verify_bundle_file(b'', 'app/warm_client.py', hashlib.sha256(b'').hexdigest())
 
     def test_default_github_reads_one_archive_without_fetching_unrelated_files(self):
         opener = Mock()

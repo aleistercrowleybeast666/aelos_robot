@@ -1,6 +1,8 @@
 import contextlib
 import json
 from pathlib import Path
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import unittest
@@ -214,6 +216,43 @@ class RobotApiTests(unittest.TestCase):
         with patch.object(self.api, '_connection', return_value=self.connection(FakeChannel(exit_code=-1))):
             with self.assertRaises(deploy.SshLinkError):
                 self.api.status()
+
+    @unittest.skipUnless(shutil.which('sh'), 'requires a POSIX shell to exercise the Pi status command')
+    def test_status_command_reports_missing_and_zero_byte_entry(self):
+        with TemporaryDirectory() as directory, patch.object(settings, 'DEFAULT_PI_PATH', '.'), \
+                patch.dict(self.api._values, remote_path='.'):
+            entry = Path(directory)/'warm_client.py'
+            for problem in ('control_client_missing', 'control_client_empty'):
+                with self.subTest(problem=problem):
+                    if problem == 'control_client_empty':
+                        entry.touch()
+                    check, unused_motion = FakeChannel(), FakeChannel()
+
+                    def run_status():
+                        proc = subprocess.run(['sh', '-c', check.commands[-1]], cwd=directory,
+                                              capture_output=True, timeout=5)
+                        check.errors = [proc.stderr]
+                        check.exit_code = proc.returncode
+
+                    check.on_exec = run_status
+                    with patch.object(self.api, '_connection', return_value=self.connection(check, unused_motion)):
+                        result = self.api.start(0)
+                    self.assertEqual(result['preflight']['status'], problem)
+                    self.assertIn('重新部署', result['reason'])
+                    self.assertFalse(result['accepted'])
+                    self.assertFalse(unused_motion.commands)
+
+    def test_only_silent_success_is_a_retryable_status_reply(self):
+        check = FakeChannel()
+        with patch.object(self.api, '_connection', return_value=self.connection(check)):
+            result = self.api.status()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'empty_status_response')
+        failed = FakeChannel(errors=[b'ModuleNotFoundError: transfer_test\n'], exit_code=1)
+        with patch.object(self.api, '_connection', return_value=self.connection(failed)):
+            with self.assertRaisesRegex(RuntimeError, '退出码为 1'):
+                self.api.status()
+        self.assertIn('ModuleNotFoundError: transfer_test', self.logs)
 
     def test_banner_reset_is_friendly_and_auth_rejection_stays_specific(self):
         with TemporaryDirectory() as directory:
